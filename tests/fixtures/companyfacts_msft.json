@@ -1,0 +1,36 @@
+{
+  "cik": "0000789019",
+  "entityName": "MICROSOFT CORP",
+  "facts": {
+    "us-gaap": {
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "label": "Revenue",
+        "description": "Amount of revenue from contract with customer",
+        "units": {
+          "USD": [
+            {"start": "2024-01-01", "end": "2024-12-31", "val": 245100000000, "fy": 2024, "fp": "FY", "form": "10-K"},
+            {"start": "2025-07-01", "end": "2025-09-30", "val": 69500000000, "fy": 2026, "fp": "Q1", "form": "10-Q"},
+            {"start": "2025-07-01", "end": "2025-09-30", "val": 69000000000, "fy": 2026, "fp": "Q1", "form": "10-Q/A"}
+          ]
+        }
+      },
+      "Assets": {
+        "label": "Assets",
+        "description": "Sum of carrying amounts of all assets",
+        "units": {
+          "USD": [
+            {"end": "2024-12-31", "val": 512600000000, "fy": 2024, "fp": "FY", "form": "10-K"}
+          ]
+        }
+      },
+      "EarningsPerShareBasic": {
+        "label": "Earnings Per Share, Basic",
+        "units": {
+          "USD/shares": [
+            {"start": "2024-01-01", "end": "2024-12-31", "val": 11.8, "fy": 2024, "fp": "FY", "form": "10-K"}
+          ]
+        }
+      }
+    }
+  }
+}

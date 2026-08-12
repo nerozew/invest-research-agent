@@ -743,6 +743,403 @@ P01-08 不是在"建立真正的投资数据"，而是在**验证"数据库建�
 
 ---
 
+## P02-01：建立 Tool Protocol、统一结果和错误对象 ✅
+
+**产物**：`src/invest_research/tools/__init__.py`、`src/invest_research/tools/base.py`、`tests/test_tool_protocol.py`
+
+### 3 个知识点
+
+1. **依赖倒置（Dependency Inversion）+ 泛型 Protocol**：`Tool[RequestT, ResponseT]` 用 `typing.Protocol` 定义抽象契约（只有 `name` 和 `execute(request) -> ToolResult[ResponseT]`）。Agent/Flow 只依赖这个抽象，不依赖具体工具类；测试里的 `FakePingTool` 没有继承任何类，仅凭"结构上具备这些成员"就满足契约（结构性类型系统）——这就是"依赖倒置"的代码落地：高层定义契约、低层实现契约、控制流反转。生产环境里这也让"把 fake 换成真实工具时调用方零改动"成为了可能。
+
+2. **泛型 Protocol 的类型变体规则（typed tools 的关键细节）**：Protocol 的泛型参数出现在 `execute` 的参数位（消费输入）时，应声明 `contravariant=True`（逆变）；出现在返回位（产出结果）时，应声明 `covariant=True`（协变）。写反或写成不变量，mypy 会报 `Invariant type variable "RequestT" used in protocol where contravariant one is expected`。这是让"工具契约的类型"真正能被静态检查的必要条件——typed tools 的"typed"就体现在这里。
+
+3. **统一结果对象 = 成功与失败互斥的分离模型**：`ToolSuccess[ResponseT]`（携带类型明确的 Pydantic `value`）与 `ToolFailure`（携带 `ToolError`）是两个独立模型，`ToolResult[ResponseT] = ToolSuccess[ResponseT] | ToolFailure` 联合；两者都用 `extra="forbid"`，`kind` 判别字段分别为 `"success"`/`"failure"`，所以"既成功又失败"的对象在类型与结构上都无法构造。`ToolError.error_code` **复用 `domain.errors.ErrorCode`**，`is_retryable` 委托 `errors.is_retryable`——全项目只有一套错误分类，工具层不建第二套错误码。
+
+### 检查问题（请用自己的话回答）
+`tools/base.py` 里的 `Tool` 为什么用 `Protocol` 而不是 ABC？泛型参数 `RequestT`/`ResponseT` 为什么分别声明为逆变/协变？如果 `ToolSuccess` 和 `ToolFailure` 合并成一个带 `ok: bool` 字段的模型，会出现什么"既成功又失败"或"结果歧义"的漏洞？
+
+**概念讲解记录（2026-08-12，用户追问 Protocol/逆变协变/合并模型的漏洞）**：
+
+**一、Protocol vs ABC**
+- ABC（抽象基类）= 登记制：子类必须显式 `class X(ToolABC)` 继承，才算"是工具"。
+- Protocol = 长相制（结构类型/鸭子类型）：不用继承，只要类有 `name` + `execute(request) -> ToolResult[...]`，就自动被认为满足契约（配合 `@runtime_checkable`，`isinstance(fake, Tool)` 也能通过）。
+- 用 Protocol 的好处：测试里的 fake 可零绑定；高层（Agent/Flow）只依赖"形状"，不依赖具体类——依赖倒置更彻底。一句话：ABC 要血缘，Protocol 看长相。
+
+**二、逆变/协变（吃逆变、吐协变）**
+前提：子类型概念，`Dog ⊂ Animal`。
+- 协变（covariant）：方向一致。`返回 Dog 的函数` 可当 `返回 Animal 的函数` 用（狗确实是动物，读者按动物收也安全）→ 出现**返回位**。
+- 逆变（contravariant）：方向相反。`接受 Animal 的函数` 可当 `接受 Dog 的函数` 用（能处理所有动物的人当然能处理狗）→ 出现**参数位**。
+- 不变（invariant）：只能严格匹配（可变容器如 list，无安全替换）。
+- 口诀：**吃（参数）得宽 → 逆变；吐（返回）得窄 → 协变。**
+- 对应 `Tool`：`RequestT` 在参数位 → `contravariant=True`；`ResponseT` 在返回位 → `covariant=True`。不写 mypy 报 "Invariant type variable used in protocol where contravariant one is expected"——这就是 typed tools 能被机器检查的原因。
+- 用户直觉确认：输入更宽泛（父类 schema 也能满足）✅、输出更具体/受限 ✅——方向正确。
+
+**三、为什么"分开的两个类 + 联合类型"比"合并成一个带 ok: bool 的模型"安全？**
+合并版（假想的坏设计）：
+```python
+class ToolResult(BaseModel):
+    ok: bool
+    value: ResponseT | None = None
+    error: ToolError | None = None
+```
+漏洞不是"布尔二选一"（布尔确实二选一），而是**数据字段不受布尔约束**：
+```python
+ToolResult(ok=True, error=ToolError(...))  # ① 成功却带错误 → 矛盾
+ToolResult(ok=False, value=PingResponse(echo="x"))  # ② 失败却带成功数据 → 矛盾
+ToolResult(ok=True)  # ③ 成功却没有 value → 调用方拿到 None
+```
+- `value`/`error` 是彼此独立、全可选字段，Pydantic 不会自动要求"ok=True 时 value 必有、error 必无"。
+- 调用方每次要写 `if result.ok and result.value is not None`，类型从 `ResponseT` 退化 `ResponseT | None`。
+- 分离模型（我们采用的）：`ToolSuccess` 必有 `value`、`ToolFailure` 必有 `error`、`ToolResult = ToolSuccess | ToolFailure`。类型系统从结构上保证"两样永不同时出现"；再加 `extra="forbid"`，往 `ToolSuccess` 塞 `error` 直接 `ValidationError`（测试 `test_success_and_failure_are_mutually_exclusive` 验证的就是它）。
+- 一句话：**布尔管"成功/失败标记"，管不了"成功数据与失败数据不能共存"；类型系统靠两个类 + 联合把这条规则做死。**
+
+---
+
+## P02-02：建立共享 httpx client 与显式 timeout ✅
+
+**产物**：`src/invest_research/infrastructure/http/__init__.py`、`src/invest_research/infrastructure/http/client.py`、`tests/test_http_client.py`、`settings.py`/`.env.example`（新增 HTTP 配置）、`pyproject.toml`（新增 httpx）
+
+### 3 个知识点
+
+1. **显式超时是"可靠性"的第一个硬约束**：httpx 的 `Timeout` 对象必须显式设置全部四个参数（connect/read/write/pool），否则 httpx 直接抛 `ValueError: must either include a default, or set all four parameters explicitly`。这正好把 docs/04-WORKFLOW-RELIABILITY §5.1 的"连接超时 5s、读取超时 20–90s"变成代码层面的强制——不允许出现"没设超时的网络请求"。共享 client 由工厂 `build_http_client()` 统一创建，携带显式 User-Agent（SEC EDGAR 合规）、跟随重定向，后续所有工具都复用它，不再各自 new client。
+
+2. **HTTP 状态码/异常 → 统一 ErrorCode 映射（复用 domain 错误码）**：对外部 I/O 的错误**分类**集中在两个纯函数：`classify_status_code()`（401/403→AUTH_ERROR、429→RATE_LIMITED、408→NETWORK_TRANSIENT、5xx→UPSTREAM_5XX、其它 4xx→INPUT_INVALID、2xx/3xx→None）与 `classify_http_exception()`（超时/连接错误→NETWORK_TRANSIENT、HTTPStatusError 按状态码、未知→INTERNAL_BUG）。这样工具层拿到的永远是 `domain.errors.ErrorCode`，可重试性直接委托 `is_retryable()`——为 P05-01 重试策略打底，且全项目只有一套错误码。
+
+3. **基础设施层依赖方向（铁律再验证）**：`infrastructure/http/` 只导入 `domain.errors.ErrorCode` 和 httpx，不导入 tools/CrewAI/FastAPI/SQLAlchemy。错误分类是"纯函数 + 现有枚举"，可完全离线单测（用 `httpx.Request`+`httpx.Response` 直接构造异常对象，不发起真实网络请求）。
+
+### 检查问题（请用自己的话回答）
+为什么要用"共享 client 工厂 + 统一错误映射"，而不是让每个工具自己创建 httpx client、自己判断错误？"显式设置全部四个超时参数"和"复用同一套 ErrorCode"分别解决了什么问题？
+
+**概念讲解记录（2026-08-12，用户追问：HTTP client 是什么/是不是模拟前端/为什么要共享）**：
+
+**一、这个 HTTP client 是干嘛的？—— 它不是"模拟前端"！**
+- 它是**向外发起请求的"打电话机"**：本项目系统要主动去 `data.sec.gov`、搜索 API、DeepSeek 等**外部服务**要数据，`httpx.Client` 就是负责发这些请求、收响应的工具。
+- 方向与"前端"完全相反：
+  - **HTTP client（本任务）** = 我们作为**调用方**，主动求外部服务给数据；
+  - **前端/API（P04 才有）** = 我们是**被调用方**，等别人（浏览器/分析师）来访问 `GET /v1/research-jobs`。
+- 打个比方：HTTP client 像"你要给 SEC 打电话查资料"的电话机；前端是"别人打到你公司总机的分机"。一个是打出去，一个是接进来。
+- 所以这个项目"没有前端"不影响 HTTP client——它跟浏览器无关，是**后端去消费外部 API 的通道**。等 P04 补 FastAPI 时，那是"接进来"的另一套东西。
+
+**二、为什么所有工具"共享同一个 client 工厂"，而不是各自 new？**
+每个工具各自 `httpx.Client()` **不会"并发打起来"**（并发冲突不是主因），真正的原因是三个工程问题：
+1. **配置统一（一处管全部）**：SEC 合规要求 UA 必须带联系邮箱；超时必须有值。如果每个工具各自建，有的忘了设 UA、有的设成 3 秒、有的设成 90 秒——**配置漂移**，行为不一致。
+2. **连接池复用（性能）**：`httpx.Client` 内部维护连接池。共享同一个 client，多次请求可**复用 TCP 连接**；每个工具各自 new，每次请求都重新建连，慢且耗资源。
+3. **错误语义统一（重试决策一致）**：P05 的重试器只会看 `ErrorCode`。如果 SEC 工具把 429 当"可重试"、搜索工具把 429 当"直接放弃"，重试策略就没法统一写。共享映射函数保证：**429 到哪儿都是 RATE_LIMITED，超时到哪儿都是 NETWORK_TRANSIENT**。
+
+补充：`httpx.Client` 是**线程安全、可跨协程共享**的——共享不会增加"并发混乱"，反而把"怎么配、怎么判错"收敛到一处。这正是 P02-02"共享工厂 + 统一错误映射"的价值：**配置、连接、错误判断三个维度都只写一次**。
+
+**概念澄清记录（2026-08-12，用户追问：HTTP client 是连接 VPN 吗？HTTP client 与前端职责如何划分？）**：
+
+**一、不是 VPN！是调用 "Web API"（REST 接口）**
+- VPN 是**网络层的隧道**（把两台机器/两个网络连成一张"私网"，常见于翻墙/连公司内网）——它管"怎么把网络包送过去"。
+- HTTP client 是**应用层的 API 调用**：用 HTTP 协议向某个服务的 URL（如 `https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json`）发请求、拿响应（通常是 JSON/HTML）——它管"业务上要什么数据、怎么要"。
+- 两者完全不同层：VPN 是"修路"，HTTP API 调用是"在路上跑的一辆送数据的车"。本项目不涉及 VPN。
+
+**二、"操控其他 Web API 吗？" —— 对，但不叫操控，叫"消费/调用"**
+- 更准确的说法：我们的后端用 HTTP client **消费（consume）外部 Web API**——只读地要数据（SEC 的公开财报、搜索结果），"操控"通常暗示有写权限/改状态，我们主要是 GET 拉数据。
+
+**三、HTTP client 和前端的职责边界（本项目架构）**
+用户理解"前端收集数据→请求后端→后端返回→前端渲染"大体正确，但有一个关键修正：
+- **前端不直接连外部 API**（不直接调 `data.sec.gov` 或搜索 API）。原因：
+  1. **密钥安全**：API key 若放前端 JS，任何人打开浏览器就能看到——这是致命泄露；
+  2. **CORS 限制**：第三方 API 通常禁止浏览器跨域直接调用；
+  3. **治理集中**：缓存、限流、脱敏、错误重试（P05）必须在后端统一做，前端做不到也不该做。
+- 所以正确链路是：**前端/CLI → 我们的后端（FastAPI，P04 才有）→ HTTP client → 外部 Web API**。外部数据先到后端，后端整理/存库/脱敏后再给前端渲染。
+- 一句话分层：**前端管"展示与交互"、后端管"业务与外部数据"、HTTP client 是后端的手去摸外部 API**。这个 client 属于后端内部细节，前端完全接触不到。
+
+---
+
+## P02-03：实现 SEC User-Agent 与全局限流器 ✅
+
+**产物**：`src/invest_research/infrastructure/http/ratelimit.py`、`tests/test_ratelimit.py`、`settings.py`/`.env.example`（新增 `sec_rate_limit_per_second`）、`http/__init__.py`（导出限流器）
+
+### 3 个知识点
+
+1. **Token Bucket（令牌桶）限流原理**：桶容量 = 每秒钟速率，`acquire()` 消耗 1 个 token；token 随时间按速率补充但不超过桶容量。因此它允许"突发"（初始满桶可连发 rate 次），但长期平均速率被严格限制为 rate/s——既满足 SEC 合规（5 req/s 项目安全上限），又允许短时突发提升吞吐。这是与"固定窗口/漏桶"不同的一种平滑限流。
+
+2. **依赖注入时钟（模拟时钟可测）**：`SleepableClock` Protocol 提供 `time()/sleep()`，真实实现 `RealClock` 委托 `time.monotonic()`；测试用 `FakeClock` 手动推进时间，**不依赖真实 sleep**（对齐 docs/04 §5.1"测试不得依赖真实等待时间"）。这让"匀速 20 次请求永不超限""突发被限后推进时间可恢复"等时序断言秒级跑完、完全确定。
+
+3. **SEC 合规是显式上限而非官方默认**：官方 SEC 当前上限 10 req/s，但项目自设安全上限 5 req/s（`sec_rate_limit_per_second=5.0`），留出一半余量避免触发官方 429。限流器是"全局"的——所有 SEC 工具共享同一个实例，避免"每个工具各自限流导致总并发超限"。
+
+### 检查问题（请用自己的话回答）
+Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？为什么测试要用可注入的 `FakeClock` 而不是真实 `time.sleep`？项目为什么要把 SEC 限流设成 5 req/s 而不是直接用官方的 10 req/s？
+
+**用户复述记录（2026-08-12，三个问题均未掌握，故先给出完整通俗解答）**：
+1. **什么是 SEC**：SEC = 美国证券交易委员会，公开财报的官方出处（data.sec.gov）。我们的 SEC 工具要主动去它那里拉公司财报数据。
+2. **Token Bucket 为什么"允许突发但不违反长期平均"**——用"往杯子里接水"类比：
+   - 杯子容量 = 速率 5 = 最多装 5 滴水（token=许可）；
+   - 每发一个请求喝掉 1 滴水；水龙头以每秒 5 滴的速度补充，但杯子最多只能装 5 滴（满了就溢出，多余的存不下来）；
+   - 所以"长时间不用 → 杯子满 → 突然连发 5 个请求"是允许的（突发）；但一直连续发就会很快喝干，必须等水龙头补充——**长期来看平均就是每秒 5 个**。
+   - 一句话：**突发 = 消耗平时攒下的"存款"；长期平均 = 收入（补充速率）被锁死**。
+3. **为什么用 FakeClock 不用真实 sleep**：
+   - `FakeClock` 是**把"时间"模拟出来的假时钟**——不真等，直接让 `sleep(1.0)` 假装过了 1 秒；
+   - 好处：测试想验证"等 1 秒后恢复"，真实 sleep 要真等 1 秒，20 次测试就等很多秒；FakeClock 一秒都不用等、结果完全可预测（不依赖机器快慢），对齐"测试不得依赖真实等待时间"；
+   - 类比：验证"水龙头一分钟能流多少水"，FakeClock = 直接拨快表，不用真等一分钟。
+4. **为什么 SEC 设 5 而不是 10 req/s**：
+   - SEC 官方上限 10 req/s（超过就 429 封禁），但那是**天花板**，不是建议值；
+   - 我们的系统还有重试、多个工具并发、网络波动——贴着天花板容易一超就踩雷；
+   - 设 5 req/s 留一半余量：正常跑够用，突发/重试时也不容易碰到 429。工程上叫"留安全边际"。
+→ 用户要求：先给答案，再进入下一步（P02-04）。
+
+---
+
+## P02-04：实现 `CompanyResolverTool`（名称/ticker → 10 位 CIK；歧义返回候选） ✅
+
+**产物**：`src/invest_research/tools/company_resolver.py`（`ResolveCompanyRequest`/`ResolveCompanyResponse`/`CompanyIndex`/`CompanyResolverTool` + `_SEC_TICKER_FIXTURE`）、`tests/test_company_resolver.py`（8 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+
+1. **实体解析的"歧义不猜测"铁律**：`lookup()` 命中多个候选时返回 `ResolveCompanyResponse(resolved=False, candidates=[...])`，交用户选择，绝不静默挑第一个（对齐 PRD FR-002 与 .clinerules"歧义返回候选"）。这与错误码 `COMPANY_AMBIGUOUS` 的语义呼应——歧义不是"失败"而是"需要用户决策"的结果。
+
+2. **本地 fixture 先行（外部服务 mock/fixture）**：P02-04 验收是"MSFT → 10 位 CIK"，用内置 `_SEC_TICKER_FIXTURE` 驱动，**不发起真实网络请求**——真实 SEC submissions 调用留给 P02-05。这符合 .clinerules"外部服务必须使用 mock/fixture"，也让契约测试完全离线、秒级完成。分析出"范围该拆到哪"本身就是设计能力。
+
+3. **工具=数据索引 + 策略的组合**：`CompanyIndex` 是纯数据索引（大小写不敏感 key → 候选列表），`CompanyResolverTool` 是编排策略（唯一→成功、歧义→候选、无→失败）。两者分离让索引可复用、策略可单测，且 `CompanyResolverTool` 满足 P02-01 Tool 契约（`name` + `execute` → `ToolResult`）。
+
+### 检查问题（请用自己的话回答）
+为什么"歧义"返回成功（`ToolSuccess` + `resolved=False`）而不是失败（`ToolFailure`）？`CompanyIndex` 与 `CompanyResolverTool` 分开设计有什么好处？P02-04 为什么用本地 fixture 而不是直接调真实 SEC API？
+
+**用户复述记录（2026-08-12，重点讲解：工具定位/歧义语义/索引与策略分离/为何本地 fixture）**：
+1. **工具定位**：`CompanyResolverTool` 是业务层（application/domain）可调用的一个"实体解析工具"，输入公司名/ticker，输出 CIK 或候选——不是前端组件，是后端业务处理时"左手"的一个工具，服务端处理业务时会调用它。✅（用户理解正确）
+2. **歧义为什么返回成功而非失败**：歧义不是"失败"，是"需要用户决策"的合法结果——`ToolFailure` 表示"这事儿没做成/出错了"；而歧义我**确实拿到了候选**，只是需要用户挑。所以返回 `ToolSuccess` + `resolved=False` + 候选列表，让调用方知道"去问用户选哪个"。✅（用户理解正确："是歧义不是失败，交给用户自己处理"）
+3. **CompanyIndex 与 CompanyResolverTool 分开的好处**：
+   - `CompanyIndex` 是**纯数据容器**（只负责"查表"：key→候选），可被其他工具/服务复用，不掺杂业务决策；
+   - `CompanyResolverTool` 是**策略/编排**（负责"拿到结果怎么判定"：唯一→成功、多→候选、无→失败）；
+   - 好处：①各自可独立测试（数据索引测命中，策略测判定）；②换数据源只改 Index（如换真实 SEC 数据），策略不用动；③职责单一、可复用——"数据是什么"与"数据怎么用"解耦。
+4. **为什么 P02-04 不直接调真实 SEC API**（纠正用户两个小误解）：
+   - **HTTP client 其实已经搭好了**（P02-02 的 build_http_client / P02-03 的限流器都存在）——不是"没搭好"；
+   - 真正原因是 .clinerules 规定："**外部服务必须使用 mock 或 fixture**"，除非任务明确要求测真实服务。P02-04 的范围就是"本地实体解析 + 契约验证"，真实 SEC submissions 调用属于 **P02-05**；
+   - **限流器并非"没意义"**：它已独立写好、有模拟时钟测试覆盖；等 P02-05 真调 SEC 时直接复用即可——这就是"先把能力造好、再组合使用"的渐进式开发。✅
+→ 用户要求：重点解答后进入下一步（P02-05，真实 SEC submissions 调用）。
+
+---
+
+## P02-05：实现 `SECSubmissionsTool`（截止日过滤 + 10-K/10-Q 选择） ✅
+
+**产物**：`src/invest_research/tools/sec_submissions.py`、`tests/fixtures/sec_submissions_msft.json`、`tests/test_sec_submissions.py`（4 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+1. **依赖倒置注入 client**：`SECSubmissionsTool(client)` 构造时注入 `httpx.Client`——生产用 `build_http_client()`，测试用 `httpx.MockTransport`。工具不自己建 client、不读 settings，可完全离线、可替换。
+2. **截止日语义**：`filing_date <= as_of_date`（"截至某日可获得的申报"）；表单**精确等于** 10-K/10-Q（`10-K/A` 不算 10-K）；结果按申报日期降序。
+3. **URL 构造与错误归一**：primary URL = Archives/edgar/data/{无前导零CIK}/{accession去连字符}/{primaryDoc}；HTTP 错误经 `classify_http_exception`/`classify_status_code` 归一到 `ErrorCode`。
+
+### 检查问题（请用自己的话回答）
+为什么工具构造时注入 client 而不是自己创建？"截止日当天或之前"用 `<=` 而非 `<` 的语义是什么？为什么 `10-K/A` 不能当 `10-K` 用？
+
+---
+
+## P02-06：实现 `SECCompanyFactsTool`（XBRL 财务事实保真解析） ✅
+
+**产物**：`src/invest_research/tools/sec_company_facts.py`、`tests/fixtures/companyfacts_msft.json`、`tests/test_sec_company_facts.py`（5 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+1. **XBRL/taxonomy/concept 保真解析**：Company Facts 返回的是"某分类法（如 us-gaap）下每个 concept（收入/资产…）在各单位/期间的值"。工具只做**保真映射**——把 taxonomy/concept/unit/period/form 原样放进 `domain.FinancialFact`，不做任何计算（计算留给 P02-15/16 的指标工具）。
+2. **期间型 vs 时点型（XOR）**：有 `start`+`end` 的 fact 是 duration（`period_start/end`）；只有 `end` 的是 instant（`instant_date`）。解析时严格二选一，正好复用 `FinancialFact` 模型自带的 XOR 校验。
+3. **脏数据容错**：单条 fact 缺 `val`/日期非法时跳过（`try/except`），不影响整体解析——外部数据源可能混入坏行，工具要"整体可解析"而非"一条坏全崩"；错误仍经 `classify_http_exception`/`classify_status_code` 归一。
+
+### 检查问题（请用自己的话回答）
+为什么"保真解析"强调不做计算？期间型（start+end）与 时点型（仅 end）在 XBRL 里分别代表什么财务语义？为什么解析时遇到单条脏数据要跳过而不是整体失败？
+
+---
+
+## P02-07：实现 URL 规范化与来源去重（纯函数） ✅
+
+**产物**：`src/invest_research/tools/urls.py`（`canonicalize_url`/`deduplicate_sources`）、`tests/test_urls.py`（6 测试）
+
+### 3 个知识点
+1. **canonical URL（规范化 URL）**：同一页面的不同写法（带 utm、大小写 host、默认端口、乱序 query、片段）应归一到同一串，才能做"来源去重"——对应 `sources.canonical_url` UNIQUE 约束的前置。`canonicalize_url` 用 `urllib.parse` 纯函数完成：去 tracking 参数、host 小写、去默认端口、query 按键排序、去片段。
+2. **去重策略（保留首个，剔除无效）**：`deduplicate_sources` 按 canonical URL 去重并保持首次出现顺序；空/无法解析的 URL 返回 None 被剔除。这是"来源目录唯一"的领域层保障（数据库 UNIQUE 是最终防线，先规范化再入库）。
+3. **纯函数可测性**：本模块不依赖网络/框架，`urllib.parse` 是标准库——6 个测试秒级跑完，覆盖 tracking 剔除、host/端口、片段、query 排序、非法输入、去重。
+
+### 检查问题（请用自己的话回答）
+为什么"去重"必须先做 URL 规范化而不是直接比较字符串？`canonicalize_url` 返回 `None` 表示什么？query 参数为什么要按键排序？
+
+---
+
+## P02-08：实现 `FilingDownloaderTool`（安全下载 + 校验） ✅
+
+**产物**：`src/invest_research/tools/sec_downloader.py`、`tests/test_sec_downloader.py`（4 测试）
+
+### 3 个知识点
+1. **安全下载四道闸**：注入 client 请求 → 非 2xx 归一错误 → 超大小上限拒绝（INPUT_INVALID）→ 媒体类型白名单拒绝（DOCUMENT_UNSUPPORTED）→ 成功返回内容+sha256 checksum（供去重/校验）。
+2. **checksum（校验和）**：sha256 对内容生成固定指纹；同内容必有同 checksum，可用于来源去重、损坏检测、工件完整性（对应 sources.content_checksum / artifacts.content_checksum）。
+3. **注入 client + MockTransport**：工具自己不建 client；测试用 MockTransport 返回内存字节，不写盘、不联网，秒级验证成功/超限/类型/429 四路径。
+
+### 检查问题（请用自己的话回答）
+为什么下载要同时限制"大小上限"和"媒体类型白名单"？sha256 checksum 有什么用？工具为什么要注入 client 而不是自己创建？
+
+---
+
+## P02-09：实现 SEC HTML 解析器（标准库、保留标题/文本/locator） ✅
+
+**产物**：`src/invest_research/tools/sec_html_parser.py`、`tests/test_sec_html_parser.py`（4 测试）
+
+### 3 个知识点
+1. **标准库 `html.parser` 实现**：零新增依赖；回调 `handle_starttag/endtag/data` 收集可见文本，识别 h1-h6 为标题块；用 `_skip_depth` 跳过 script/style 内容。
+2. **保留结构化信息**：每块带 `is_heading`（是否标题，对应章节）与 `location`（累计偏移 locator），供 citation/locator（P02-19）与 document_chunks 检索分块使用。
+3. **空白规范 + 跳脏**：连续空白/换行归一为单空格；script/style 脚本不进入正文块——"正文可读、脚本隔离"。
+
+### 检查问题（请用自己的话回答）
+为什么解析器要跳过 `<script>`/`<style>`？`location`（累计偏移）有什么用？标准库 `HTMLParser` 与第三方库（如 BeautifulSoup）的取舍是什么？
+
+---
+
+## P02-10：实现 PDF 解析器主路径（PyMuPDF） ✅
+
+**产物**：`src/invest_research/tools/pdf_parser.py`、`tests/test_pdf_parser.py`（3 测试）、`pyproject.toml`（新增 pymupdf）
+
+### 3 个知识点
+1. **PyMuPDF（fitz）主路径**：用 `fitz.open(stream=bytes, filetype="pdf")` 在内存打开 PDF；`page.get_text()` 逐页取文本，保留 1-based 页码（供 citation locator）。
+2. **错误边界**：无效/非 PDF 字节 → `PDFParseError`；加密 PDF → `PDFParseError`；空白页（无文字）→ 跳过不报错。让"解析失败"与"解析为空"可区分。
+3. **按需类型豁免**：PyMuPDF 无 mypy stub，在导入处 `# type: ignore[import-untyped]` 精准豁免（沿用"不全局忽略缺失 stub"的工程决策）。
+
+### 检查问题（请用自己的话回答）
+为什么 PDF 解析用 PyMuPDF 而 HTML 用标准库 `html.parser`？`PDFParseError` 与"空白页返回空 blocks"分别代表什么（失败 vs 空结果）？`type: ignore[import-untyped]` 为什么不改为全局 `ignore_missing_imports`？
+
+---
+
+## P02-11：实现 PDF/HTML 解析降级路由（parser router / fallback pattern） ✅
+
+**产物**：`src/invest_research/tools/parser_router.py`（`ParseOutcome`/`DocumentParseError`/`parse_document`）、`tests/test_parser_router.py`（14 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+
+1. **Fallback pattern（降级模式）的本质是"精确的一次性回退"**：主解析器失败时，备用解析器**恰好调用一次**，绝不循环重试同一文件。实现上用 依赖注入的 `html_parser`/`pdf_parser` 可调用对象 + 测试 spy 计数，构造出"主成功→备用完全不调用""主失败→备用恰好一次"两类确定性证明。这与 docs/04 §5.1"PDF 主解析器一次、备用一次，不对同一损坏文件循环重试"完全一致。
+
+2. **降级不是无条件双向，而是受控单向**：只允许 `PDF → HTML`（PDF 主解析抛 `PDFParseError` 且内容确为可解码文本时，把字节交给 HTML 解析器）。HTML 主路径失败**不**反向走 PDF——HTML 字符串不是 PDF，无条件双向没有收益且违背类型确定性。判断"能否降级"用 `_is_degradable_text`：严格 UTF-8 可解码 + 无 NUL 控制字节，防止把二进制/加密 PDF 的乱码当 HTML 解析。
+
+3. **路由层用判别联合（discriminated union）而非统一模型**：`ParseOutcome(kind: "html"|"pdf", document: ParsedDocument|ParsedPDF, parser_name, degraded_from)` 让调用方按 `kind` 收窄类型，**不修改** P02-09 的 `ParsedDocument`/P02-10 的 `ParsedPDF` 契约；`degraded_from` 记录降级来源（审计/日志用）。路由只显式捕获 `PDFParseError`，未知异常向上传播，不静默吞错（对齐 .clinerules/02）。
+
+### 检查问题（请用自己的话回答）
+`parse_document` 用"依赖注入解析器 + spy 计数"如何证明"主成功时备用完全不调用"与"主失败时备用恰好一次"？为什么降级只做 `PDF → HTML` 单向而不做双向？NUL 控制字节在 `_is_degradable_text` 里起什么作用？
+
+---
+
+## P02-12：实现本地 `ArtifactStoreTool`（原子本地存储） ✅
+
+**产物**：`src/invest_research/tools/artifact_store.py`（`ArtifactStore`/`ArtifactStoreRequest`/`ArtifactStoreTool`/`ArtifactRef`）、`tests/test_artifact_store.py`（27 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+
+1. **原子写（atomic write）= 同目录临时文件 + fsync + `os.replace`**：临时文件必须与目标**同一目录**（保证 `os.replace` 在同一文件系统内原子），写完 `flush()` + `os.fsync()` 强制落盘后才 `os.replace` 改名——成功前外界看不到目标文件，失败则清理临时文件，不留下半成品。这对应 docs/03 §6"文件先写临时名，checksum 成功后原子改名"。
+2. **安全 key = 双重防路径穿越**：`_validate_artifact_key` 拒绝 `..` 段、绝对路径、反斜杠、空白与危险符号；`_resolve` 再把解析后的路径与存储根目录做 `is_relative_to` 校验。**校验在"生成即合法"层（弃错）+ 解析在"使用即合规"层（双重保险）** 与 P01-02 模型校验思路一致。
+3. **判别请求（discriminated request）保持 P02-01 契约单一**：用 `operation: Literal["write","read","list"]` 单模型 + `model_validator` 约束各操作字段，而不是三个独立请求类——因为 P02-01 的 `RequestT` 是单个 `BaseModel` 泛型；单模型天然满足契约，`execute(request) -> ToolResult[ArtifactOperationResponse]` 类型干净。
+
+### 检查问题（请用自己的话回答）
+为什么临时文件必须与目标文件放在**同一目录**？`os.replace` 的"原子性"具体指什么？`_validate_artifact_key` 与 `_resolve` 的两道防线分别防什么？为什么 P02-12 用"判别请求单模型"而不是三个独立请求类？
+
+---
+
+## P02-13：实现财务 concept 映射配置（versioned mapping） ✅
+
+**产物**：`src/invest_research/financial/__init__.py`、`src/invest_research/financial/concept_mapping.py`（`ConceptMappingEntry`/`ConceptMapping`/`load_concept_mapping`/`select_concept`）、`src/invest_research/financial/mappings/concepts_v1.json`、`tests/test_concept_mapping.py`（10 测试）
+
+### 3 个知识点
+
+1. **versioned mapping = 数据即配置 + 版本可追溯**：指标的 concept 候选表不硬编码在代码里，而是放进带 `version: concept_mapping_v1` 的 JSON 数据文件；Pydantic 在加载时强制 version 必填（缺 version 即失败）。这样：①换口径只改数据文件不改代码；②配合 P05-04 输入失效，schema/口径版本变化 → 下游指标必须重算。
+2. **同义 concept 的优先级选择**：`select_concept` 按候选表顺序返回 `available_concepts` 中第一个命中的 concept——us-gaap 标准（如 `RevenueFromContractWithCustomerExcludingAssessedTax`）在前、旧标准别名/公司扩展在后；无匹配返回 `None`（禁止臆造，交给计算层 `not_computable`），而不是硬凑一个。
+3. **配置非法要在加载期 fail-fast**：`ConceptMappingEntry` 用 Pydantic validator 拒绝"空 metric_name / 空候选 / 重复候选"；`ConceptMapping` 拒绝缺 version。配置错误在 CI/启动即暴露，而不是运行到某家公司财报时才发现映射缺陷。
+
+### 检查问题（请用自己的话回答）
+"versioned mapping" 为什么要把候选表放到带版本号的 JSON 数据文件而不是写死在代码里？`select_concept` 按优先级返回第一个命中，与"公司扩展 concept 与 us-gaap 标准共存"有什么关系？为什么无匹配必须返回 `None` 而不是随便挑一个？
+
+---
+
+## P02-14：实现可比期间选择器（pure functions） ✅
+
+**产物**：`src/invest_research/financial/period_selector.py`（`PeriodPreference`/`select_facts_for_period`/`select_report_period`）、`tests/test_period_selector.py`（12 测试）
+
+### 3 个知识点
+
+1. **期间可比性的本质是"先过滤、再去重、再按偏好排序"**：`select_facts_for_period` 三步走——① 只保留 `concept` 匹配 + 期间型（start+end 均非空）+ `period_end <= as_of` 的 fact；② 按 `(start, end)` 分组，组内修订申报（form_type 以 `/A` 结尾）优先（同一期间去重）；③ 对代表期间按偏好 `min/max` 排序选最优。`as_of` 过滤是第一步，防止使用"未来/未结束"期间。
+2. **三种偏好的排序键设计**：QUARTERLY = 最短优先（`(days, -end)` 取 min）；YTD = 最长优先（`(days, end)` 取 max）；ANNUAL = 最新 period_end 优先、长度其次接近 365 天（容 52/53 周财年）。这正好覆盖路线图"52/53 周、季度/YTD"三类场景。
+3. **模型层与选择器的分工边界（真实踩坑）**：测试最初假设"缺 period_start 的期间型会被 Pydantic 拒绝"，实测发现 `FinancialFact` 的 XOR 校验只约束"期间与时点不能同时存在"，**允许只有 end 无 start 的对象**。因此选择器在 `duration_facts` 过滤里显式要求 `period_start is not None`——防御性编码不能依赖"模型一定帮我挡住了"。
+
+### 检查问题（请用自己的话回答）
+为什么选择器要先按 `period_end <= as_of` 过滤？"同期间去重 + 修订版优先"与 `10-K/A` 语义有什么关系？`FinancialFact` 模型允许"只有 end、缺 start"时，选择器为什么还要自己再挡一次？
+
+---
+
+## P02-15：实现 5 个利润与增长指标（Decimal / 版本化公式） ✅
+
+**产物**：`src/invest_research/financial/metrics.py`（`FORMULA_VERSION` + 5 个纯函数）、`tests/test_profit_growth_metrics.py`（14 测试）、`src/invest_research/domain/models.py`（`MetricResult.value` 移除 `gt=0`）
+
+### 3 个知识点
+
+1. **负增长率/负利润率是合法业务**：测试直接暴露了领域模型缺陷——`MetricResult.value` 原设 `gt=0`，导致"收入下降 -20%"和"经营亏损 -10%"无法构造（Pydantic 拒绝）。PRD §8 明确要求增长率/利润率允许负值，故移除 `gt=0`；这验证了"契约测试应能发现领域模型的语义缺口"。
+2. **零分母/缺失 → NOT_COMPUTABLE 而非臆造**：所有 5 个指标在分母为 0 或输入缺失时返回 `MetricStatus.NOT_COMPUTABLE`、`value=None`、`explanation` 记录原因——对齐 PRD "分母为零/口径不可比时返回 not_computable，禁止臆造数值"。
+3. **增长率公式分母用 `abs`**：`(current - prior) / abs(prior)` 使上期为负时也能表达"亏损收窄/扭亏"（如 -50 → 100 为增长 300%），符合 PRD §8 的公式范围。
+
+### 检查问题（请用自己的话回答）
+为什么增长率公式分母要用 `abs`？零分母为什么返回 `NOT_COMPUTABLE` 而不是 `inf`？`MetricResult.value` 为什么不能设 `gt=0`？
+
+---
+
+## P02-16：实现 5 个资产负债/现金流指标（Decimal / 版本化公式） ✅
+
+**产物**：`src/invest_research/financial/metrics_balance.py`（`FORMULA_VERSION_BALANCE` + 5 个纯函数）、`tests/test_balance_cashflow_metrics.py`（19 测试）
+
+### 3 个知识点
+
+1. **单位冲突校验是不可混算的防线**：比值/差额类指标（流动比率、FCF 等）若两个输入同时提供单位且不一致（如 USD vs EUR），返回 `NOT_COMPUTABLE`——因为"100(USD) - 40(EUR)"没有任何财务意义。实现用 `_normalize_unit`（去空白/小写/空串→None）+ `_units_conflict`（仅两者都有值且不同才判冲突）。
+2. **"零分母/缺失 → NOT_COMPUTABLE"与"负值合法"两条规则并存**：负债/资产/收入为 0 时不可计算；但 ROA、经营现金流率、自由现金流**允许负值**（亏损、现金流为负是真实业务）——这点在 P02-15 已通过移除 `MetricResult.value.gt=0` 落地，本任务直接复用。
+3. **ROA 用平均总资产 `(期初+期末)/2`**：时点型数据（总资产）取期初期末平均，比直接用期末更接近"该期间实际使用的资产规模"；平均资产为 0（期初+期末都 0）→ NOT_COMPUTABLE。
+
+### 检查问题（请用自己的话回答）
+为什么两个输入单位不一致时必须 `NOT_COMPUTABLE` 而不是任意选择一个单位换算？ROA 为什么用平均总资产而不是期末总资产？`_units_conflict` 在"其中一个单位缺失"时返回 False 的语义是什么？
+
+---
+
+## P02-17：实现 `GoogleSearchTool` provider interface（anti-corruption layer） ✅
+
+**产物**：`src/invest_research/tools/google_search.py`（`SearchProvider`/`SearchQuery`/`SearchResult`/`SearchResponse`/`GoogleSearchTool`）、`tests/test_google_search.py`（10 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+
+1. **anti-corruption layer（防腐层）**：`SearchProvider` 抽象接口 + 统一 Pydantic 契约，业务代码只依赖接口、不依赖任何具体提供商（Serper/Google 等）的响应结构——将来换提供商只加一个 adapter，业务零改动。fake provider 零绑定即可通过 `isinstance(provider, SearchProvider)` 结构匹配（`__subclasshook__` 检查 MRO 是否有 `search`），同时抽象方法保证不能直接实例化。
+2. **结果规范化：canonical URL 去重**：`GoogleSearchTool.execute` 复用 P02-07 `canonicalize_url`，以 canonical 为 key 保留首个结果并把保留项 url 替换为 canonical 形式——与 `sources.canonical_url` 唯一约束前置一致；无效 URL 被剔除。
+3. **结构协议 + mypy 豁免的平衡**：`__subclasshook__` 需返回 `NotImplemented` 让 ABCMeta 继续默认判断，但 mypy 对 `NotImplemented` 推断为 Any → 报 `no-any-return`。用 `# type: ignore[no-any-return]` 按需豁免（与 P02-10 的 `ignore[import-untyped]` 同一原则：精准豁免而非全局关检查）。
+
+### 检查问题（请用自己的话回答）
+"anti-corruption layer" 解决什么问题？`__subclasshook__` 检查 MRO 是否含 `search` 与"鸭子类型"有什么关系？为什么去重后要把 url 替换为 canonical 形式？
+
+**概念讲解记录（2026-08-12）**：
+1. **鸭子类型（Duck Typing）**：不看血缘看长相——只要对象有 `search` 方法就可当 provider 用（`FakeSearchProvider` 不继承任何类）。"如果它走起来像鸭子、叫起来像鸭子，那它就是鸭子。"
+2. **结构协议 & `__subclasshook__`**：`isinstance(fake, SearchProvider)` 默认只认继承；`__subclasshook__` 让我们自定义"是否子类"——沿 `subclass.__mro__` 家族谱找是否有 `search` 方法，有则返回 True。`abstractmethod` 保证接口本身不能被实例化（`SearchProvider()` 抛 TypeError）。最后 `return NotImplemented` 是"拿不准交还 Python 引擎"，不是布尔 False（避免误伤真正继承的子类）；mypy 对 `NotImplemented` 报 `no-any-return`，用 `# type: ignore[no-any-return]` 精准豁免（与 P02-10 同原则）。
+3. **防腐层（Anti-Corruption Layer）**：在"我的系统"和"外部服务"之间加一堵翻译墙——接口 `SearchProvider` + 统一 Pydantic 契约 + 每供应商一个 adapter；业务只依赖接口，换供应商只加 adapter、业务零改动，外部结构变化不污染领域模型。
+4. **canonical URL 替换**：先 `canonicalize_url` 归一（去 utm/大小写/默认端口/排序 query/去片段），以 canonical 为 key 去重保留首个；再把保留项的 url 替换为 canonical（`model_copy(update=...)`，因为 frozen 不可原地改）——否则下次查重/入库又会撞上规范化问题，数据库 `sources.canonical_url` UNIQUE 约束也无法生效。`canonicalize_url` 返回 None 表示 URL 无效（直接剔除）。
+
+---
+
+## P02-18：实现 Serper provider adapter（mocked contract test） ✅
+
+**产物**：「src/invest_research/tools/serper_adapter.py」（``SerperConfig``/「SerperAdapter/SERPER_ENDPOINT」）、「tests/test_serper_adapter.py」（6 测试）、「tools/__init__.py」（导出）
+
+### 3 个知识点
+
+1. **SecretStr 认证脱敏：密钥只在请求头，不进日志/异常**：`SerperConfig.api_key` 用 Pydantic `SecretStr`，`str()/repr()` 输出不泄露明文；只在发请求的一刻随 `X-Api-Key` 头发送。这让"认证信息不在消息/异常中出现"成为结构性保证（对齐 P00-05 密钥不进日志）。
+2. **adapter 只做"翻译"，错误交给上层**：SerperAdapter 实现 SearchProvider、把 SearchQuery 翻译成 Serper HTTP 请求、把 organic JSON 翻译成 SearchResult；仅 HTTP 异常直接抛出（由上层 GoogleSearchTool 统一归一为 ToolFailure）。"每一层只负责自己的担当"是防腐层的演练。
+3. **日期解析用多格式尝试 + as_of 筛选**：Serper 的 date 是人类可读字符串（"Jun 1, 2025"），用多个 strptime 格式尝试解析；无法解析时回退 as_of（不造假、仅兜底），并按 as_of 过滤（与 P02-17 契约一致）。
+
+### 检查问题
+为什么 api_key 用 SecretStr 而不是普通 str？adapter 为什么 HTTP 错误直接抛出而不自己返回 ToolFailure？无法解析 Serper date 时回退 as_of"不造假、仅兜底"的含义是什么？
+
+---
+
+## P02-19：实现 `CitationVerifierTool`（claim/source/locator） ✅
+
+**产物**：`src/invest_research/tools/citation_verifier.py`（`verify_claim`/`CitationVerifierTool`/`CitationCheckRequest`/`CitationCheckResult`/`CitationSourceRef`）、`tests/test_citation_verifier.py`（9 测试）、`tools/__init__.py`（导出）
+
+### 3 个知识点
+
+1. **纯函数 + 工具包装的两层设计**：核心校验逻辑在纯函数 `verify_claim`（返回 `(valid, failures)`，可单独单测）；`CitationVerifierTool` 只把它包装成 P02-01 的 `ToolResult`。同时构造可注入自定义 rules（依赖注入、可替换）——从"领域层提炼真实验证"到"工具层契约封装"的分工。
+2. **数字引用的十进制比较**：claim 的 key_number（如 "245100000000"）必须能被 `source.facts` 中的某个值以 `Decimal` 匹配（"245100000000" 与 "245100000000.00" 视为一致），否则 `NUMBER_UNSUPPORTED`——对齐 PRD"关键数字可追溯到来源"。
+3. **失败条目可测试**：`MISSING_SOURCE` / `INVALID_LOCATOR` / `NUMBER_UNSUPPORTED` 都是明确的 Pydantic 校验结果（code + message），可被断言、可被下游展示。
+
+### 检查问题（请用自己的话回答）
+为什么核心验证逻辑放在纯函数而不是工具类里？数字比较为什么用 Decimal 而不是字符串直接相等？为什么 `MISSING_SOURCE` 是"失败"而不是"不确定"？
+
+---
+
 ## 待复述清单（完成复述后打勾）
 
 - [ ] P00-01 检查问题已复述
@@ -764,3 +1161,13 @@ P01-08 不是在"建立真正的投资数据"，而是在**验证"数据库建�
 - [ ] P01-11 检查问题已复述
 - [ ] P01-12 检查问题已复述
 - [ ] P01-13 检查问题已复述
+- [x] P02-01 检查问题已复述
+- [x] P02-02 检查问题已复述
+- [ ] P02-03 检查问题已复述
+- [x] P02-04 检查问题已复述
+- [ ] P02-05 检查问题已复述
+- [ ] P02-06 检查问题已复述
+- [ ] P02-07 检查问题已复述
+- [ ] P02-08 检查问题已复述
+- [ ] P02-09 检查问题已复述
+- [ ] P02-10 检查问题已复述

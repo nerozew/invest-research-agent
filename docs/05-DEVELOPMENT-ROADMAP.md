@@ -54,25 +54,25 @@ Cline 完成任务后必须停止，并给出：
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |
 |---|---|---|---|---|
-| P02-01 | 建立 Tool Protocol、统一结果和错误对象 | `tools/base.py` | fake tool 契约测试 | 依赖倒置、typed tools |
-| P02-02 | 建立共享 httpx client 与显式 timeout | HTTP adapter | timeout、状态码映射测试 | HTTP 生命周期 |
-| P02-03 | 实现 SEC User-Agent 和全局限流器 | SEC client middleware | 模拟时钟下不超过配置速率 | 公平访问、token bucket |
-| P02-04 | 实现 `CompanyResolverTool` | tool + SEC ticker fixture | MSFT → 10 位 CIK；歧义返回候选 | 实体解析 |
-| P02-05 | 实现 `SECSubmissionsTool` | tool + recorded fixture | 截止日过滤、10-K/10-Q 选择测试 | SEC submissions 格式 |
-| P02-06 | 实现 `SECCompanyFactsTool` | tool + fixture | taxonomy/concept/unit/period 保真 | XBRL facts |
-| P02-07 | 实现 URL 规范化与来源去重 | pure functions | tracking 参数、片段、重复 URL 测试 | canonicalization |
-| P02-08 | 实现 `FilingDownloaderTool` | downloader + fake HTTP tests | 大小、类型、重定向、checksum 校验 | 安全下载、流式 I/O |
-| P02-09 | 实现 SEC HTML 解析器 | parser + fixture | 标题、章节、表格文本和 locator 保留 | HTML/iXBRL 结构 |
-| P02-10 | 实现 PDF 解析器主路径 | Docling adapter + tiny fixture | 页码、空页和解析错误测试 | PDF 文本边界 |
-| P02-11 | 实现 PDF/HTML 解析降级路由 | parser router | 主解析失败后只调用一次备用解析器 | fallback pattern |
-| P02-12 | 实现本地 `ArtifactStoreTool` | atomic local store | 临时写、checksum、读取、重复写测试 | 原子文件操作 |
-| P02-13 | 实现财务 concept 映射配置 | versioned mapping YAML/JSON | 同义 concept 选择测试 | XBRL 扩展与口径 |
-| P02-14 | 实现可比期间选择器 | pure functions | 52/53 周、季度/YTD、修订申报 fixtures | 期间可比性 |
-| P02-15 | 实现 5 个利润与增长指标 | calculator + tests | 正常、负数、零分母、缺失值测试 | Decimal、公式版本 |
-| P02-16 | 实现 5 个资产负债/现金流指标 | calculator + tests | 正常、单位冲突、不可计算测试 | 财务比率 |
-| P02-17 | 实现 `GoogleSearchTool` provider interface | interface + fake provider | 查询、as-of、分页、去重契约通过 | anti-corruption layer |
-| P02-18 | 实现 Serper provider adapter | adapter + mocked contract test | 请求/响应映射和认证脱敏 | 第三方 API 封装 |
-| P02-19 | 实现 `CitationVerifierTool` | verifier + tests | claim/source/locator/数字引用测试 | 可追溯性 |
+| P02-01 ✅ | 建立 Tool Protocol、统一结果和错误对象 | `tools/base.py` | fake tool 契约测试 | 依赖倒置、typed tools |
+| P02-02 ✅ | 建立共享 httpx client 与显式 timeout | HTTP adapter | timeout、状态码映射测试 | HTTP 生命周期 |
+| P02-03 ✅ | 实现 SEC User-Agent 和全局限流器 | SEC client middleware | 模拟时钟下不超过配置速率 | 公平访问、token bucket |
+| P02-04 ✅ | 实现 `CompanyResolverTool` | tool + SEC ticker fixture | MSFT → 10 位 CIK；歧义返回候选 | 实体解析 |
+| P02-05 ✅ | 实现 `SECSubmissionsTool` | tool + recorded fixture | 截止日过滤、10-K/10-Q 选择测试 | SEC submissions 格式 |
+| P02-06 ✅ | 实现 `SECCompanyFactsTool` | tool + fixture | taxonomy/concept/unit/period 保真 | XBRL facts |
+| P02-07 ✅ | 实现 URL 规范化与来源去重 | pure functions | tracking 参数、片段、重复 URL 测试 | canonicalization |
+| P02-08 ✅ | 实现 `FilingDownloaderTool` | downloader + fake HTTP tests | 大小、类型、重定向、checksum 校验 | 安全下载、流式 I/O |
+| P02-09 ✅ | 实现 SEC HTML 解析器 | parser + fixture | 标题、章节、表格文本和 locator 保留 | HTML/iXBRL 结构 |
+| P02-10 ✅ | 实现 PDF 解析器主路径 | PyMuPDF 主路径 + tiny fixture（见 docs/02 §5.3/ADR-005） | 页码、空页和解析错误测试 | PDF 文本边界 |
+| P02-11 ✅ | 实现 PDF/HTML 解析降级路由 | parser router | 主解析失败后只调用一次备用解析器 | fallback pattern |
+| P02-12 ✅ | 实现本地 `ArtifactStoreTool` | atomic local store | 临时写、checksum、读取、重复写测试 | 原子文件操作 |
+| P02-13 ✅ | 实现财务 concept 映射配置 | versioned mapping YAML/JSON | 同义 concept 选择测试 | XBRL 扩展与口径 |
+| P02-14 ✅ | 实现可比期间选择器 | pure functions | 52/53 周、季度/YTD、修订申报 fixtures | 期间可比性 |
+| P02-15 ✅ | 实现 5 个利润与增长指标 | calculator + tests | 正常、负数、零分母、缺失值测试 | Decimal、公式版本 |
+| P02-16 ✅ | 实现 5 个资产负债/现金流指标 | calculator + tests | 正常、单位冲突、不可计算测试 | 财务比率 |
+| P02-17 ✅ | 实现 `GoogleSearchTool` provider interface | interface + fake provider | 查询、as-of、分页、去重契约通过 | anti-corruption layer |
+| P02-18 ✅ | 实现 Serper provider adapter | adapter + mocked contract test | 请求/响应映射和认证脱敏 | 第三方 API 封装 |
+| P02-19 ✅ | 实现 `CitationVerifierTool` | verifier + tests | claim/source/locator/数字引用测试 | 可追溯性 |
 
 ## Phase 3：CrewAI Agent 与 Flow
 

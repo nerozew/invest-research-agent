@@ -279,7 +279,9 @@ class MetricResult(BaseModel):
     job_id: str
     metric_name: str = Field(min_length=1)
     period_end: date
-    value: Decimal | None = Field(default=None, gt=0)
+    # 注意：增长率/利润率允许负值（收入下降、经营亏损是正常业务），
+    # 不可设 gt=0；仅约束 value 为有限 Decimal 即可（PRD §8 负数场景）。
+    value: Decimal | None = None
     unit: str = Field(min_length=1)
     status: MetricStatus
     formula_version: str = Field(min_length=1)
