@@ -1,0 +1,87 @@
+# ============================================
+# Agent 驱动的自动化投研系统 - Git 忽略规则
+# P00-02 产出
+# 策略：白名单模式——根目录默认全部忽略，
+#       仅放行项目相关文件/目录。
+# 理由：项目根目录混有大量学习/实验文件，
+#       仓库边界限定为投研系统内容。
+# ============================================
+
+# ---------- 根目录白名单（只追踪项目内容）----------
+# 忽略根目录下所有条目（含点文件）
+/*
+# 放行项目关键内容与未来项目结构
+!/.gitignore
+!/README.md
+!/docs/
+!/.clinerules/
+!/src/
+!/tests/
+!/migrations/
+!/evals/
+!/pyproject.toml
+!/uv.lock
+!/.python-version
+!/docker-compose.yml
+!/.env.example
+
+# ---------- 密钥与敏感信息（任何层级防御）----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*credential*
+secret*
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- 缓存与字节码 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.tmp
+*.swp
+*.bak
+*~
+
+# ---------- IDE / 编辑器 / 系统 ----------
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------- 本地工件与数据 ----------
+artifacts/
+*.pkl
+*.parquet
+*.db
+*.sqlite
+*.sqlite3

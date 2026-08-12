@@ -1,0 +1,57 @@
+[project]
+name = "invest-research"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy>=2.0.51",
+]
+
+[project.scripts]
+invest-research = "invest_research:main"
+# 统一质量门禁：uv run invest-research-check
+invest-research-check = "invest_research.quality:check_all"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "alembic>=1.19.1",
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.2",
+    "testcontainers[postgres]>=4.15.0",
+]
+
+# ---------- Ruff（格式化 + Lint）----------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# E: 基础错误 / F: pyflakes / W: 警告 / I: import 排序
+select = ["E", "F", "W", "I"]
+
+# ---------- mypy（静态类型检查，严格模式）----------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# pydantic 官方 mypy 插件：让 mypy 理解 Pydantic 模型的动态行为
+# （字段校验、SecretStr 等），而不是用全局 ignore_missing_imports 掩盖。
+# 注意：pydantic-settings 自身不提供独立 mypy 插件（已核实无 mypy.py 模块）。
+plugins = ["pydantic.mypy"]
+# 说明：新项目以严格检查为目标；
+# 不全局设置 ignore_missing_imports = true，
+# 缺失 stub 时按类型错误暴露出来处理。
+
+# ---------- pytest（测试执行）----------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
