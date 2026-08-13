@@ -1270,6 +1270,104 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P03-09：给三个 Task 添加 schema guardrail（确定性校验 + 修复反馈 + 限定重试） ✅
+
+**产物**：`src/invest_research/agents/guardrails.py`（`validate_against_schema`/`build_fix_prompt`/`run_with_guardrail`/`GuardrailOutcome`）、`tests/test_guardrails.py`（8 测试）
+
+### 3 个知识点
+1. **guardrail = 确定性的"输出质检员"**：它不是"审核 Agent"（会引入新不确定性），而是用 Pydantic `ValidationError` 机械检查 LLM 输出是否满足 schema；失败 → 把错误反馈给原 LLM 重试（自愈），但仍受**次数上限**约束（docs/04 `SCHEMA_INVALID` 可重试但有限）。
+2. **"首次合法 / 修复后合法 / 始终非法"三段语义**：`run_with_guardrail` 的 `attempts_used` 精确反映"第几次成功或耗尽"——既是可测试的重试指纹，也对应 docs/04 §5.1"LLM schema 修复最多限定次数"。
+3. **guardrail 管格式、LLM 管内容**：失败时把"哪里错了"（field/msg）作为 hint 喂回 producer，让 LLM 自己重产出正确输出；guardrail 不直接改输出（那样等于替 LLM 造假）。
+
+### 检查问题（请用自己的话回答）
+为什么 `run_with_guardrail` 用"修复指令作为 hint 传回给 producer"而不是让 guardrail 直接改输出？如果去掉 `max_attempts` 上限会有什么风险？
+
+---
+
+## P03-10：建立 typed Flow state（CrewAI Flow 状态模型，Pydantic） ✅
+
+**产物**：`src/invest_research/flows/state.py`（`ResearchFlowState`）、`src/invest_research/flows/__init__.py`、`tests/test_flow_state.py`（6 测试）
+
+### 3 个知识点
+1. **Flow state = 跨步骤的"工作台/半成品箱"**：`Flow[Model]` 让 `self.state` 成为类型安全的共享内存——步骤 A 写入、步骤 B 读取，天然支持"上游产物喂下游"。
+2. **字段对齐 docs/04 §2 步骤契约**：request/company_identity/research_pack/document_manifest/analysis_pack/report_draft/quality_report/run_manifest 分别对应 00-07 每步输出。
+3. **非 frozen + 序列化恢复**：Flow state 运行期可改（`self.state.x = ...`），与 domain pack 的 frozen=True 形成对比；`model_dump_json/validate_json` 往返无损是断点续跑的地基。
+
+### 检查问题（请用自己的话回答）
+`ResearchFlowState` 为什么用 `frozen=False`（运行期可改），而 domain 的 `ResearchPack` 用 `frozen=True`（不可变）？两类对象在性质上有什么不同？
+
+---
+
+## P03-11：实现 00-03 Flow 步骤（请求→公司→ResearchPack→文档清单） ✅
+
+**产物**：`src/invest_research/flows/research_flow.py`（`@start step00_receive_request` + `@listen step01_resolve_company`/`step02_run_research_agent`/`step03_collect_documents`）、`tests/test_research_flow.py`（4 测试）
+
+### 3 个知识点
+1. **`@start/@listen` = 流水线传动带**：上游方法完成 → 引擎自动找监听者触发；步骤间用 `self.state` 传递产物，无需手动连。
+2. **fake 也要守领域契约**：`ResearchPack.sources` 是 `min_length=1`（P01-05 合法契约），fake 填 `sources=[]` 会 ValidationError——正确做法是给 1 条占位 Source，而不是破坏 schema。
+3. **运行时标识 vs 业务状态**：CrewAI Flow 自动给 `self.state` 注入 `id`（StateWithId）；比较状态内容时按业务字段断言，不做整对象相等。
+
+### 检查问题（请用自己的话回答）
+为什么 `@listen(step01_resolve_company)` 里能直接读 `self.state.company_identity` 而不需要参数传入？`self.state` 在 Flow 里扮演的角色，与"函数 A 返回值传给函数 B"有什么本质区别？
+
+---
+
+## P03-12：接入 sequential Crew 形成 04-05 步骤（收纳 Agent 产物） ✅
+
+**产物**：`research_flow.py` 追加 `@listen step04_run_analysis_agent`（→ analysis_pack）与 `@listen step05_run_writer_agent`（→ report_draft）、tests 新增 00-05 全链断言
+
+### 3 个知识点
+1. **Flow 收纳 Agent 产物**：Crew（P03-08）完成 02-05 三个 Agent 的顺序产出；Flow 的 step04/05 把这些 pack 写进 `self.state`，质量门禁/发布（P03-13/14）统一读取——"谁产出、谁收纳"分工清晰。
+2. **fake 遵守 Analysis 契约**：`FinancialAnalysisPack.facts` 至少 1 条（min_length=1），fake 给一条占位收入事实。
+3. **编排与协作分离**：Flow 负责"步骤编排 + 状态收纳"，Crew 负责"Agent 内部协作"；两条职责不冲突（ADR-001）。
+
+### 检查问题（请用自己的话回答）
+在 `ResearchFlow` 里，`step05_run_writer_agent` 为什么能直接读 `self.state.company_identity` 来构造报告标题，而不需要 step04 把 identity 传给它？`self.state` 与"函数参数层层传递"有何不同？
+
+---
+
+## P03-13：实现质量门禁 06（确定性硬门禁） ✅
+
+**产物**：`src/invest_research/flows/quality.py`（`run_quality_gate` 纯函数）、`tests/test_flow_quality.py`（5 测试）
+
+### 3 个知识点
+1. **"审核 Agent" vs "确定性门禁"**：架构明确不新增第四个审核 Agent；用 `QualityReport` 的确定性布尔检查（pack 齐备、章节完整、引用非空、数字可追溯、无投资建议）做硬拦截。
+2. **门禁输入 = Flow state**：`run_quality_gate(state)` 直接读 `state.research_pack/analysis_pack/report_draft`——Flow state 是所有步骤产物的统一容器，质量门禁是最后一个消费者。
+3. **rejected 是受控拒绝而非失败**：`recommendation` 给发布层的信号（P03-14 决定 partial/failed），符合 docs/04"不通过阻止发布或标记 partial"。
+
+### 检查问题（请用自己的话回答）
+`run_quality_gate` 为什么直接读 `state` 的三个 pack 字段，而不是让调用方逐个传参？这体现了 Flow 里 `self.state` 扮演的什么角色？
+
+---
+
+## P03-14：实现发布和 RunManifest 07（可复现性） ✅
+
+**产物**：`src/invest_research/flows/manifest.py`（`MANIFEST_VERSION`/`build_run_manifest`）、`tests/test_flow_manifest.py`（5 测试）
+
+### 3 个知识点
+1. **发布前置 = 质量门禁通过**：`build_run_manifest` 先检查 `state.quality_report.all_passed`；不通过直接返回 `status=rejected`——"硬门禁不通过不发布"变成结构保证。
+2. **可复现指纹**：三份 pack 各自 `sha256(model_dump_json)` + 提示词 `prompt_sha256` + 模型名（`config.model_for`）——同输入必同 hash，报告能指出"用了哪版说明书、基于哪些材料"。
+3. **manifest = 报告的"出生证明"**：一次记录模型、prompt 版本、pack checksum、公司/CIK/as-of、耗时，任何审计/复现/争论都有据可查。
+
+### 检查问题（请用自己的话回答）
+`build_run_manifest` 为什么要先检查 `state.quality_report.all_passed` 才生成"published" manifest，而不是无条件记录所有字段？
+
+---
+
+## P03-15：纯 fake 端到端测试（00-07 全链发布） ✅
+
+**产物**：`tests/test_e2e_fake.py`（2 测试：完整 00-07 发布 + state 序列化往返）
+
+### 3 个知识点
+1. **端到端语义 = fake 提供能通过的输入**：fake writer 草案必须含 PRD §7 全部必需章节 + 引用键，质量门禁才通过、才能 published——fake 不"放水"，门禁是真拦截。
+2. **纯 fake E2E = 零成本纵向切片**：不联网、不花钱就能验证"请求→三 Agent 顺序协作→质量门禁→RunManifest"整条链路可运行（M3 验收核心）。
+3. **测试替身层次**：FakeLLM（替 Agent 大脑）→ fake pack（替 Agent 产物）→ fake draft（替 Writer 产出）——三层 fake 配合 Crew+Flow 全过程离线演练。
+
+### 检查问题（请用自己的话回答）
+为什么 fake 的 `ReportDraft` 必须包含 PRD §7 全部必需章节和引用键，端到端才能 `published`？如果把质量门禁的必需章节检查删掉来"让测试通过"，违背了项目的什么原则？
+
+---
+
 ## P03-16 ✅：定义结构化质量问题与修订请求（Phase 3.5 起点）
 
 **产物**：`src/invest_research/domain/quality.py`（`QualitySeverity`/`QualityAction`/`QualityRecommendation`/`QualityIssue`/`RevisionRequest`/`SupplementResearchRequest`）、`src/invest_research/domain/models.py`（`QualityReport.recommendation` 收紧为 `QualityRecommendation` 枚举）、`tests/test_quality_models.py`（12 测试）
@@ -1341,5 +1439,12 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - [ ] P03-06 检查问题已复述
 - [ ] P03-07 检查问题已复述
 - [ ] P03-08 检查问题已复述
+- [ ] P03-09 检查问题已复述
+- [ ] P03-10 检查问题已复述
+- [ ] P03-11 检查问题已复述
+- [ ] P03-12 检查问题已复述
+- [ ] P03-13 检查问题已复述
+- [ ] P03-14 检查问题已复述
+- [ ] P03-15 检查问题已复述
 - [ ] P03-16 检查问题已复述
 - [ ] P03-17~21 检查问题已复述
