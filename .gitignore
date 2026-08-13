@@ -26,10 +26,10 @@
 !/Dockerfile
 !/compose.yml
 !/.dockerignore
-!/docker/
 !/.github/
 !/.github/**
 !/.env.example
+!/alembic.ini
 
 # ---------- 密钥与敏感信息（任何层级防御）----------
 .env
