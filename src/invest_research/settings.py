@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     """应用配置。
 
     必需字段（无默认值，缺失时报可读错误）：
-    - llm_api_key：DeepSeek API 密钥（SecretStr）
+    - llm_api_key：OpenAI-compatible 提供商的 API 密钥（SecretStr）
     - sec_user_agent_contact：SEC EDGAR 合规要求的联系邮箱
     """
 
@@ -35,12 +35,16 @@ class Settings(BaseSettings):
     environment: Literal["development", "production"] = "development"
     log_level: str = "INFO"
 
-    # ---- LLM（DeepSeek，OpenAI-compatible endpoint，见架构 §8）----
-    llm_base_url: str = "https://api.deepseek.com"
+    # ---- LLM（OpenAI-compatible，供应商无关；默认阿里云百炼 qwen-max，见架构 §8）----
+    # provider 当前仅支持 openai_compatible；未来切换供应商只改 env，不改业务代码。
+    llm_provider: Literal["openai_compatible"] = "openai_compatible"
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_api_key: SecretStr
-    llm_model_research: str = "deepseek-chat"
-    llm_model_analysis: str = "deepseek-chat"
-    llm_model_writer: str = "deepseek-chat"
+    llm_model_research: str = "qwen-max"
+    llm_model_analysis: str = "qwen-max"
+    llm_model_writer: str = "qwen-max"
+    llm_temperature: float = 0.2
+    llm_timeout: float = 60.0
 
     # ---- SEC EDGAR 合规（见可靠性 §5.2：User-Agent 必须含联系邮箱）----
     sec_user_agent_contact: str

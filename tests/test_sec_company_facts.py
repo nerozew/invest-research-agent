@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -20,7 +21,7 @@ from invest_research.tools.sec_company_facts import (
 FIXTURE = Path(__file__).parent / "fixtures" / "companyfacts_msft.json"
 
 
-def _mock_client(payload: dict, status: int = 200) -> httpx.Client:
+def _mock_client(payload: dict[str, Any], status: int = 200) -> httpx.Client:
     body = json.dumps(payload).encode()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -30,8 +31,8 @@ def _mock_client(payload: dict, status: int = 200) -> httpx.Client:
 
 
 @pytest.fixture
-def msft_facts() -> dict:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+def msft_facts() -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(FIXTURE.read_text(encoding="utf-8")))
 
 
 def test_build_url() -> None:
@@ -42,7 +43,7 @@ def test_build_url() -> None:
     )
 
 
-def test_parses_facts_with_fidelity(msft_facts: dict) -> None:
+def test_parses_facts_with_fidelity(msft_facts: dict[str, Any]) -> None:
     """保真解析：concept/period/unit/form 均保留，不做计算。"""
     tool = SECCompanyFactsTool(_mock_client(msft_facts))
     result = tool.execute(FetchFactsRequest(cik="0000789019"))
@@ -57,6 +58,7 @@ def test_parses_facts_with_fidelity(msft_facts: dict) -> None:
     ][0]
     assert revenue_fy.taxonomy == "us-gaap"
     assert revenue_fy.period_start is not None
+    assert revenue_fy.period_end is not None
     assert revenue_fy.period_end.year == 2024
     assert revenue_fy.value == Decimal("245100000000.00")
     assert revenue_fy.unit == "USD"
@@ -64,7 +66,7 @@ def test_parses_facts_with_fidelity(msft_facts: dict) -> None:
     assert revenue_fy.fact_version == "v1"
 
 
-def test_instant_fact_uses_instant_date(msft_facts: dict) -> None:
+def test_instant_fact_uses_instant_date(msft_facts: dict[str, Any]) -> None:
     """时点型（Assets）→ instant_date 非空、period_start/end 为空。"""
     tool = SECCompanyFactsTool(_mock_client(msft_facts))
     result = tool.execute(FetchFactsRequest(cik="0000789019"))
@@ -77,7 +79,7 @@ def test_instant_fact_uses_instant_date(msft_facts: dict) -> None:
     assert assets[0].value == Decimal("512600000000.00")
 
 
-def test_unit_preserved_for_ratios(msft_facts: dict) -> None:
+def test_unit_preserved_for_ratios(msft_facts: dict[str, Any]) -> None:
     """单位保真：EPS 使用 USD/shares。"""
     tool = SECCompanyFactsTool(_mock_client(msft_facts))
     result = tool.execute(FetchFactsRequest(cik="0000789019"))
@@ -89,7 +91,7 @@ def test_unit_preserved_for_ratios(msft_facts: dict) -> None:
     assert eps[0].value == Decimal("11.8")
 
 
-def test_http_status_error_maps_to_failure(msft_facts: dict) -> None:
+def test_http_status_error_maps_to_failure(msft_facts: dict[str, Any]) -> None:
     """429 → RATE_LIMITED（可重试）。"""
     tool = SECCompanyFactsTool(_mock_client(msft_facts, status=429))
     result = tool.execute(FetchFactsRequest(cik="0000789019"))

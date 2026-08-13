@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date
+from typing import Any
 
 import httpx
 import pytest
@@ -31,7 +33,7 @@ from invest_research.tools.google_search import (
 from invest_research.tools.serper_adapter import SERPER_ENDPOINT, SerperAdapter, SerperConfig
 
 
-def _serper_payload() -> dict:
+def _serper_payload() -> dict[str, Any]:
     return {
         "organic": [
             {
@@ -51,7 +53,7 @@ def _serper_payload() -> dict:
     }
 
 
-def _client(handler) -> httpx.Client:
+def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
@@ -69,7 +71,7 @@ def test_adapter_satisfies_search_provider() -> None:
 
 def test_request_mapping_to_serper_endpoint_and_params() -> None:
     """请求映射：POST {endpoint}，query/page/num 参数、Authorization header 正确。"""
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)

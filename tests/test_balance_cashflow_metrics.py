@@ -75,7 +75,7 @@ def test_current_ratio_zero_liabilities_not_computable() -> None:
 def test_current_ratio_missing_assets_not_computable() -> None:
     """流动资产缺失 → NOT_COMPUTABLE。"""
     result = compute_current_ratio(
-        current_assets=None,  # type: ignore[arg-type]
+        current_assets=None,
         current_liabilities=Decimal("100"),
         job_id=_JOB,
         period_end=_PERIOD,
@@ -126,7 +126,7 @@ def test_asset_liability_ratio_zero_assets_not_computable() -> None:
 def test_asset_liability_ratio_missing_liabilities_not_computable() -> None:
     """总负债缺失 → NOT_COMPUTABLE。"""
     result = compute_asset_liability_ratio(
-        total_liabilities=None,  # type: ignore[arg-type]
+        total_liabilities=None,
         total_assets=Decimal("200"),
         job_id=_JOB,
         period_end=_PERIOD,
@@ -203,7 +203,7 @@ def test_free_cash_flow_missing_capex_not_computable() -> None:
     """资本性支出缺失 → NOT_COMPUTABLE。"""
     result = compute_free_cash_flow(
         operating_cash_flow=Decimal("100"),
-        capital_expenditure=None,  # type: ignore[arg-type]
+        capital_expenditure=None,
         job_id=_JOB,
         period_end=_PERIOD,
     )
@@ -255,7 +255,7 @@ def test_roa_missing_assets_not_computable() -> None:
     """总资产缺失 → NOT_COMPUTABLE。"""
     result = compute_roa(
         net_income=Decimal("20"),
-        total_assets_begin=None,  # type: ignore[arg-type]
+        total_assets_begin=None,
         total_assets_end=Decimal("220"),
         job_id=_JOB,
         period_end=_PERIOD,

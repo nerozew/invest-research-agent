@@ -160,7 +160,7 @@ def test_list_request_forbids_extra_fields() -> None:
 def test_invalid_operation_rejected() -> None:
     """未知 operation 被 Pydantic 拒绝。"""
     with pytest.raises(ValidationError):
-        ArtifactStoreRequest(operation="delete")  # type: ignore[arg-type]
+        ArtifactStoreRequest(operation="delete")
 
 
 # ---------------------------------------------------------------------------

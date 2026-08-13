@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import fitz
+import fitz  # type: ignore[import-untyped]
 import pytest
 
 from invest_research.tools.pdf_parser import PDFParseError, parse_pdf
@@ -15,7 +15,7 @@ def _make_pdf(text: str) -> bytes:
     page.insert_text((72, 72), text)
     data = doc.tobytes()
     doc.close()
-    return data
+    return bytes(data)
 
 
 def test_pdf_parses_text_with_page_number() -> None:

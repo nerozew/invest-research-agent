@@ -120,7 +120,7 @@ def test_operating_margin_negative() -> None:
 def test_operating_margin_missing_revenue_not_computable() -> None:
     """收入缺失（None）→ NOT_COMPUTABLE。"""
     result = compute_operating_margin(
-        revenue=None,  # type: ignore[arg-type]
+        revenue=None,
         operating_income=Decimal("-10"),
         job_id=_JOB,
         period_end=_PERIOD,

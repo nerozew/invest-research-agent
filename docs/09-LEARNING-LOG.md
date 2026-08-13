@@ -1140,7 +1140,139 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P03-01：封装可配置的 OpenAI-compatible LLM factory（供应商无关，默认阿里云百炼 qwen-max） ✅
+
+**产物**：`src/invest_research/settings.py`（新增 `llm_provider`/`llm_temperature`/`llm_timeout`，三个模型默认 `qwen-max`）、`.env.example`（占位符）、`src/invest_research/agents/llm_factory.py`（`LLMConfig`/`LLMRole`/`OpenAICompatibleLLMFactory`/`FakeLLM`）、`src/invest_research/agents/__init__.py`、`tests/test_llm_factory.py`（14 测试）
+
+### 3 个知识点
+1. **供应商无关（provider-agnostic）设计**：把"协议（OpenAI-compatible）"与"供应商（阿里/DeepSeek/任意）"解耦——业务层只依赖 `LLMConfig` 的字段（base_url/api_key/model/timeout/temperature），切换供应商只改环境变量，不动 Agent/Task/Flow 代码。这正是架构 §8"解耦具体模型名"的落地。
+2. **SecretStr 结构性防泄漏**：密钥字段类型是 `SecretStr`，`repr/str/model_dump` 自动掩码为 `**********`；明文只在真正构造 LLM 实例的瞬间存在局部变量。测试用"注入 builder + 检查 repr/str/model_dump_json"证明 key 不进日志、异常、快照。
+3. **注入 builder + 惰性占位（builder injection + lazy placeholder）**：`factory.create(config, role, builder=...)` 通过传入 builder 决定"真实还是 fake"——测试注入 fake builder 零联网；真实构造用惰性占位（`_build_real_llm` 抛 NotImplementedError），避免提前引入 CrewAI/LiteLLM 重依赖。这与 P02 工具"注入 client、测试用 MockTransport"同一模式。
+
+### 检查问题（请用自己的话回答）
+`OpenAICompatibleLLMFactory` 为什么既能构造 fake（不联网）又能将来构造真实 LLM？"builder 注入"在这里扮演了什么角色？如果未来切到 DeepSeek，需要改哪些文件、哪些文件一定不用改？
+
+---
+
+## P03-02：写信息搜集 Agent 提示词 v1（版本化 prompt） ✅
+
+**产物**：`src/invest_research/prompts/research_prompt_v1.md`（角色/目标/权威顺序/工具白名单/输入/输出契约/规则/禁止项）、`src/invest_research/prompts/loader.py`（`PromptName`/`load_prompt`/`prompt_sha256`）、`src/invest_research/prompts/__init__.py`、`tests/test_prompts.py`（6 测试）
+
+### 3 个知识点
+1. **版本化提示词（prompt as versioned asset）**：提示词是"会改变的运行时资产"，不是代码里的字符串常量。独立 `.md` 文件 + 版本号 + sha256 指纹 = 改提示词可追溯、可对比、可判定下游是否需要重算（P05-04）。
+2. **最小权限白名单（least-privilege tool whitelist）**：Agent 只能看到列出给它的工具。信息搜集 Agent 就只能收集来源，看不到财务计算器——从提示词层面就杜绝它"顺手算个指标"（真正防住靠 P03-03 的 prompt + P03-06 的 Task 工具注入两层夹击）。
+3. **prompt 是"岗位说明书"不是"聊天开场白"**：它约束的是 Agent 的职责边界、输入输出契约、行为规则与红线。这正是三份说明书构成完整团队的逻辑：一个只收料、一个只算数、一个只写稿。
+
+### 检查问题（请用自己的话回答）
+信息搜集 Agent 的提示词里同时存在"允许工具白名单"和"禁止事项"两个部分——如果某工具**不在白名单里**但**也没在禁止项里**，Agent 能不能用？为什么白名单本身就足以表达"最小权限"？P03-03 的财报分析 Agent 与它有哪两个关键区别（工具 / 输出 schema）？
+
+---
+
+## P03-03：写财报分析 Agent 提示词 v1（禁止 LLM 算术） ✅
+
+**产物**：`src/invest_research/prompts/analysis_prompt_v1.md`（角色/目标/上游输入/工具白名单/输入/FinancialAnalysisPack 契约/6 条规则/6 条禁止项）、`tests/test_prompts.py`（新增 analysis 正向测试）
+
+### 3 个知识点
+1. **"看懂数字"与"算数"是两种能力（ADR-002 落地）**：财报分析 Agent 负责选事实、要求计算器算、解释趋势；但**运算必须委托给确定性代码**（FinancialCalculator）——LLM 不背"权威财务算术"，才能接受回归测试与复核。
+2. **防止 LLM 算术是"提示词 + 工具白名单"双保险**：提示词说"不许算"是第一层；只在 Task 里注入 ArtifactReader/FinancialFactQuery/FinancialCalculator（P03-06 才做）是第二层——没有计算器之外的算数路径，结构上就杜绝心算。
+3. **可追溯性从提示词层面就开始要求**：每个 MetricResult 必须带 formula_version / input fact ids / 期间（对齐 `MetricResult.inputs_json`）——让"指标 = 公式版本 + 输入事实 + 期间"变成 Agent 的规则，而不是事后补救，这正是 P03-13 质量门禁能验证"数字可追溯到事实"的前置条件。
+
+### 检查问题（请用自己的话回答）
+财报分析 Agent 的提示词同时强调"禁止 LLM 算术"和"冲突不猜测"。假如某公司财报里同时有 `RevenueFromContractWithCustomerExcludingAssessedTax` 与公司自定义的 `RevenueX`，Agent 应该怎么做？为什么"自己把两个加在一起"和"自己挑一个"都是被禁止的？（提示：想 FinancialFactQuery 与 concept mapping 的优先级、以及 AMBIGUOUS 语义）
+
+---
+
+## P03-04：写报告 Agent 提示词 v1（grounded generation） ✅
+
+**产物**：`src/invest_research/prompts/writer_prompt_v1.md`（角色/目标/唯一输入/工具白名单/输入/ReportDraft 契约/6 条规则/6 条禁止项）、`tests/test_prompts.py`（新增 writer 正向测试、移除 F401）
+
+### 3 个知识点
+1. **接地生成（grounded generation）**：LLM 写报告时"只能引用给到的材料"。把"唯一输入 = ResearchPack + FinancialAnalysisPack"写进提示词，是从源头杜绝幻觉新数字/新事实——这是报告可信度的第一道闸门（后续 P03-13 质量门禁会机械校验 citation 是否存在）。
+2. **三个 Agent 的"接力式信任"**：信息搜集只收料 → 财报分析只算数 → 报告撰写只用前两者的结果。每个 Agent 的提示词都在"收窄输入、约束输出"：搜集不能下结论、分析不能心算、撰写不能加料。这就是 Multi-Agent 职责边界的最小完整闭环。
+3. **提示词资产管理已成型**：三份版本化 `.md` + 统一 `load_prompt(PromptName)` + sha256 快照——改任何一份提示词，hash 变化 → 未来 manifest（P03-14）能指出"这份报告用了哪个版本的说明书"。
+
+### 检查问题（请用自己的话回答）
+三份提示词（research / analysis / writer）在"工具白名单"上各不相同，这背后是同一个原则。请说明：为什么"信息搜集 Agent 不能碰 FinancialCalculator、财报分析 Agent 不能碰 GoogleSearch、报告撰写 Agent 只能读上游两个 pack"不是限制自由，而是工程上的必要约束？（提示：从 LLM 幻觉、可追溯性、下游信任三个角度回答）
+
+---
+
+## P03-05：用 fake LLM 构建 Research Task（CrewAI 1.6.1，不联网） ✅
+
+**产物**：`pyproject.toml`/`uv.lock`（新增 `crewai>=1.0`，实际锁定 1.6.1）、`src/invest_research/agents/llm_factory.py`（`FakeLLM` 继承 `BaseLLM`）、`src/invest_research/agents/research_task.py`（`build_research_agent`/`build_research_task`/`build_research_pair`）、`tests/test_research_task.py`（6 测试）
+
+### 3 个知识点
+1. **BaseLLM 是 CrewAI 的"自定义大脑"接口**：要做一个框架认识的 fake/自定义 LLM，就继承 `crewai.BaseLLM` 实现 `call(messages, response_model=None)`、`supports_function_calling()`、`get_context_window_size()`。`Agent(llm=...)` 接受任何 BaseLLM 子类——这就是"测试替身与框架对接"的标准姿势。
+2. **output_pydantic 是结构化输出的守门员**：`Task(..., output_pydantic=ResearchPack)` 传类（不是实例）；CrewAI 会把 LLM 输出解析成该 Pydantic 模型。fake 的 `call(response_model=...)` 提前演练了这条链路——"输出必须能解析为 ResearchPack"是本任务验收的核心。
+3. **同一实例 vs 重复创建**：Task 必须持有所属 Agent 的**同一个对象**（`task.agent is agent`），pair 工厂通过参数复用来保证。这是多 Agent 编排里容易踩的坑：两个等效但不同的实例会让 Crew 行为不一致。
+
+### 检查问题（请用自己的话回答）
+`FakeLLM` 继承 `BaseLLM` 后多了一个 `call(messages, response_model=...)` 方法。为什么 CrewAI 的 `Agent.llm` 需要的是这种"带 response_model 的 call 方法"而不是一个简单的 `__call__(prompt) -> str`？（提示：想 `output_pydantic` 是怎么拿到结构化对象的）
+
+---
+
+## P03-06：用 fake LLM 构建 Analysis Task（工具最小权限白名单） ✅
+
+**产物**：`src/invest_research/agents/analysis_task.py`（`@tool` 包 FinancialFactQuery/FinancialCalculator + `build_analysis_agent`/`build_analysis_task`/`build_analysis_pair`）、`tests/test_analysis_task.py`（8 测试）
+
+### 3 个知识点
+
+1. **`@tool("Name")` 装饰器把普通函数包装成 `crewai.tools.base_tool.BaseTool` 实例**：原逻辑不变，外层新增 name / description（来自 docstring）/ args_schema / `.run()` 等工具能力，从而能放进 `Agent(tools=[...])`。测试触发工具时用 `.run(...)` 而非直接调用（直接调用会报 `'Tool' object is not callable`）。
+2. **最小权限白名单在 Task 层落地**：`_ANALYSIS_TOOLS = [financial_fact_query, financial_calculator]` 是硬闸门——Agent 拿不到的工具，LLM 连调用入口都没有（P03-02/03 的提示词只是文字约束）。测试断言 `agent.tools` 名字集合恰等于这两个，且不含搜索/下载等无关工具。
+3. **确定性计算不许 LLM 碰（ADR-002 落地）**：FinancialCalculator 内部全走 `financial/` 确定性纯函数（Decimal、formula_version），指标名用 PRD §8 白名单强校验（未知指标→明确 not_computable）、零分母→NOT_COMPUTABLE。
+
+### 检查问题（请用自己的话回答）
+在 `agent.tools or []` 里，为什么需要 `or []` 而不是直接 `agent.tools`？（已实测：`Agent.model_fields['tools']` 的 annotation 是 `list[crewai.tools.base_tool.BaseTool] | None`，非必填。所以 `or []` 是给 mypy 的类型收窄：`None or []` → `[]`，让 `for t in agent.tools` 安全遍历。）
+
+### 概念讲解记录（2026-08-13）三问详解
+1. **`@tool` 做了什么**：装饰器。执行前是普通函数，执行后是 `BaseTool` 实例——"封装 + 暴露给 Agent"，不是替换逻辑。
+2. **`Agent.tools` 的类型**：Pydantic 字段，`list[BaseTool] | None`（实测 `model_fields`），非必填、默认 None；`@tool` 返回值正是该类型，CrewAI 也兼容 LangChain `BaseTool`。
+3. **为什么要 `or []`**：类型是 `| None`，mypy strict 对 `for t in agent.tools` 报"None 无 __iter__"；`or []` 短路成空列表，类型收窄，运行时行为不变（我们的 Agent 总配了工具）。
+
+---
+
+## P03-07：用 fake LLM 构建 Writer Task（grounded generation 工具白名单） ✅
+
+**产物**：`src/invest_research/agents/writer_task.py`（`@tool` 包 ArtifactReader/CitationVerifier/TemplateGuide + `build_writer_agent`/`build_writer_task`/`build_writer_pair`）、`tests/test_writer_task.py`（8 测试）
+
+### 3 个知识点
+
+1. **协议适配层**：P02 的 Tool（`execute(request) -> ToolResult`，Protocol 形状）与 CrewAI 的 BaseTool（`run()`，具体类）是**两套协议**。`Agent.tools` 要求 `list[BaseTool]`，所以 P02-01 工具不能直接塞进去，需用 `@tool` 装饰（内部动态创建 BaseTool 子类实例）或手动继承 BaseTool——这就是 @tool 的"语法糖"本质。
+2. **Writer 的"无中生有"被结构性禁止**：只给 Writer ArtifactReader + CitationVerifier + TemplateGuide 三种能力（读工件/验引用/查模板），**没有搜索、没有计算**——它连"找新数字"的入口都没有，只能组织上游 context 写稿（grounded generation 双保险，与提示词层叠加）。
+3. **三 Agent Task 闭环达成**：research（搜资料）→ analysis（算指标）→ writer（写报告），各自工具白名单完全隔离：搜索/下载只在 research、取数/计算只在 analysis、读写/引用/模板只在 writer。三个 fake Task 均能经 response_model 实例化对应 pack。
+
+### 检查问题（请用自己的话回答）
+`CitationVerifier` 工具为什么用 `@tool("CitationVerifier")` 包装 P02 的 `verify_claim` 纯函数，而不是直接传给 `Agent(tools=[CitationVerifierTool()])`？（提示：`Agent.tools` 字段类型是 `list[BaseTool] | None`，而 P02-01 的 Tool 是 Protocol 形状非具体类）
+
+### 概念讲解记录（2026-08-13）两套工具协议
+1. **P02-01 Tool**：`typing.Protocol`，只要结构上有 `name` + `execute -> ToolResult` 就算（鸭子类型），无需继承；没有 `run()`。
+2. **CrewAI BaseTool**：具体类，方法 `run()`；`Agent.tools` 注解 `list[BaseTool] | None` 只接受 BaseTool 或其子类实例。
+3. **为什么不能混用**：Agent 执行器调 `tool.run(...)`，而 P02-01 工具只有 `.execute()`；类型上也不满足 `list[BaseTool]`。
+4. **解法**：`@tool` 装饰器 = 动态创建一个继承 BaseTool 的类并实例化，把原函数挂进去；或手动 `class X(BaseTool)` 继承实现 `_run`。两者最终都是 BaseTool 实例。
+
+---
+
+## P03-08：组合三个 Task 为 sequential Crew（三 Agent 顺序流水线，kickoff 全链路） ✅
+
+**产物**：`src/invest_research/agents/crew_factory.py`（`build_research_crew`：三 Agent 各自独立 + `analysis_task.context=[research_task]` + `writer_task.context=[research_task, analysis_task]` + `Process.sequential`）、`src/invest_research/agents/llm_factory.py`（`FakeLLM.invoke` 耗尽后循环复用 + `call` 无 response_model 返回 JSON 文本）、`tests/test_research_crew.py`（4 测试，含真实 kickoff）
+
+### 3 个知识点
+
+1. **Crew = 团队的"排班表"**：`Crew(agents=[...], tasks=[...], process=Process.sequential)` 是声明"谁按什么顺序干什么"；`kickoff()` 才真正执行，上游输出经 `context` 自动喂给下游。agent executor 会多次调 LLM（plan/thought 无 response_model、final 有 response_model）。
+2. **FakeLLM 必须模拟真实调用方的分阶段输出形态**：无 `response_model` 时返回预置 pack 的 **JSON 文本**（CrewAI 对文本做 `.rstrip()`，直接给 BaseModel 会报 `'ResearchPack' object has no attribute 'rstrip'`）；有 `response_model` 才返回 BaseModel 实例；响应耗尽后**循环复用**（多次调用不能抛错中断）。
+3. **kickoff 返回 CrewOutput**：`result.pydantic` 为最终结构化输出（本版无 `result.tasks` 属性，勿沿用旧文档写法）。
+
+### 检查问题（请用自己的话回答）
+为什么 `FakeLLM.call` 在**无 `response_model`** 时必须返回"预置 pack 的 JSON 文本"而不是直接返回 `ResearchPack` 实例？（提示：CrewAI agent executor 在 plan/thought 阶段对结果做了什么操作？这个操作为什么要求字符串？）
+
+### 概念讲解记录（2026-08-13）两问详解
+1. **为什么无 response_model 要返回文本**：CrewAI 把每轮 LLM 输出都当"对话文本"拼进历史（`prompt.rstrip()`）。Task 执行会多次调 LLM：plan/thought 阶段（无 response_model，只要字符串）→ final 阶段（有 response_model，才解析为 BaseModel）。fake 必须伪装真实 LLM 的分阶段输出形态。
+2. **顺序执行一次循环 = 不如 LangChain？**：顺序本身不是 CrewAI 独有；优势在"以团队为中心的多 Agent 编排"——Agent 抽象（role/goal/backstory+llm+tools）、Task 契约（output_pydantic）、process 演进（sequential→hierarchical）、Crew 级共享、以及未来接入的 Flow 状态恢复/分支（ADR-001）。MVP 只用一部分，但为 Flow/guardrail 打基础。
+
+---
+
 ## 待复述清单（完成复述后打勾）
+
+------
 
 - [ ] P00-01 检查问题已复述
 - [ ] P00-02 检查问题已复述
@@ -1171,3 +1303,11 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - [ ] P02-08 检查问题已复述
 - [ ] P02-09 检查问题已复述
 - [ ] P02-10 检查问题已复述
+- [ ] P03-01 检查问题已复述
+- [ ] P03-02 检查问题已复述
+- [ ] P03-03 检查问题已复述
+- [ ] P03-04 检查问题已复述
+- [ ] P03-05 检查问题已复述
+- [ ] P03-06 检查问题已复述
+- [ ] P03-07 检查问题已复述
+- [ ] P03-08 检查问题已复述

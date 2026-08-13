@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-import fitz
+import fitz  # type: ignore[import-untyped]
 import pytest
 
 from invest_research.tools.parser_router import DocumentParseError, parse_document
@@ -54,7 +54,7 @@ def _make_pdf(text: str = "Hello SEC") -> bytes:
     page.insert_text((72, 72), text)
     data = doc.tobytes()
     doc.close()
-    return data
+    return bytes(data)
 
 
 def _ok_pdf_parser(content: bytes) -> ParsedPDF:
@@ -142,7 +142,7 @@ def test_pdf_failure_falls_back_to_html_exactly_once() -> None:
     outcome = parse_document(
         b"<h1>Fallback</h1><p>Text body</p>",
         "application/pdf",  # 内容实为 HTML，模拟错误协商
-        html_parser=html_spy,
+        html_parser=html_spy,  # type: ignore[arg-type]
         pdf_parser=_fail_pdf_parser,
     )
 

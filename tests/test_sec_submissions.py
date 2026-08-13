@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -21,7 +22,7 @@ from invest_research.tools.sec_submissions import (
 FIXTURE = Path(__file__).parent / "fixtures" / "sec_submissions_msft.json"
 
 
-def _mock_client(payload: dict, status: int = 200) -> httpx.Client:
+def _mock_client(payload: dict[str, Any], status: int = 200) -> httpx.Client:
     """构造 MockTransport client：返回 fixture JSON 或指定状态。"""
     body = json.dumps(payload).encode()
 
@@ -32,8 +33,8 @@ def _mock_client(payload: dict, status: int = 200) -> httpx.Client:
 
 
 @pytest.fixture
-def msft_payload() -> dict:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+def msft_payload() -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(FIXTURE.read_text(encoding="utf-8")))
 
 
 def test_build_urls() -> None:
@@ -45,7 +46,7 @@ def test_build_urls() -> None:
     )
 
 
-def test_as_of_date_filters_recent_filings(msft_payload: dict) -> None:
+def test_as_of_date_filters_recent_filings(msft_payload: dict[str, Any]) -> None:
     """截止日过滤：2026-01-29 保留 10-K/10-Q 共 3 条；排除 8-K 与未来申报。"""
     tool = SECSubmissionsTool(_mock_client(msft_payload))
     result = tool.execute(FetchSubmissionsRequest(cik="0000789019", as_of_date=date(2026, 1, 29)))
@@ -59,7 +60,7 @@ def test_as_of_date_filters_recent_filings(msft_payload: dict) -> None:
     assert filings[2].form_type == "10-Q"
 
 
-def test_only_10k_10q_forms(msft_payload: dict) -> None:
+def test_only_10k_10q_forms(msft_payload: dict[str, Any]) -> None:
     """8-K 被排除；默认只保留 10-K/10-Q。"""
     tool = SECSubmissionsTool(_mock_client(msft_payload))
     result = tool.execute(FetchSubmissionsRequest(cik="0000789019", as_of_date=date(2026, 12, 31)))
@@ -72,7 +73,7 @@ def test_only_10k_10q_forms(msft_payload: dict) -> None:
     assert forms[0] == "10-Q"  # 最新在前
 
 
-def test_http_status_error_maps_to_failure(msft_payload: dict) -> None:
+def test_http_status_error_maps_to_failure(msft_payload: dict[str, Any]) -> None:
     """429 → RATE_LIMITED（可重试）。"""
     tool = SECSubmissionsTool(_mock_client(msft_payload, status=429))
     result = tool.execute(FetchSubmissionsRequest(cik="0000789019", as_of_date=date(2026, 1, 1)))

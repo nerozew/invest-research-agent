@@ -153,15 +153,16 @@ def test_success_and_failure_are_mutually_exclusive() -> None:
     - ToolSuccess 不含 error 字段；ToolFailure 不含 value 字段；
     - extra="forbid"：向成功结果塞错误字段会被拒绝。
     """
-    ok = ToolSuccess(value=PingResponse(echo="x"))
+    ok: ToolSuccess[PingResponse] = ToolSuccess(value=PingResponse(echo="x"))
     err = ToolFailure(error=ToolError(error_code=ErrorCode.INTERNAL_BUG, message="内部错误"))
 
     assert not hasattr(ok, "error")
     assert not hasattr(err, "value")
 
     with pytest.raises(ValidationError):
-        # 尝试构造"既成功又失败"的模型 → 未知字段被拒绝
-        ToolSuccess(
+        # 尝试构造"既成功又失败"的模型 → 未知字段被拒绝；
+        # error 关键字在类型上不存在，属故意构造非法对象，按需豁免
+        ToolSuccess(  # type: ignore[call-arg]
             value=PingResponse(echo="x"),
             error=ToolError(error_code=ErrorCode.INTERNAL_BUG, message="x"),
         )

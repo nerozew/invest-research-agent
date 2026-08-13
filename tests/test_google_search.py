@@ -38,7 +38,7 @@ class _ShapeSearchProvider(Protocol):
     def search(self, query: SearchQuery) -> SearchResponse: ...
 
 
-class FakeSearchProvider:
+class FakeSearchProvider(SearchProvider):
     """fake provider：内存结果，按 as_of/published_at/page/page_size 过滤分页。"""
 
     def __init__(self, results: list[SearchResult]) -> None:
@@ -191,7 +191,7 @@ def test_tool_deduplicates_by_canonical_url() -> None:
 # ---------------------------------------------------------------------------
 
 
-class FailingProvider:
+class FailingProvider(SearchProvider):
     """抛出异常的 provider：应被 GoogleSearchTool 捕获为 ToolFailure。"""
 
     def search(self, query: SearchQuery) -> SearchResponse:

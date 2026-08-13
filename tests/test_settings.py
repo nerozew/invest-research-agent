@@ -40,7 +40,7 @@ def test_settings_builds_from_explicit_values() -> None:
 
     assert settings.project_name == "invest-research"
     assert settings.environment == "development"
-    assert settings.llm_base_url == "https://api.deepseek.com"
+    assert settings.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert settings.sec_user_agent_contact == "test@example.com"
 
 
