@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://invest:invest@localhost:5432/invest"
     redis_url: str = "redis://localhost:6379/0"
 
+    # ---- Readiness 探测超时（P04-01）----
+    # /readiness 对依赖的探测必须设置显式超时，避免请求被卡在无响应的依赖上；
+    # 探测资源（engine/redis 客户端）创建时同步使用这两个值配置 socket/连接超时。
+    readiness_db_connect_timeout: float = 2.0
+    readiness_redis_connect_timeout: float = 2.0
+
     # ---- 本地工件目录（P02 起启用）----
     artifact_root: str = "artifacts"
 

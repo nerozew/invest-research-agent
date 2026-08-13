@@ -39,6 +39,21 @@
 （发布 / 定向修订 / 补证 / 拒绝）"的闭环，所有循环由 Flow 控制，Agent 之间不互相调用。
 详见 `docs/04-WORKFLOW-RELIABILITY.md §2.5`、`docs/05-DEVELOPMENT-ROADMAP.md（Phase 3.5 表格）`。
 
+## Streamlit 轻量操作界面（Phase 4 补充）
+
+项目在 P04-05 后新增 **P04-UI-01~05：Streamlit 轻量操作界面** 系列任务（位于 P0406 前）。
+Streamlit 只是 **FastAPI 的一个 HTTP 客户端**，通过后端 API 使用系统，不直接访问
+PostgreSQL/Redis，也不直接调用 CrewAI Flow。
+
+- 职责：创建投研任务、轮询任务/步骤状态、查看错误与耗时、查看报告/质量结果/引用
+  与数据限制、下载已登记工件。
+- 前端规则：只调用 FastAPI；API 地址通过环境变量配置；创建任务使用
+  Idempotency-Key；页面不负责业务判断；不在 session state 保存密钥；不显示数据库
+  连接字符串和内部文件路径；不引入 React/Vue/Node.js；暂不实现登录、权限和复杂响应式设计。
+- 测试：使用 fake HTTP API，不依赖真实数据库、Redis、Docker 或模型。
+
+边界见 `docs/02-ARCHITECTURE.md §11`，实施时序见 `docs/05-DEVELOPMENT-ROADMAP.md`。
+
 ## MVP 完成的定义
 
 - 支持按公司名称或 ticker 创建投研任务。

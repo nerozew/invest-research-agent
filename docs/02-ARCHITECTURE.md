@@ -186,3 +186,42 @@ Redis 只负责队列、锁和缓存。任务、步骤、事实、指标和工�
 ### ADR-005：SEC HTML 优先于 PDF
 
 SEC 主文档通常为 HTML/iXBRL，更容易保留表格、链接和结构；PDF 作为用户文件或备用来源。这样仍满足 PDF 解析要求，同时提高真实任务成功率。
+
+### ADR-006：Streamlit 是 FastAPI 的 HTTP 客户端
+
+Streamlit 不是独立业务层，只是 FastAPI 的 HTTP 客户端。所有数据访问都经后端 API，
+前端不直接访问 PostgreSQL/Redis、不直接调用 CrewAI Flow、不读取工件文件系统——
+保证唯一入口、统一鉴权与脱敏、可复用后端的缓存/限流/错误分类。
+
+## 11. 前端边界（Streamlit 轻量操作界面）
+
+### 11.1 依赖关系
+
+```
+Streamlit → FastAPI → Application/Flow → PostgreSQL/Redis
+```
+
+- Streamlit 只通过 HTTP 调用 FastAPI（创建任务、查状态、下载工件等）。
+- FastAPI 是唯一面向外部的入口；Application/Flow 在后端执行，Streamlit 不可见。
+- PostgreSQL/Redis 只被后端访问，Streamlit 完全不直接连接。
+
+### 11.2 Streamlit 禁止项
+
+- 禁止直接访问数据库（PostgreSQL）。
+- 禁止直接调用 CrewAI Flow。
+- 禁止保存或显示 API Key（含 LLM API Key、搜索 API Key）。
+- 禁止读取服务器工件路径（如 `artifacts/` 绝对路径）。
+- 禁止绕过 FastAPI 下载文件（工件只能通过后端安全下载接口获取）。
+
+### 11.3 目录与配置
+
+- 目录建议：`frontend/`（Streamlit 应用 + typed API client）。
+- API 地址通过环境变量配置（如 `API_BASE_URL`），不写死在代码里。
+- 创建任务使用客户端生成并保存的 `Idempotency-Key`。
+- 不在 `st.session_state` 保存密钥；不显示数据库连接字符串和内部文件路径。
+
+### 11.4 测试要求
+
+- 前端测试使用 fake HTTP API（如 httpx MockTransport / 自定义 fake client），
+  不依赖真实数据库、Redis、Docker 或模型，全程离线可复现。
+- 页面不负责业务判断：轮询停止条件、错误归类和展示职责在前端，业务校验在后端。

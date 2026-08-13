@@ -23,6 +23,12 @@
 !/uv.lock
 !/.python-version
 !/docker-compose.yml
+!/Dockerfile
+!/compose.yml
+!/.dockerignore
+!/docker/
+!/.github/
+!/.github/**
 !/.env.example
 
 # ---------- 密钥与敏感信息（任何层级防御）----------

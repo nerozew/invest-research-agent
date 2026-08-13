@@ -1398,6 +1398,131 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P04-01：FastAPI app、health、readiness ✅
+
+**产物**：`src/invest_research/api/__init__.py`、`health.py`、`app.py`；`tests/test_api_health.py`；Settings 新增 readiness 探测超时。
+
+### 3 个知识点
+
+1. **liveness vs readiness 是两种不同语义的探针**：`/health`（liveness）只回答"进程还活着吗"，回答"活着"不需要依赖任何外部资源，所以它绝不访问 DB/Redis，挂了就重启；`/readiness` 回答"进程能开始服务请求吗"，必须真实探测 PostgreSQL 和 Redis，任一不可用就返回 503 并从负载均衡摘除。二者分离后，依赖抖动不会导致误杀可用进程，进程僵死也不会误接流量。
+
+2. **application factory 是"延迟接线"的关键**：`create_app()` 只有在调用时才创建 FastAPI 实例，且依赖（引擎、Redis 客户端、checker）通过构造参数注入。这保证了"模块导入不连接数据库/Redis"——测试注入 fake checker 时，app 全程不创建任何真实资源；默认情况下才由 `build_health_checker` 惰性创建带显式超时的探测资源，并在 lifespan 退出时释放。
+
+3. **依赖注入（DI）让路由只认协议、不认实现**：`/readiness` 通过 `Depends(_get_health_checker)` 从 `app.state` 取出的只是 `HealthChecker` 协议；假的 checker 和真实 `DependencyHealthChecker` 都满足同一接口。这样路由不用改一行就能在"单元测试（fake）"和"本地 Docker（真实）"两种模式下切换，也把"探测结果 → HTTP 语义（200/503）"的转换留在 API 层，不掺入 Flow 业务逻辑。
+
+### 检查问题（请用自己的话回答）
+`/health` 与 `/readiness` 都在"进程活着"时可以返回 200，为什么生产环境仍然必须区分它们？如果只用一个端点同时回答"存活"和"就绪"，当数据库短暂抖动但进程健康时会发生什么？
+
+**用户复述记录（2026-08-13）**：用户回答抓住了核心——health 与 ready 是两种不同的探针，ready 除进程存活外还会深查数据库等依赖 的状态；若只看 health（pass）而数据库抖动/不健康，生产环境（把流量导给该实例）就会出问题。表述有一处小口误："ready 是进程是否存活"，正确表述应为 **health = 我（进程）活着 / readiness = 我现在能不能干活（PostgreSQL 与 Redis 都可用）**。结论：回答满足题意，方向正确，建议口头复述时把"存活"与"就绪"两个词各归其位。
+
+---
+
+## P04-02：`POST /v1/research-jobs` 创建投研任务 ✅
+
+**产物**：`src/invest_research/application/__init__.py`、`application/jobs.py`（`JobStore` 端口 + `CreateResearchJobService` 用例 + `CreatedJob`）；`api/jobs.py`（`CreateResearchJobResponse` DTO）；`api/app.py`（新增 `POST /v1/research-jobs`，注入 `job_store`）；`tests/test_api_create_job.py`（9 测试）。
+
+### 3 个知识点
+
+1. **async job API（异步任务接口设计）**：创建任务接口立即返回 `202 Accepted + job_id`，任务实际执行放在后台——这告诉调用方"请求已被受理、稍后完成"，而不是让 HTTP 请求一直阻塞到整份报告生成完。`202` 与 `200` 的关键区别是 `202` 表示"已受理、结果尚未就绪"，与任务状态 `pending` 呼应。这是 P04-06 Worker 消费、P04-03 轮询状态的前置语义。
+
+2. **application 层的端口（Port）与用例（Use Case）分离**：`JobStore` 是 Protocol（端口，只声明 `create`），`CreateResearchJobService` 是用例（编排：生成 uuid → 委托存储 → 返回 pending）；`application` 不导入 SQLAlchemy/CrewAI/FastAPI——持久化实现将来由 `infrastructure` 提供。这让"API 层只做 HTTP 转换、业务逻辑在 application、存储可替换"成为结构保证，测试注入内存版 store 即可完全离线。
+
+3. **请求体重用领域模型（生成即合法的第一道闸门）**：`POST /v1/research-jobs` 的请求体直接是 `domain.ResearchRequest`（空公司名/未来日期/非法语言/空表单全部由 Pydantic 校验），FastAPI 对非法请求自动返回 422，路由里不需要手写 if-else 判断。这正是 P01-02"模型校验 = 生成即合法"的落地：校验规则只写一次，API/CLI/未来所有入口共享。
+
+### 检查问题（请用自己的话回答）
+为什么创建任务用 `202 Accepted` 而不是 `200 OK`？`application/jobs.py` 里的 `JobStore` 为什么用 Protocol（端口）而不是直接 import `JobRepository`？如果直接在 API 路由里调用 SQLAlchemy，会违反哪条 `.clinerules` 依赖方向？
+
+**用户复述记录 + 概念讲解（2026-08-13）**：
+
+1. **为什么 202 而不是 200**：用户理解正确——202 = "已受理、结果未就绪"（对应任务 `pending`，还在准备中）；200 = 结果已 ready（即时状态）。补充：报告生成是重活（搜资料+算指标+写报告要几分钟），不可能在这一次 HTTP 请求里同步返回，所以先受理返回 job_id，之后用 P04-03 轮询；`/health`、`/readiness` 用 200 是因为它们返回的就是当前即时状态。
+2. **为什么 JobStore 用 Protocol 而不是 import JobRepository**：JobRepository 是 infrastructure 里的具体实现类，直接在 application 里 import 它会：① 违反依赖方向铁律（api/infrastructure -> application -> domain）；② 测试无法注入 fake，必须真连数据库；③ 换存储实现要改上层代码。Protocol 只约定"结构上有 create 方法"（插座协议思维），生产由 infrastructure 提供真实实现、测试由 FakeJobStore 顶替——这就是依赖倒置（DIP）：高层定义抽象、低层实现抽象。
+3. **在 API 路由里直接调用 SQLAlchemy 违反哪条**：违反 `.clinerules/02-engineering.md` 的依赖方向 `adapters/API/infrastructure -> application -> domain`——API 是最外层只能依赖 application；直接连库会让 API 跳过 application 层、混合"HTTP 转换+业务逻辑"职责，测试必须真连库，错误分类与脱敏无法统一。
+
+**结论：三个问题均答对或方向正确，P04-02 检查问题已复述 ✅**
+
+---
+
+## P04-03：`GET /v1/research-jobs/{id}` 查询任务状态 ✅
+
+**产物**：`application/jobs.py` 新增 `StepSnapshot`/`JobSnapshot`/`JobQueryStore`/`GetResearchJobService`；`api/jobs.py` 新增 `GetResearchJobResponse`（复用 JobSnapshot）；`api/app.py` 新增 `job_query_store` 注入与 `GET /v1/research-jobs/{job_id}`；`tests/test_api_get_job.py`（7 测试）。
+
+### 3 个知识点
+
+1. **查询 DTO（Data Transfer Object）= 只读快照，不是领域对象**：`JobSnapshot`/`StepSnapshot` 是"给 API 看的只读视图"，包含状态、当前步骤、错误码、错误信息、耗时；`duration_seconds` 由 `build()` 根据 `started_at/completed_at` 统一计算（未开始为 None）。它把"领域/存储内部形状"翻译成"对外稳定契约"，后续字段变化不影响客户端。
+
+2. **查询端口 `JobQueryStore` 与创建端口 `JobStore` 分离**：读与写能力分开定义（CQRS 思想的简化），查询用例 `GetResearchJobService.get` 只是委托端口返回 `JobSnapshot | None`，由 API 决定 404（None）还是 200。这保持 application 层零基础设施依赖，测试用 fake store 完全离线。
+
+3. **路径参数类型即校验**：`GET /v1/research-jobs/{job_id}` 把路径参数声明为 `uuid.UUID`，FastAPI 自动校验：非法 UUID 返回 422，合法 UUID 才进入路由；不存在返回 404。再次体现"类型/模型层挡掉格式错误（生成即合法），路由只处理业务语义"的分层思想。
+
+### 检查问题（请用自己的话回答）
+`JobSnapshot` 为什么要用 `build()` 统一计算 `duration_seconds`，而不是让调用方自己算？`JobQueryStore` 与 `JobStore` 为什么分开（而不是同一个 store 同时提供 create 和 get）？路径参数直接声明为 `uuid.UUID` 与声明为 `str` 再手动验证有什么不同？
+
+**用户复述记录 + 概念讲解（2026-08-13）**：
+
+1. **为什么用 build() 统一算 duration_seconds**：耗时计算是一条规则（未开始→None；开始→完成-开始，保留 3 位），只允许存在一处（DRY）。若调用方各自算会出现"有人用秒/有人用毫秒/四舍五入不一致"，同一任务不同页面耗时对不上。build() 把规则放进模型自己，谁生成快照都调 build()，结果必然一致——类比"毛利率口径只在财务部定义一次"。
+2. **为什么读端口与写端口分开**：读关心"按条件返回快照"，写关心"持久化后可见"，关注点不同。分离带来：①接口隔离（创建用例只见 create、查询用例只见 get，不被无关方法耦合）；②实现可分离（将来读走缓存/只读副本、写走主库，互不污染）。JobRepository 一个类同时有 create/get/update_status，但 application 端口按用例拆开，每个用例只声明最小能力（依赖倒置 + 接口隔离组合）。
+3. **uuid.UUID 声明 vs str 手动验证**：区别不在 UUID 的性质（唯一/随机），而在"谁来校验、何时校验"。声明 uuid.UUID：FastAPI 在进入路由前自动解析校验，非法 422 根本进不到函数，合法时参数已是 UUID 对象。声明 str：函数收到原始字符串，必须自己在函数体里 uuid.UUID(job_id)+try/except，校验散落易漏。再次体现"框架层挡格式错误（生成即合法），路由只处理业务语义"。
+
+**结论：三个问题均已讲解，P04-03 检查问题已复述 ✅**
+
+---
+
+## P04-04：工件清单与安全下载接口 ✅
+
+**产物**：`application/artifacts.py`（`InvalidArtifactKey` + `ArtifactInfo` + `ArtifactCatalogStore`/`ArtifactContentStore` 端口 + `GetJobArtifactsService`/`GetJobArtifactContentService` 用例）；`api/artifacts.py`（DTO）；`api/app.py`（新增 `artifact_catalog_store`/`artifact_content_store` 注入 + `GET /v1/research-jobs/{job_id}/artifacts` 清单 + `GET /v1/research-jobs/{job_id}/artifacts/{artifact_key:path}` 下载）；`tests/test_api_artifacts.py`（9 测试）。
+
+### 3 个知识点
+
+1. **路径穿越（Path Traversal）防护是"注册 + 校验 + 不暴露路径"三层**：下载接口只允许"该 job 已登记"的工件——端口 `ArtifactContentStore.read` 按 (job_id, key) 查登记表，不存在返回 None（404）；`artifact_key` 经独立校验（非空/无首尾空白/无反斜杠/无危险字符/非绝对路径/无 `..` 段，非法抛 `InvalidArtifactKey` → API 转 400）；端口不暴露磁盘路径，下载路径解析完全留在 infrastructure 实现里。这比"拼字符串找文件"安全得多。
+
+2. **`{artifact_key:path}` 路由转换器**：artifact_key 可能含 `/`（如 `research/2025/pack.json`），用 `{artifact_key:path}` 让 FastAPI 匹配多段路径，而不是只匹配单段；下载用 `Response(content=..., media_type="application/octet-stream")` 直接返回原始字节流，不需要响应模型。
+
+3. **读出/写分离在工件层同样成立**：`ArtifactCatalogStore`（只读登记清单）与 `ArtifactContentStore`（只读内容）是两个独立端口，各自只声明最小能力；application 层用 `InvalidArtifactKey` 把"key 不合法"（业务校验失败，400）与"key 不存在/不属于该 job"（404）区分开，语义清晰。
+
+### 检查问题（请用自己的话回答）
+为什么下载接口既要"按 (job_id, key) 查登记"又要"单独校验 artifact_key"，而不是只校验 key 或只查登记？`{artifact_key:path}` 与 `{artifact_key}` 的区别是什么？为什么用 `application/octet-stream` 返回字节而不是 JSON？
+
+**概念讲解记录（2026-08-13，用户跳过回答直接进入 P04-05，先给答案供核对）**：
+1. **查登记 = 授权，校验 key = 防路径穿越**：查登记只允许该 job 已登记工件（业务授权）；校验 key 是因为 URL 传入的 key 是攻击者可控的，必须先校验格式（`..`/反斜杠等）再查询，避免恶意 key 到达存储层。只查登记不校验 → 恶意 key 可能碰巧匹配存储；只校验不查登记 → 未登记文件也可能被读。两者缺一不可。
+2. **`{artifact_key:path}` 匹配含 `/` 的多段 key**（如 `research/2025/pack.json`）；`{artifact_key}` 只匹配单段（不含 `/`）。
+3. **`application/octet-stream`**：工件是任意二进制（JSON/Markdown/PDF），返回字节流告诉客户端"不透明字节，按文件处理"，不要尝试 JSON 解析。
+
+> 复述状态：尚未由用户复述，待后续核对。
+
+---
+
+## P04-05：客户端 Idempotency-Key 幂等创建任务 ✅
+
+**产物**：`application/idempotency.py`（`StoredJob` + `IdempotencyStore` 端口 + `IdempotencyConflict` + `CreateResearchJobIdempotentService`）；`api/app.py`（`idempotency_store` 注入 + `Idempotency-Key` 头读取 + 幂等分支）；`tests/test_api_idempotency.py`（4 测试）。
+
+### 3 个知识点
+
+1. **幂等语义 = 同 key 同请求复用、异请求 409**：幂等不是"所有请求都一样"，而是"同一客户端同一操作不会被重复执行"。实现：`IdempotencyStore` 存 `key → (job_id, status, request_fingerprint)`；同 key 且指纹一致 → 复用首次 job_id（200，不重复创建）；同 key 但指纹不一致 → 抛 `IdempotencyConflict`（409）。`request_fingerprint` 用 `request.model_dump_json()` 规范化指纹判断"是否同一请求"。
+2. **状态码语义分层**：首次创建返回 **202**（已受理未就绪）；同 key 复用返回 **200**（已存在、直接给结果）——不要两者都用 202。`create()` 返回 `(StoredJob, created_now: bool)`，路由据此选状态码，把"是否首次"的判定留在用例层。
+3. **幂等池与创建解耦**：`CreateResearchJobIdempotentService` 组合 `CreateResearchJobService`（真正创建）+ `IdempotencyStore`（幂等池），application 层零基础设施依赖；数据库的 `idempotency_key` UNIQUE 约束是并发兜底。未注入幂等池或未带 key 时，路由回退到普通 202 创建路径，向后兼容。
+
+### 检查问题（请用自己的话回答）
+为什么幂等"同 key 但请求体不同"要返回 409 而不是直接复用/覆盖？`request_fingerprint` 的作用是什么？为什么首次创建返回 202、复用返回 200（而不是统一 200 或统一 202）？数据库 `idempotency_key` UNIQUE 约束与幂等池各解决什么问题（并发兜底 vs 查询去重）？
+
+---
+
+## P04-UI-01：Streamlit 骨架与 typed API client ✅
+
+**产物**：`src/invest_research/frontend/`（models/errors/client/config）、`frontend/Home.py` + 三个页面占位骨架、`tests/test_frontend_api_client.py`（12 测试）、`.env.example`（API_BASE_URL/API_TIMEOUT）
+
+### 3 个知识点
+
+1. **"前端即 HTTP 客户端"（架构 ADR-006 落地）**：Streamlit 不是独立业务层，只通过 HTTP 调用 FastAPI。前端 DTO（`frontend/models.py`）是**独立建模**的——不复用后端 `api/jobs.py` 的 DTO（前/后端是两个进程，只依赖 HTTP JSON 契约），但复用 `domain` 的纯枚举（JobStatus/StepStatus）与 `ResearchRequest` 请求体模型（它们零后端耦合）。这样 frontend 保持轻量、可单测，且依赖方向 `frontend -> domain` 不反向泄漏。
+
+2. **显式超时 + typed 错误分类（4xx/5xx/网络/超时）**：`httpx.Timeout` 必须显式给全 connect/read/write/pool 四个参数（否则抛 ValueError）；`_request()` 统一把 4xx/5xx 分类为 `HttpStatusError`/`ApiNotFoundError`（保留 status_code 与 detail），超时归 `ApiTimeoutError`，连接失败归 `ApiNetworkError`。错误消息只透出后端 `detail`，不显示连接串/密钥/内部路径——对齐架构 §11.2 禁止项。
+
+3. **readiness 的 503 语义**：后端依赖不可用时 `/readiness` 返回 503，但响应体**仍是合法 `ReadinessResponse`**（`ready=False`）。因此 client 对 readiness 把 503 视为"可解析的就绪状态"（`ok_statuses={503}`），交给 UI 展示"未就绪"而不是抛错——liveness（进程活）/ readiness（依赖可用）分开的语义在前端同样成立。
+
+### 检查问题（请用自己的话回答）
+为什么 `frontend/models.py` 不复用后端 `api/jobs.py` 的 DTO，却复用了 `domain` 的 `JobStatus` 枚举与 `ResearchRequest`？"前端只依赖 HTTP JSON 契约"和"复用纯 domain 模型"之间是什么边界？
+
+---
+
 ## 待复述清单（完成复述后打勾）
 
 ------
@@ -1448,3 +1573,9 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - [ ] P03-15 检查问题已复述
 - [ ] P03-16 检查问题已复述
 - [ ] P03-17~21 检查问题已复述
+- [x] P04-01 检查问题已复述
+- [x] P04-02 检查问题已复述
+- [x] P04-03 检查问题已复述
+- [ ] P04-04 检查问题已复述
+- [ ] P04-05 检查问题已复述
+- [ ] P04-UI-01 检查问题已复述

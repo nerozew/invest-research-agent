@@ -235,6 +235,42 @@ G. 等待我确认的问题
 如果建议变更，请先草拟一份 ADR，列出受影响的任务和迁移顺序。等我确认后再改文档或代码。
 ```
 
+## 11.5 Streamlit 单任务开发提示词（P04-UI）
+
+只用于实现 `docs/05-DEVELOPMENT-ROADMAP.md` 中 **Phase 4 UI（P04-UI-xx）** 的单个任务。
+Streamlit 只是 FastAPI 的 HTTP 客户端，禁止直接访问数据库/Redis，禁止直接调用 CrewAI Flow。
+
+```text
+请只执行 docs/05-DEVELOPMENT-ROADMAP.md 中的 Phase 4 UI 任务 {P04-UI-xx}。
+
+开始前：
+1. 先阅读 docs/01-PRD.md §14（前端 MVP）、docs/02-ARCHITECTURE.md §11（前端边界）、
+   docs/05-DEVELOPMENT-ROADMAP.md Phase 4 UI 表格及其依赖的后端接口。
+2. 检查当前文件与 git diff，保留已有修改；用 3–6 条列出实施计划。
+3. 确认本任务依赖的后端接口已就绪；未就绪则停止并提出拆分。
+
+前端规则（强制）：
+- 只调用 FastAPI；API 地址通过环境变量配置，不写死。
+- 创建任务必须携带客户端 Idempotency-Key。
+- 页面不负责业务判断与财务计算；展示与调用 API 之外的逻辑放 typed client。
+- 不在 st.session_state 保存密钥；不显示数据库连接字符串、Redis URL、内部文件路径。
+- 不绕过 FastAPI 下载文件；工件只能经后端安全下载接口。
+- 不引入 React、Vue、Node.js；不实现登录、权限系统和复杂响应式设计。
+
+测试要求：
+- 使用 fake HTTP API（httpx MockTransport / 自定义 fake client），
+  不依赖真实数据库、Redis、Docker 或模型，全程离线可复现。
+- 先写或同步写测试；不得用删除测试、降低断言、跳过检查来制造通过。
+
+验收：
+- 运行本任务相关的最小测试、lint 和类型检查；命令失败要说明根因并在范围内修复。
+- 只有实际通过才把路线中该行任务 ID 改为 `P04-UI-xx ✅`。
+
+汇报并停止：
+- 修改文件清单、客户端/页面结构与 fake HTTP 测试结果。
+- 给出 3 个知识点和一个检查问题，然后停止，等待我确认。
+```
+
 ## 12. 运行时三个 Agent 的 prompt 骨架
 
 这些不是给 Cline 的开发提示词，而是将来写进 `src/.../prompts/` 的运行时模板。实现时应由 schema 和程序注入输入，不能靠自由文本拼接不可信内容。

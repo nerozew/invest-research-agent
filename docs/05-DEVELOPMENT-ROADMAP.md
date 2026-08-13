@@ -113,17 +113,55 @@ Cline 完成任务后必须停止，并给出：
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |
 |---|---|---|---|---|
-| P04-01 | FastAPI app、health、readiness | endpoints + tests | DB/Redis 状态分开报告 | liveness vs readiness |
-| P04-02 | `POST /v1/research-jobs` | route/service/tests | 202 + job_id；无效请求 422 | async job API |
-| P04-03 | `GET /v1/research-jobs/{id}` | route/tests | 状态、步骤、错误和耗时返回 | 查询 DTO |
-| P04-04 | 工件清单与安全下载接口 | routes/tests | 只允许该 job 的已登记工件 | 路径穿越防护 |
-| P04-05 | 客户端 Idempotency-Key | middleware/service/tests | 同 key 同请求复用，不同请求 409 | API 幂等 |
-| P04-06 | 启动 Redis 与 Celery 最小 worker | queue config + smoke test | API 投递、worker 消费 fake task | broker/worker |
-| P04-07 | Worker 调用 Flow | task adapter + tests | 状态从 pending 到终态 | 长任务边界 |
-| P04-08 | 实现取消标志和安全点 | endpoint + flow check | pending/running 取消行为正确 | 协作式取消 |
-| P04-09 | 编写 Dockerfile | multi-stage image | 非 root 运行、healthcheck 通过 | 容器最小权限 |
+| P04-01 ✅ | FastAPI app、health、readiness | endpoints + tests | DB/Redis 状态分开报告 | liveness vs readiness |
+| P04-02 ✅ | `POST /v1/research-jobs` | route/service/tests | 202 + job_id；无效请求 422 | async job API |
+| P04-03 ✅ | `GET /v1/research-jobs/{id}` | route/tests | 状态、步骤、错误和耗时返回 | 查询 DTO |
+| P04-04 ✅ | 工件清单与安全下载接口 | routes/tests | 只允许该 job 的已登记工件 | 路径穿越防护 |
+| P04-05 ✅ | 客户端 Idempotency-Key | middleware/service/tests | 同 key 同请求复用，不同请求 409 | API 幂等 |
+| P04-UI-01 ✅ | Streamlit 骨架与 typed API client | app 入口 + client + tests | fake HTTP API 下能调用 health/readiness | 前端即 HTTP 客户端 |
+| P04-UI-02 ✅ | 创建投研任务页面 | 页面 + client/tests | 携带 Idempotency-Key 创建，展示 job_id | 幂等创建 UX |
+| P04-UI-03 ✅ | 任务状态、步骤和错误轮询页面 | 轮询页面 + tests | 自动轮询至终态，展示错误与耗时 | 轮询状态机 |
+| P04-UI-04 ✅ | 报告、质量结果、引用和工件页面 | 展示/下载页面 + tests | 展示报告/质量/引用/限制，安全下载工件 | 展示层只读 |
+| P04-06 ✅ | 启动 Redis 与 Celery 最小 worker | queue config + smoke test | API 投递、worker 消费 fake task | broker/worker |
+| P04-07 ✅ | Worker 调用 Flow | task adapter + tests | 状态从 pending 到终态 | 长任务边界 |
+| P04-08 ✅ | 实现取消标志和安全点 | endpoint + flow check | pending/running 取消行为正确 | 协作式取消 |
+| P04-09 ✅ | 编写 Dockerfile | multi-stage image | 非 root 运行、healthcheck 通过 | 容器最小权限 |
 | P04-10 | 编写 Docker Compose | API/worker/Postgres/Redis | 一条命令启动并 smoke test | 本地编排 |
+| P04-UI-05 | 将 Streamlit 加入 Docker Compose | compose 服务 + frontend Dockerfile | 前后端一条命令启动并 smoke test | 前后端编排 |
 | P04-11 | 编写 CLI demo | `research run/status` | 能创建任务、轮询和显示报告路径 | API client UX |
+
+### Phase 4 UI：Streamlit 轻量操作界面（P04-UI 系列）
+
+> 说明：P04-UI 系列是 Phase 4 的补充任务，**不修改现有 P04 编号**。
+> Streamlit 只作为 FastAPI 的 HTTP 客户端，不直接访问数据库/Redis，也不直接调用
+> CrewAI Flow。前端规则见 `docs/02-ARCHITECTURE.md §11`、需求见 `docs/01-PRD.md §14`。
+
+前端边界（P04-UI 全系列通用）：
+
+- 只调用 FastAPI；API 地址通过环境变量配置。
+- 创建任务使用客户端 `Idempotency-Key`。
+- 测试使用 fake HTTP API，不依赖真实数据库、Redis、Docker 或模型。
+- 页面不负责业务判断。
+- 不在 session state 保存密钥；不显示数据库连接字符串和内部文件路径。
+- 不引入 React、Vue、Node.js；暂不实现登录、权限系统和复杂响应式设计。
+
+#### 2.4 Phase 4 UI 实施时序
+
+P04-UI 依赖对应后端接口已就绪，实施顺序必须为：
+
+```
+P04-01 → P04-02 → P04-03 → P04-04 → P04-05
+      → P04-UI-01 → P04-UI-02 → P04-UI-03 → P04-UI-04
+      → P04-06 → P04-07 → P04-08 → P04-09 → P04-10
+      → P04-UI-05
+      → P04-11
+```
+
+- `P04-UI-01` 依赖 `P04-01`（health/readiness 可用于 typed client 验收）。
+- `P04-UI-02` 依赖 `P04-02`（创建任务 API）与 `P04-05`（Idempotency-Key）。
+- `P04-UI-03` 依赖 `P04-03`（任务/步骤状态查询 API）。
+- `P04-UI-04` 依赖 `P04-04`（工件清单与安全下载 API）。
+- `P04-UI-05` 依赖 `P04-10`（Docker Compose）与 `P04-UI-01~04`（前端已可运行）。
 
 ## Phase 5：可靠性、监控与评估（补齐第 5 周）
 
