@@ -19,6 +19,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from invest_research.domain.quality import QualityRecommendation
+
 _CIK_PATTERN = re.compile(r"^\d{10}$")
 _ALLOWED_LANGUAGES = frozenset({"zh-CN", "en"})
 _DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q")
@@ -351,4 +353,4 @@ class QualityReport(BaseModel):
     all_passed: bool
     issues: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    recommendation: str = Field(min_length=1)  # 例如 published / rejected
+    recommendation: QualityRecommendation  # 收紧为枚举（P03-16）

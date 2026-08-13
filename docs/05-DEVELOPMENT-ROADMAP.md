@@ -94,6 +94,21 @@ Cline 完成任务后必须停止，并给出：
 | P03-14 | 实现发布和 `RunManifest` 07 | manifest + tests | hash、版本、耗时和模型信息齐全 | 可复现性 |
 | P03-15 | 做纯 fake 端到端测试 | one E2E fixture | 不联网完成全流程 | 测试替身、纵向切片 |
 
+### Phase 3.5：受控反思与修订闭环（补充升级，位于 P03-15 后、P04-01 前）
+
+> 说明：仅扩展 Phase 3，不修改 P03-01～P03-15 编号。核心是全确定性的
+> 质量门禁 → 结构化质量问题 → 受控路由（发布/修订/补证/拒绝），
+> 由 Flow + ReflectionController 控制，Agent 之间不互相调用。
+
+| ID | 小任务 | 产物 | 验收 | 学习点 |
+|---|---|---|---|---|
+| P03-16 ✅ | 定义结构化质量问题与修订请求 | QualityIssue、RevisionRequest、SupplementResearchRequest、枚举 | 序列化和边界测试 | 结构化错误模型 |
+| P03-17 ✅ | 将质量门禁升级为结构化问题分类 | quality classifier | 正确区分发布、修订、补证和拒绝 | 确定性分类 |
+| P03-18 ✅ | 实现 Writer 定向修订 Task | revision prompt/task | 只修复指定问题，不新增事实 | 定向修订 |
+| P03-19 ✅ | 实现证据不足补充研究流程 | supplement request/task | 最多补证一次 | 一次性补证 |
+| P03-20 ✅ | 实现受控反思路由 | ReflectionController + Flow routing | 无无限循环，路由和次数正确 | 有界反思 |
+| P03-21 ✅ | 增加纯 fake 反思闭环 E2E | fixtures + E2E tests | 离线覆盖发布、修订、补证和拒绝 | 反思闭环 E2E |
+
 ## Phase 4：API、队列与本地运行
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |

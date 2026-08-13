@@ -1270,6 +1270,36 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P03-16 ✅：定义结构化质量问题与修订请求（Phase 3.5 起点）
+
+**产物**：`src/invest_research/domain/quality.py`（`QualitySeverity`/`QualityAction`/`QualityRecommendation`/`QualityIssue`/`RevisionRequest`/`SupplementResearchRequest`）、`src/invest_research/domain/models.py`（`QualityReport.recommendation` 收紧为 `QualityRecommendation` 枚举）、`tests/test_quality_models.py`（12 测试）
+
+### 3 个知识点
+
+1. **最小必要契约 + 结合现有模型**：不在 `domain/models.py` 重复定义质量模型，新建 `domain/quality.py` 承载 Phase 3.5 的新类型；`QualityReport` 保留原位置，仅把 `recommendation` 从裸 `str` 收紧为 `QualityRecommendation`（枚举值 `published/rejected/…` 与旧字符串完全兼容，Pydantic 自动解析，门禁逻辑零改动）。
+2. **结构化问题 = 让"反思"可路由、可审计**：`QualityIssue` 带 severity/stage/action/related_claim/citation_key，`RevisionRequest`/`SupplementResearchRequest` 分别承载"定向修订"与"补证"的输入与次数边界——这为 P03-17~21 的 ReflectionController 路由提供类型安全的数据载体。
+3. **枚举边界交给 Pydantic**：非法 severity/action 值、`revision_number<1`、`attempt_number<0` 都在构造期被 `ValidationError` 拦截（fail-fast）；所有模型 `frozen=True` 不可变，保证契约稳定；`related_claim`/`citation_key` 可空以容纳"缺章节"这类不挂单 claim 的问题。
+
+### 检查问题（请用自己的话回答）
+为什么 `QualityReport.recommendation` 从 `str` 收紧为 `QualityRecommendation` 枚举后，`flows/quality.py` 和 `flows/manifest.py` 不需要改？（提示：Pydantic 对枚举字段的字符串自动解析 + 枚举值与旧字面量一致）
+
+---
+
+## P03-17~21 ✅：受控反思与修订闭环（Phase 3.5 全部完成）
+
+**产物**：`flows/quality_classifier.py`（P03-17 结构化分类）、`agents/revision_task.py`（P03-18 定向修订 Task + REVISION_PROMPT_V1）、`flows/supplement.py`（P03-19 最多一次补证）、`flows/reflection.py`（P03-20 ReflectionController + 次数上限 + 审计历史）、`tests/test_quality_classifier.py`、`test_revision_task.py`、`test_supplement.py`、`test_reflection.py`、`test_reflection_e2e.py`（P03-21 六场景 fake E2E）
+
+### 3 个知识点
+
+1. **质量门禁从"布尔"到"结构化行动"**：`classify_state` 输出带 `QualityAction`/`QualitySeverity` 的 `QualityIssue[]`，`recommendation_from_issues` 确定给出 PUBLISH/PUBLISH_PARTIAL/REVISE/REJECT；门禁仍纯确定性、不新增第四 Agent。
+2. **受控反思 = "路由 + 次数上限"分离**：`ReflectionController` 只做决策（按 QualityAction + 已用次数 →唯一动作），不直接调用 Agent；修订/补证各 ≤1 次，超限即 repeat_reject，杜绝无限循环；每次决策写入 `history`（action/计数/outcome）可审计。
+3. **fake 闭环 E2E 用"确定性替换"演练反射**：修订用直接替换 report_draft、补证用 `apply_supplement` 追加来源——全程不联网、不再造第二个"LLM 大脑"，用最小可验证的确定性动作串起 8 类结局（发布/partial/修订后发布/补证后发布/拒绝/上限停止）。
+
+### 检查问题（请用自己的话回答）
+`ReflectionController.step` 只接收 `QualityAction` 和"已用次数"，为什么不接收 `QualityIssue` 列表？把它和 `classify_state` 分开各解决什么问题？
+
+---
+
 ## 待复述清单（完成复述后打勾）
 
 ------
@@ -1311,3 +1341,5 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - [ ] P03-06 检查问题已复述
 - [ ] P03-07 检查问题已复述
 - [ ] P03-08 检查问题已复述
+- [ ] P03-16 检查问题已复述
+- [ ] P03-17~21 检查问题已复述

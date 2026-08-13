@@ -307,6 +307,23 @@ CREATE TABLE artifacts (
 );
 ```
 
+## 4.1 受控反思闭环持久化（Phase 3.5 评估结论）
+
+结论：**现有表结构足够，不需要新增数据库表**。受控反思（修订/补证）通过现有的
+`reports` 版本列、`artifacts` 工件与 `workflow_steps` 结构化 I/O 记录，全部可追溯。
+
+| 需要记录的信息 | 现有落点 |
+|---|---|
+| 修订次数（≤1） | `workflow_steps.attempt_count`（第 06 步）或 `reports.version`（每次草稿递增） |
+| 每次报告草稿 | `reports` 表 `version` 递增（`UNIQUE(job_id, version)` 已支持多版本）+ `prompt_version`/`model_name`/`quality_summary` |
+| 每次质量报告 | `reports.quality_summary`（jsonb，存 QualityReport/QualityIssue 结构化） |
+| 修订原因 / 补证原因 | `artifacts` + `workflow_steps.input_json/output_json`（结构化 RevisionRequest / SupplementResearchRequest） |
+| 补证次数（≤1） | 第 02 步 `workflow_steps.attempt_count` 或 state 中 `supplement_attempt`（内存计数 + artifacts 留痕） |
+| 每次生成的 artifact | `artifacts`（`job_id+artifact_key` 唯一，`workflow_step_id` 关联步骤） |
+| 原始 vs 修订草稿的父子关系 | `artifacts` 的 `artifact_key` 命名约定（如 `05_report_draft_rev1.json`）或 metadata；不新增 `parent_artifact_id` 列 |
+
+无需 migrations。若未来需要跨 job 查询"某 claim 被修订多少次"，再考虑新增表；当前 MVP 不需要。
+
 ## 5. 向量检索扩展（P2）
 
 先完成基于章节、关键词和 PostgreSQL 全文检索的 MVP，再增加 pgvector。建议固定 BGE-M3 的 1024 维 embedding，并记录模型版本。

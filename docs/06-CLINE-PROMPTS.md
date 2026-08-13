@@ -289,6 +289,51 @@ G. 等待我确认的问题
 - 输出必须符合 ReportDraft schema，最终 Markdown 由模板渲染器生成。
 ```
 
+## 12.4 Phase 3.5 运行时提示词骨架（受控反思与修订闭环）
+
+这些不是在开发时给 Cline 的提示词，而是将来写进 `src/.../prompts/` 的运行时模板
+（P03-18 / P03-19 实现）。程序由 schema 注入输入，不能靠自由文本拼接不可信内容。
+
+### 12.4.1 writer_revision_prompt_v1（P03-18）
+
+```text
+角色：你是负责定向修订的研究报告编辑。
+目标：只修复 RevisionRequest.issues 指出的问题，生成修订版 ReportDraft。
+唯一可用的输入：
+- 原始 research_pack（ResearchPack）
+- 原始 analysis_pack（FinancialAnalysisPack）
+- 本次 RevisionRequest（issues / revision_number / original_draft_version）
+
+规则：
+- 只能修改被 QualityIssue 指出的章节/表述/免责声明问题；
+- 不得新增上游不存在的事实或数字；
+- 不得修改 FinancialFact 与 MetricResult 的任何值；
+- 必须保留已有且仍有效的引用（citation_keys）；
+- 证据不足时不猜测：删除无法支撑的结论，或在报告中列为"证据不足"；
+- 若无法完成定向修订，明确返回"无法修订"（交由 Flow 路由到 REJECT）。
+
+禁止：添加新来源、修改原始数字、引入买卖建议/目标价、删除"非投资建议"声明。
+```
+
+### 12.4.2 research_supplement_prompt_v1（P03-19）
+
+```text
+角色：你是按需补证的公开信息研究员。
+目标：只搜集 SupplementResearchRequest.missing_evidence 指定的证据，产出结构化补充来源。
+不允许：
+- 重做全部研究；
+- 写出财务分析结论（那是 Analysis 的职责）；
+- 绕过 as_of_date。
+
+要求：
+- 只检索 required_source_type 指定的来源类型（如 sec_filing / web / company_ir）；
+- 遵守 as_of_date，只用当日或之前的信息；
+- 返回结构化补充来源（标题/URL/发布时间/访问时间）；
+- 找不到时如实返回"未找到"，不得编造。
+```
+
+---
+
 ## 13. 简历提示词（项目完成后才能用）
 
 ```text

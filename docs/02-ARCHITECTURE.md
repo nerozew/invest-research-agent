@@ -45,6 +45,8 @@ flowchart LR
 
 为满足题目要求，系统保留三个核心 Agent。质量校验使用确定性代码和 guardrail，而不是增加一个会带来新不确定性的“审核 Agent”。后续可以把 LLM 审核作为辅助评分器，但不能替代硬校验。
 
+**Phase 3.5 补充（受控反思与修订闭环）**：质量门禁输出结构化质量问题（`QualityIssue`），由 `flows/ReflectionController`（P03-20）路由到「发布 / 定向修订（Writer，≤1 次）/ 补证（Research，≤1 次后重走 Analysis+Writer）/ 拒绝」——所有循环由 Flow 控制，**Agent 之间不直接调用**（对齐 ADR-001）。新的类型化契约（`RevisionRequest`、`SupplementResearchRequest` 等）落在 `domain/` 或 `flows/` 层（P03-16 起），不增加第四个审核 Agent。
+
 ## 4. 工具设计（至少 5 个，实际规划 9 个）
 
 所有工具都必须有 Pydantic 输入/输出、超时、错误分类、重试策略、脱敏日志和契约测试。
