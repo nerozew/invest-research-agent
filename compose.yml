@@ -117,6 +117,9 @@ services:
     environment:
       API_BASE_URL: http://api:8000
       API_TIMEOUT: "30"
+      # src 布局：前端页面 import invest_research.* 需能找到 /app/src（镜像内源码）
+      PYTHONPATH: /app/src
+      HOME: /tmp
     depends_on:
       api:
         condition: service_started
