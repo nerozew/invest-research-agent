@@ -1579,3 +1579,56 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - [ ] P04-04 检查问题已复述
 - [ ] P04-05 检查问题已复述
 - [ ] P04-UI-01 检查问题已复述
+
+---
+
+## P04-10A：生产依赖组装与真实 PostgreSQL Store ✅
+
+**产物**：`infrastructure/wiring.py`、`infrastructure/db/application_stores.py`、
+`infrastructure/queue/job_dispatcher.py`、`application/job_dispatcher.py`、
+`migrations/versions/0005_idempotency_keys.py`、`cli.py`（P04-11）
+
+### 3 个知识点
+
+1. **Protocol 端口 + composition root（wiring）**：application 层只定义 `Protocol`
+   （JobStore/JobQueryStore/IdempotencyStore/...），infrastructure 提供 SQLAlchemy 实现，
+   由 `create_production_app()` 统一组装注入 `api.create_app`。测试注入 fake 即可完全离线；
+   这是收口"生产组装"与"测试替身"的关键，避免测试和运行走不同代码路径。
+
+2. **幂等池必须独立表 + DB UNIQUE 兜底**：`idempotency_keys` 表以 `key` 唯一约束兜底，
+   并发同 key 由数据库拒绝而非进程内判断，杜绝"并发下同 key 生成两个有效任务"。
+   `request_fingerprint` 用于判断同 key 是否同一请求（同请求复用、异请求 409）。
+
+3. **Celery 队列必须用 `kombu.Queue` 对象**：`task_queues = ("research-jobs",)` 字符串元组
+   在 `send_task` 构造 router 时会崩（`'str' object has no attribute 'name'`）；
+   `task_queues = (Queue("research-jobs"),)` 才正确。这是真实联调才暴露的坑。
+
+### 检查问题（请用自己的话回答）
+为什么 `SqlIdempotencyStore.save` 遇到并发用「IntegrityError → 读回 → 抛冲突」而不是
+「先 SELECT 防重复后 INSERT」？两者在并发竞态窗口上有什么本质差别？
+
+---
+
+## P04-10：Docker Compose 联调 + P04-UI-05 + P04-11 ✅
+
+### 3 个知识点
+
+1. **migrate 服务三连坑**：① alembic 原在 dev 依赖组，`uv sync --no-dev` 不装 → 须移入
+   runtime；② src 布局下 `migrations/env.py import invest_research` 需 `PYTHONPATH=/app/src`；
+   ③ env.py 只读 `alembic.ini` 的 `sqlalchemy.url`（localhost），必须支持
+   `DATABASE_URL` 环境变量覆盖（12-factor），否则 Docker 内连不上 postgres 服务名。
+
+2. **镜像内自包含迁移优于 bind mount 覆盖**：最终把最新 `migrations/` 与 `alembic.ini`
+   打进镜像（Dockerfile COPY），compose 不再 bind mount——迁移文件随镜像版本走，
+   杜绝"宿主机覆盖旧镜像"的隐含依赖。**验证要点**：下载 artifact 时必须确认对应
+   commit（镜像内 env.py 是否含最新 override），避免误用旧快照。
+
+3. **Worker 消费语义验证**：API 成功落库后经 `CeleryJobDispatcher` 投递 job_id，
+   worker 用真实 `JobRepository`（pending→running→succeeded）+ `ResearchFlowRunner`
+   （fake 全链）推进；轮询 `GET` 观察到 pending→succeeded 即为端到端验收通过。
+
+### 检查问题（请用自己的话回答）
+为什么 "Database 已提交成功但 Celery 消息投递失败" 这个窗口是 Phase 4 认可的已知限制，
+而不是必须先做 transactional outbox？它计划在哪个阶段处理？
+
+---

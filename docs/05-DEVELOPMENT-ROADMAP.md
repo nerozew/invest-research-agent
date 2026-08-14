@@ -126,9 +126,9 @@ Cline 完成任务后必须停止，并给出：
 | P04-07 ✅ | Worker 调用 Flow | task adapter + tests | 状态从 pending 到终态 | 长任务边界 |
 | P04-08 ✅ | 实现取消标志和安全点 | endpoint + flow check | pending/running 取消行为正确 | 协作式取消 |
 | P04-09 ✅ | 编写 Dockerfile | multi-stage image | 非 root 运行、healthcheck 通过 | 容器最小权限 |
-| P04-10 | 编写 Docker Compose | API/worker/Postgres/Redis | 一条命令启动并 smoke test | 本地编排 |
-| P04-UI-05 | 将 Streamlit 加入 Docker Compose | compose 服务 + frontend Dockerfile | 前后端一条命令启动并 smoke test | 前后端编排 |
-| P04-11 | 编写 CLI demo | `research run/status` | 能创建任务、轮询和显示报告路径 | API client UX |
+| P04-10 ✅ | 编写 Docker Compose | API/worker/Postgres/Redis/migrate | 一条命令启动；创建任务→Worker→终态 smoke 全过 | 本地编排 |
+| P04-UI-05 ✅ | 将 Streamlit 加入 Docker Compose | compose 服务 + frontend | 前后端一条命令启动；UI health 200 | 前后端编排 |
+| P04-11 ✅ | 编写 CLI demo | `research run/status/artifacts` | CLI 通过 HTTP 创建/轮询/列工件；fake HTTP 测试过 | API client UX |
 
 ### Phase 4 UI：Streamlit 轻量操作界面（P04-UI 系列）
 
