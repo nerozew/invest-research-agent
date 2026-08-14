@@ -188,7 +188,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-05 ✅ | 结构化日志与敏感字段脱敏 | structlog config + tests | key/header/cookie 不出现在日志 | observability security |
 | P05-06 ✅ | 暴露 Prometheus 指标 | `/metrics` + tests | 无 job_id 高基数 label | metrics design |
 | P05-07 ✅ | 添加 OpenTelemetry trace | tracing config | API→worker→step trace 可关联 | distributed tracing |
-| P05-08 | 写 Grafana 本地最小 dashboard | dashboard JSON | 成功率、P95、重试、错误可见 | RED/USE 指标 |
+| P05-08 ✅ | 写 Grafana 本地最小 dashboard | dashboard JSON | 成功率、P95、重试、错误可见 | RED/USE 指标 |
 | P05-09 | 故障注入：timeout/429/5xx | tests | 重试次数和最终状态符合矩阵 | resilience testing |
 | P05-10 | 故障注入：坏 PDF/非法 LLM JSON | tests | 降级和 guardrail 上限正确 | bounded recovery |
 | P05-11 | 故障注入：数据库/本地工件写入失败 | tests | 不能误报成功，无半成品发布 | commit semantics |
