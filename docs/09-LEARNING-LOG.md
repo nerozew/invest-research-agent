@@ -1732,6 +1732,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-03B：Transactional Outbox 与 pending 投递恢复 ✅
+
+**产物**：outbox_events 表 + SqlOutboxStore + OutboxRelayService + relay bootstrap + tests/test_outbox.py
+
+### 3 个知识点
+1. **双写原子性**：Job 与事件同事务提交，避免「DB 成功但消息未发」gap。
+2. **事件级乐观锁**：pending→claimed 条件更新防并发重复投递。
+3. **有界重试**：dispatch 失败回拨 pending+1，达上限 failed；重启后 relay 恢复。
+
+### 检查问题（请用自己的话回答）
+为什么 outbox 事件必须与 Job 同事务写入，而不能在 dispatch 失败后单独补写？
+
+---
+
 ## P05-04：输入 hash 与下游失效 ✅
 
 **产物**：`src/invest_research/application/versioning.py`（`compute_input_hash` / `should_recompute` / `VersionDecision` / `VersioningService`）、`tests/test_versioning.py`。

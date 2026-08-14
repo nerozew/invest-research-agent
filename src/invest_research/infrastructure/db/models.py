@@ -408,6 +408,38 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class OutboxEvent(Base):
+    """outbox_events：Transactional Outbox（P05-03B）。
+
+    与 Job 创建同事务写入（SqlJobStore.create 一个 commit 内写 ResearchJob +
+    OutboxEvent），保证「数据库创建成功」与「事件可投递」原子一致。
+
+    - event_type：事件类型（当前仅 ``job_created``）；
+    - status：``pending``（待投递）/ ``claimed``（已被某 relay 领取，投递中）/
+      ``sent``（已投递成功）/ ``failed``（重试达上限）；
+    - attempts：累计投递尝试次数，超过 max_attempts 转 failed；
+    - UNIQUE(job_id, event_type)：同一 job 的同一事件只写一次，天然防重复入队。
+    """
+
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "event_type", name="uq_outbox_events_job_event"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class IdempotencyKeyRow(Base):
     """idempotency_keys：Idempotency-Key → 已创建任务（P04-10A 生产幂等池）。
 

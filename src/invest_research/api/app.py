@@ -66,6 +66,10 @@ from invest_research.application.jobs import (
     JobSnapshot,
     JobStore,
 )
+from invest_research.application.outbox import (
+    EVENT_TYPE_JOB_CREATED,
+    OutboxRelayService,
+)
 from invest_research.domain.status import JobStatus
 from invest_research.settings import Settings, get_settings
 
@@ -110,6 +114,7 @@ def create_app(
     idempotency_store: IdempotencyStore | None = None,
     cancel_status_writer: CancelStatusWriter | None = None,
     job_dispatcher: JobDispatcher | None = None,
+    outbox_relay_service: OutboxRelayService | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例（application factory）。
 
@@ -176,6 +181,7 @@ def create_app(
     app.state.cancel_job_service = cancel_job_service
     app.state.idempotent_job_service = idempotent_job_service
     app.state.job_dispatcher = job_dispatcher
+    app.state.outbox_relay_service = outbox_relay_service
 
     @app.get(
         "/health",
@@ -309,6 +315,9 @@ def create_app(
     def _get_job_dispatcher(request: Request) -> JobDispatcher | None:
         return cast(JobDispatcher | None, request.app.state.job_dispatcher)
 
+    def _get_outbox_relay_service(request: Request) -> OutboxRelayService | None:
+        return cast(OutboxRelayService | None, request.app.state.outbox_relay_service)
+
     def _get_artifact_catalog_service(request: Request) -> GetJobArtifactsService | None:
         return cast(GetJobArtifactsService | None, request.app.state.artifact_catalog_service)
 
@@ -409,6 +418,7 @@ def create_app(
         ),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         dispatcher: JobDispatcher | None = Depends(_get_job_dispatcher),
+        outbox_relay: OutboxRelayService | None = Depends(_get_outbox_relay_service),
     ) -> Response:
         if service is None:
             return JSONResponse(
@@ -425,8 +435,12 @@ def create_app(
                     content={"detail": str(exc)},
                 )
             # 仅首次创建成功后投递；幂等复用旧 job_id 时不重复投递。
-            if dispatcher is not None and created_now:
-                dispatcher.dispatch(stored.job_id)
+            # outbox relay 优先：事件已与 Job 同事务写入，投递失败会持久化留待恢复。
+            if created_now:
+                if outbox_relay is not None:
+                    outbox_relay.publish(stored.job_id, EVENT_TYPE_JOB_CREATED)
+                elif dispatcher is not None:
+                    dispatcher.dispatch(stored.job_id)
             payload = CreateResearchJobResponse(job_id=stored.job_id, status=stored.status)
             status_code = status.HTTP_202_ACCEPTED if created_now else status.HTTP_200_OK
             return JSONResponse(
@@ -434,8 +448,10 @@ def create_app(
                 content=payload.model_dump(mode="json"),
             )
         created: CreatedJob = service.create(body)
-        # 非幂等路径也投递（首次创建成功）。
-        if dispatcher is not None:
+        # 非幂等路径也投递（首次创建成功）。outbox relay 优先。
+        if outbox_relay is not None:
+            outbox_relay.publish(created.job_id, EVENT_TYPE_JOB_CREATED)
+        elif dispatcher is not None:
             dispatcher.dispatch(created.job_id)
         payload = CreateResearchJobResponse(job_id=created.job_id, status=created.status)
         return JSONResponse(

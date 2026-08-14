@@ -1,7 +1,8 @@
-"""生产 composition root（P04-10A）。
+"""生产 composition root（P04-10A + P05-03B）。
 
-把基础设施真实实现（SQLAlchemy engine/session、6 个 Store Adapter、
-Celery dispatcher）组装进 ``api.create_app``，产出完整可用的生产 FastAPI 应用。
+把基础设施真实实现（SQLAlchemy engine/session、Store Adapter、
+Celery dispatcher、Transactional Outbox）组装进 ``api.create_app``，
+产出完整可用的生产 FastAPI 应用。
 
 职责与约束：
 - 读 Settings（``DATABASE_URL``/``REDIS_URL``/``BROKER_URL`` 来自环境变量）；
@@ -21,6 +22,7 @@ from invest_research.api.health import (
     build_health_checker,
     dispose_dependency_resources,
 )
+from invest_research.application.outbox import OutboxRelayCounter, OutboxRelayService
 from invest_research.infrastructure.db.application_stores import (
     SqlArtifactCatalogStore,
     SqlArtifactContentStore,
@@ -29,6 +31,7 @@ from invest_research.infrastructure.db.application_stores import (
     SqlJobListStore,
     SqlJobQueryStore,
     SqlJobStore,
+    SqlOutboxStore,
 )
 from invest_research.infrastructure.db.base import (
     create_db_engine,
@@ -65,6 +68,9 @@ class ProductionContainer:
         artifact_catalog_store: SqlArtifactCatalogStore,
         artifact_content_store: SqlArtifactContentStore,
         dispatcher: CeleryJobDispatcher,
+        outbox_store: SqlOutboxStore,
+        outbox_relay: OutboxRelayService,
+        outbox_counter: OutboxRelayCounter,
     ) -> None:
         self.settings = settings
         self.engine = engine
@@ -78,17 +84,15 @@ class ProductionContainer:
         self.artifact_catalog_store = artifact_catalog_store
         self.artifact_content_store = artifact_content_store
         self.dispatcher = dispatcher
+        self.outbox_store = outbox_store
+        self.outbox_relay = outbox_relay
+        self.outbox_counter = outbox_counter
 
 
 def create_production_app(
     settings: Settings | None = None,
 ) -> tuple[FastAPI, ProductionContainer]:
-    """创建生产 FastAPI 应用与依赖容器（P04-10A 入口）。
-
-    返回 (app, container)。调用方（uvicorn 使用 ``--factory`` 需要
-    模块级 ``create_production_app`` 可被 uvicorn 当作 factory 直接调用，
-    因此这里额外提供包装函数 ``create_production_app_factory``。
-    """
+    """创建生产 FastAPI 应用与依赖容器（P04-10A 入口）。"""
     resolved = settings or get_settings()
 
     engine = create_db_engine(resolved.database_url)
@@ -106,6 +110,11 @@ def create_production_app(
     celery_app = create_celery_app(broker_url=resolved.broker_url)
     dispatcher = CeleryJobDispatcher(celery_app)
 
+    # P05-03B：Transactional Outbox —— 事件与 Job 同事务写入，relay 恢复未投递。
+    outbox_store = SqlOutboxStore(session_factory)
+    outbox_relay = OutboxRelayService(store=outbox_store, dispatcher=dispatcher)
+    outbox_counter = OutboxRelayCounter()
+
     container = ProductionContainer(
         settings=resolved,
         engine=engine,
@@ -119,6 +128,9 @@ def create_production_app(
         artifact_catalog_store=artifact_catalog_store,
         artifact_content_store=artifact_content_store,
         dispatcher=dispatcher,
+        outbox_store=outbox_store,
+        outbox_relay=outbox_relay,
+        outbox_counter=outbox_counter,
     )
 
     app = create_app(
@@ -132,6 +144,7 @@ def create_production_app(
         artifact_catalog_store=artifact_catalog_store,
         artifact_content_store=artifact_content_store,
         job_dispatcher=dispatcher,
+        outbox_relay_service=outbox_relay,
     )
     # 把 container 挂到 app.state 供 lifespan 释放
     app.state.production_container = container

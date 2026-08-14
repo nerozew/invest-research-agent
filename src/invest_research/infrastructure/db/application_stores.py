@@ -29,6 +29,10 @@ from invest_research.application.artifacts import ArtifactInfo
 from invest_research.application.idempotency import StoredJob
 from invest_research.application.job_listing import JobListCursor, JobListEntry
 from invest_research.application.jobs import JobSnapshot, StepSnapshot
+from invest_research.application.outbox import (
+    EVENT_TYPE_JOB_CREATED,
+    OutboxEventSnapshot,
+)
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus, StepStatus
 from invest_research.infrastructure.db.models import (
@@ -36,6 +40,9 @@ from invest_research.infrastructure.db.models import (
 )
 from invest_research.infrastructure.db.models import (
     IdempotencyKeyRow as IdempotencyKeyORM,
+)
+from invest_research.infrastructure.db.models import (
+    OutboxEvent as OutboxEventORM,
 )
 from invest_research.infrastructure.db.models import (
     ResearchJob as ResearchJobORM,
@@ -53,6 +60,7 @@ __all__ = [
     "SqlCancelStatusWriter",
     "SqlArtifactCatalogStore",
     "SqlArtifactContentStore",
+    "SqlOutboxStore",
 ]
 
 
@@ -78,6 +86,15 @@ class SqlJobStore:
                 config_snapshot={},
             )
             session.add(row)
+            session.add(
+                OutboxEventORM(
+                    job_id=job_id,
+                    event_type=EVENT_TYPE_JOB_CREATED,
+                    payload={"job_id": str(job_id)},
+                    status="pending",
+                    attempts=0,
+                )
+            )
             try:
                 session.commit()
             except IntegrityError:
@@ -324,3 +341,86 @@ class SqlArtifactContentStore:
         if not candidate.is_file():
             return None
         return candidate.read_bytes()
+
+
+class SqlOutboxStore:
+    """OutboxStore：SQLAlchemy 实现 outbox_events 表读写（P05-03B）。"""
+
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._sf = session_factory
+
+    def find_undelivered(self, *, limit: int) -> list[OutboxEventSnapshot]:
+        with self._sf() as session:
+            rows = (
+                session.execute(
+                    select(OutboxEventORM)
+                    .where(OutboxEventORM.status == "pending")
+                    .order_by(OutboxEventORM.created_at.asc())
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+        return [self._snapshot(r) for r in rows]
+
+    def find_by_job(
+        self, job_id: uuid.UUID, event_type: str
+    ) -> OutboxEventSnapshot | None:
+        with self._sf() as session:
+            row = session.execute(
+                select(OutboxEventORM).where(
+                    OutboxEventORM.job_id == job_id,
+                    OutboxEventORM.event_type == event_type,
+                )
+            ).scalar_one_or_none()
+        return self._snapshot(row) if row is not None else None
+
+    @staticmethod
+    def _snapshot(row: OutboxEventORM) -> OutboxEventSnapshot:
+        return OutboxEventSnapshot(
+            event_id=row.id,
+            job_id=row.job_id,
+            event_type=row.event_type,
+            attempts=row.attempts,
+        )
+
+    def mark_claimed(self, event_id: uuid.UUID) -> bool:
+        with self._sf() as session:
+            result = session.execute(
+                update(OutboxEventORM)
+                .where(
+                    OutboxEventORM.id == event_id,
+                    OutboxEventORM.status == "pending",
+                )
+                .values(status="claimed")
+            )
+            affected = int(result.rowcount)  # type: ignore[attr-defined]
+            session.commit()
+            return affected == 1
+
+    def mark_sent(self, event_id: uuid.UUID) -> None:
+        with self._sf() as session:
+            session.execute(
+                update(OutboxEventORM)
+                .where(OutboxEventORM.id == event_id)
+                .values(status="sent")
+            )
+            session.commit()
+
+    def requeue(self, event_id: uuid.UUID) -> None:
+        with self._sf() as session:
+            session.execute(
+                update(OutboxEventORM)
+                .where(OutboxEventORM.id == event_id)
+                .values(status="pending", attempts=OutboxEventORM.attempts + 1)
+            )
+            session.commit()
+
+    def mark_failed(self, event_id: uuid.UUID) -> None:
+        with self._sf() as session:
+            session.execute(
+                update(OutboxEventORM)
+                .where(OutboxEventORM.id == event_id)
+                .values(status="failed")
+            )
+            session.commit()
