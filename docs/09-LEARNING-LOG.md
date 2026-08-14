@@ -1714,3 +1714,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么恢复任务要把 stale 的 `running` 步骤改成 `failed_retryable` 而不是直接改成 `pending` 或直接重跑？"仅当当前是 running 才更新"（条件更新）如何防止恢复任务误伤一个只是运行得慢的真实 worker？
 
 ---
+
+## P05-03A：Worker 启动自动 stale recovery 与恢复计数 ✅
+
+**产物**：`application/recovery.py`（新增 `RecoveryCounter`）、`infrastructure/queue/recovery_bootstrap.py`（`run_startup_recovery`）、`tests/test_recovery_bootstrap.py`。
+
+### 3 个知识点
+
+1. **"启动即恢复"是 at-least-once 的启动语义**：宕机后重启的 worker，不等人手动跑恢复脚本，而是在启动流程里调用 `run_startup_recovery` 自动扫描超租约步骤并标记为可重试。这样"worker 崩溃 → 重启 → 自动恢复被中断的步骤"形成一个闭环，让断点续跑成为系统默认行为而非人工操作。
+
+2. **恢复计数可观测（RecoveryCounter）**：`RecoveryCounter` 累计"启动以来恢复的步骤总数"并保留最近一次扫描结果。这是将来 Prometheus gauge（P05-06）与结构化日志的来源——恢复不是"静默进行"，运维能看到"这次启动恢复了几个 stale 步骤"，从而发现频繁崩溃模式。
+
+3. **`now` 可注入（ClockNow）让启动恢复可测试**：`run_startup_recovery(service, counter, now=lambda: now)` 通过注入固定时钟，测试可以在毫秒级验证"启动时恢复了1个、无 stale 时0个、多次启动计数累计"——不依赖真实时间，与 P05-03 的 fake store + 固定 now 完全一致。
+
+### 检查问题（请用自己的话回答）
+为什么"worker 重启时自动恢复"比"等运维手动跑恢复脚本"更可靠？`RecoveryCounter` 的累计计数对运维/监控有什么价值（提示：结合频繁崩溃模式与 P05-06 Prometheus）？
+
+---

@@ -62,6 +62,31 @@ class RecoveryResult:
     recovered_step_names: list[str]
 
 
+class RecoveryCounter:
+    """恢复计数（供观测：Prometheus gauge / 日志聚合）。
+
+    记录"启动以来累计恢复的 stale 步骤数"；``recovered_steps`` 保留
+    最近一次扫描的步骤名，供日志断言（P05-03A）。
+    """
+
+    def __init__(self) -> None:
+        self._total_recovered: int = 0
+        self._last_scan: RecoveryResult | None = None
+
+    @property
+    def total_recovered(self) -> int:
+        return self._total_recovered
+
+    @property
+    def last_scan(self) -> RecoveryResult | None:
+        return self._last_scan
+
+    def record(self, result: RecoveryResult) -> None:
+        """累加一次恢复扫描的结果。"""
+        self._total_recovered += result.recovered_count
+        self._last_scan = result
+
+
 class StaleRecoveryService:
     """把超过 lease 的 running 步骤标记为可重试（不直接重跑）。"""
 
