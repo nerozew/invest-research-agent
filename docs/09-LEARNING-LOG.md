@@ -1746,6 +1746,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-05：结构化日志与敏感字段脱敏 ✅
+
+**产物**：src/invest_research/infrastructure/observability/logging.py + tests/test_observability.py（5 测试）
+
+### 3 个知识点
+1. **脱敏 processor 在渲染前执行**：structlog 用自定义 processor 在 JSON 渲染前把 key/Authorization/Cookie 替换为 ***。
+2. **敏感字段名规范化**：set_cookie 与 set-cookie 需统一（下划线转连字符）再查 SENSITIVE_KEYS。
+3. **正则顺序影响结果**：先匹配完整 Bearer 值，再匹配 key=val，避免残留。
+
+### 检查问题（请用自己的话回答）
+为什么脱敏必须放在 JSON 渲染之前，而不是渲染之后？
+
+---
+
 ## P05-04：输入 hash 与下游失效 ✅
 
 **产物**：`src/invest_research/application/versioning.py`（`compute_input_hash` / `should_recompute` / `VersionDecision` / `VersioningService`）、`tests/test_versioning.py`。
