@@ -1,10 +1,15 @@
-"""任务状态与步骤轮询页面（P04-UI-03）。
+"""任务状态与步骤轮询页面（P04-UI-08/09/10）。
 
 功能：
-- 输入 job_id 查询任务状态与步骤；
-- 展示耗时、当前步骤、错误与尝试次数；
-- pending/running 时有限轮询（最多 60 次、间隔 2s），到达终态自动停止；
-- 处理 404（任务不存在）、503（服务暂不可用）与超时。
+- 从 URL/session 自动恢复当前 job_id（P04-UI-08）；无 job_id 时提供
+  最近任务选择 + 手动输入备用入口；
+- 状态区域用 ``st.fragment(run_every=...)`` 局部轮询（P04-UI-09）：
+  只刷新任务状态/步骤/耗时，页面标题与导航不反复重建；
+- pending/running 时轮询，终态（succeeded/partial/failed/cancelled）停止；
+- 网络暂时失败提示并允许下次轮询恢复；
+- 取消任务后刷新详情状态；
+- failed/partial 展示 error_code、error_message 与可读建议（共享展示函数）；
+- 提供返回任务中心与查看报告/工件。
 
 前端只调用 FastAPI（架构 §11），轮询停止条件由前端负责。
 """
@@ -16,98 +21,129 @@ import streamlit as st
 from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
-from invest_research.frontend.models import JobSnapshot, StepSnapshot
-from invest_research.frontend.polling import (
-    MAX_POLLS,
-    POLL_INTERVAL_SECONDS,
-    PollingError,
-    poll_until_terminal,
-)
+from invest_research.frontend.render import is_terminal_status, render_job_snapshot
+from invest_research.frontend.state import load_job_id, save_job_id
 
 st.set_page_config(page_title="任务状态", page_icon="🔍", layout="wide")
 st.title("🔍 任务状态")
-st.caption(
-    f"输入任务 job_id 查询进度；任务执行中会自动轮询"
-    f"（最多 {MAX_POLLS} 次，间隔 {POLL_INTERVAL_SECONDS:.0f}s），到达终态自动停止。"
-)
+st.caption("任务执行中会自动局部轮询（每 2~3 秒），到达终态自动停止。")
 
 
 def _build_client() -> ResearchApiClient:
     return ResearchApiClient(base_url=get_api_base_url(), timeout=get_api_timeout())
 
 
-def _render_snapshot(snapshot: JobSnapshot) -> None:
-    """展示任务总览：状态/耗时/当前步骤/错误。"""
-    status_map = {
-        "pending": "⏳ 等待中",
-        "running": "🔄 执行中",
-        "succeeded": "✅ 成功",
-        "partial": "⚠️ 部分完成",
-        "failed": "❌ 失败",
-        "cancelled": "🚫 已取消",
-    }
-    st.subheader("任务总览")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("状态", status_map.get(snapshot.status.value, snapshot.status.value))
-    with col2:
-        st.metric(
-            "耗时 (秒)",
-            snapshot.duration_seconds if snapshot.duration_seconds is not None else "—",
+@st.cache_resource
+def _cached_client() -> ResearchApiClient:
+    return _build_client()
+
+
+def _choose_job_id() -> str | None:
+    """无 job_id 时的选择器：最近任务选择 + 手动输入备用入口。"""
+    client = _cached_client()
+
+    try:
+        page = client.list_jobs(limit=10)
+    except ApiClientError as exc:
+        st.warning(f"无法加载最近任务：{exc}")
+        page = None
+
+    if page is not None and page.items:
+        selected = st.selectbox(
+            "选择最近任务",
+            options=page.items,
+            format_func=lambda e: f"{e.input_company} · {e.status.value}",
+            key="status_job_picker",
         )
-    with col3:
-        st.metric("当前步骤", snapshot.current_step or "—")
+        if st.button("使用该任务", key="status_use_picked"):
+            save_job_id(str(selected.job_id))
+            st.rerun()
+            return str(selected.job_id)
 
-    if snapshot.error_code:
-        st.warning(f"错误码：{snapshot.error_code} · {snapshot.error_message or ''}")
+    manual = st.text_input(
+        "或手动输入 job_id（备用入口）",
+        placeholder="粘贴 UUID",
+        key="status_manual_job_id",
+    )
+    if st.button("查询", key="status_manual_go") and manual.strip():
+        from invest_research.frontend.state import is_valid_job_id
 
-    st.subheader("执行步骤")
-    if not snapshot.steps:
-        st.info("尚无步骤记录（任务可能刚创建或已被清理）。")
+        if not is_valid_job_id(manual):
+            st.error("job_id 不是合法 UUID，无法查询。")
+            return None
+        save_job_id(manual.strip())
+        st.rerun()
+        return manual.strip()
+    return None
+
+
+def _cancel_job(client: ResearchApiClient, job_id: str) -> None:
+    """取消任务：协作式取消；成功/已终态都刷新详情。"""
+    try:
+        result = client.cancel_research_job(job_id)
+    except ApiClientError as exc:
+        st.error(f"取消失败：{exc}")
         return
-    rows = []
-    for step in snapshot.steps:
-        rows.append(_step_row(step))
-    st.table(rows)
+    if result.did_cancel:
+        st.success("已请求取消该任务。")
+    elif result.already_cancelled:
+        st.info("该任务已处于取消/终态。")
+    st.rerun()
 
 
-def _step_row(step: StepSnapshot) -> dict[str, str]:
-    """把单个步骤快照转成表格行。"""
-    return {
-        "步骤": str(step.sequence_no),
-        "名称": step.step_name,
-        "状态": step.status.value,
-        "尝试次数": str(step.attempt_count),
-        "耗时 (秒)": f"{step.duration_seconds:.3f}" if step.duration_seconds is not None else "—",
-        "错误码": step.error_code or "—",
-    }
+def _render_status_fragment(client: ResearchApiClient, job_id: str) -> None:
+    """局部轮询 fragment：只刷新任务状态/步骤/耗时区域（P04-UI-09）。"""
+    try:
+        snapshot = client.get_research_job(job_id)
+    except ApiClientError as exc:
+        st.error(f"查询失败：{exc}")
+        st.info("网络暂时失败，将在下次自动轮询时重试。")
+        # 允许下次轮询恢复：run_every 会再次调用本函数
+        return
+
+    if is_terminal_status(snapshot.status):
+        render_job_snapshot(snapshot)
+        st.success("任务已到达终态，已停止自动轮询。")
+        return
+
+    render_job_snapshot(snapshot)
+    # 非终态：提供取消入口
+    if snapshot.status.value in ("pending", "running"):
+        if st.button("🚫 取消任务", key="status_cancel_job"):
+            _cancel_job(client, job_id)
+            return
+
+    st.info(f"任务执行中（{snapshot.status.value}），每 2~3 秒自动刷新状态…")
+
+
+def _fragment_status(client: ResearchApiClient, job_id: str) -> None:
+    st.fragment(
+        lambda: _render_status_fragment(client, job_id),
+        run_every=2.0,
+    )
 
 
 def main() -> None:
-    job_id = st.text_input("任务 job_id", placeholder="粘贴创建任务后返回的 job_id")
-    if not job_id.strip():
-        st.info("请在「创建投研任务」页面创建任务后，把 job_id 粘贴到此处。")
-        return
+    if st.button("← 返回任务中心", key="status_back_home"):
+        st.switch_page("Home.py")
 
-    client = _build_client()
+    job_id = load_job_id()
+    if job_id is None:
+        st.subheader("选择要查看的任务")
+        picked = _choose_job_id()
+        if picked:
+            job_id = picked
+        else:
+            st.info("请从最近任务中选择，或手动输入 job_id。")
+            return
 
-    def fetch() -> JobSnapshot:
-        return client.get_research_job(job_id.strip())
+    client = _cached_client()
+    st.caption(f"当前任务：`{job_id}`")
 
-    if st.button("查询任务状态", type="primary"):
-        with st.spinner("正在查询…"):
-            try:
-                snapshot, timed_out = poll_until_terminal(fetch)
-            except PollingError as exc:
-                st.error(f"查询失败：{exc}")
-                return
-            except ApiClientError as exc:
-                st.error(f"查询失败：{exc}")
-                return
+    if st.button("📄 查看报告与工件", key="status_view_report"):
+        st.switch_page("pages/3_报告与工件.py")
 
-        _render_snapshot(snapshot)
-        if timed_out:
-            st.warning(f"已轮询 {MAX_POLLS} 次仍未到达终态，可能任务仍在执行。请稍后再次查询。")
+    _fragment_status(client, job_id)
 
 
 main()

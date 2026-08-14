@@ -1,10 +1,10 @@
-"""报告、质量结果、引用与工件页面（P04-UI-04）。
+"""报告、质量结果、引用与工件页面（P04-UI-04 + P04-UI-08/10）。
 
 功能：
-- 输入 job_id，从后端工件清单中读取报告（Markdown）、质量结果、引用与数据限制；
-- 展示报告内容（text/markdown）、质量问题、引用和来源、数据限制；
-- 下载已登记工件：只能通过 FastAPI 下载接口（后端路径穿越防护）；
-- 禁止展示服务器内部路径（storage_uri）与不安全 HTML/JavaScript。
+- 从 URL/session 自动恢复当前 job_id（P04-UI-08）；刷新/复制 URL 可恢复；
+- 展示报告文本、质量结果、引用与工件清单；只通过 FastAPI 下载（后端路径穿越防护）；
+- succeeded 但没有 artifact 时显示"当前任务尚无可下载工件"，不报错；
+- 提供返回任务中心与查看任务详情导航。
 
 前端只调用 FastAPI（架构 §11），展示层只读。
 """
@@ -16,6 +16,7 @@ import streamlit as st
 from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
+from invest_research.frontend.state import load_job_id
 
 st.set_page_config(page_title="报告与工件", page_icon="📄", layout="wide")
 st.title("📄 报告与工件")
@@ -30,6 +31,11 @@ def _build_client() -> ResearchApiClient:
     return ResearchApiClient(base_url=get_api_base_url(), timeout=get_api_timeout())
 
 
+@st.cache_resource
+def _cached_client() -> ResearchApiClient:
+    return _build_client()
+
+
 def _render_report_and_artifacts(client: ResearchApiClient, job_id: str) -> None:
     """展示报告文本 + 工件清单；支持安全下载。"""
     try:
@@ -39,7 +45,7 @@ def _render_report_and_artifacts(client: ResearchApiClient, job_id: str) -> None
         return
 
     if not artifacts:
-        st.info("该任务暂无已登记工件。")
+        st.info("当前任务尚无可下载工件。")
         return
 
     st.subheader("已登记工件")
@@ -66,7 +72,6 @@ def _render_report_and_artifacts(client: ResearchApiClient, job_id: str) -> None
                 except ApiClientError as exc:
                     st.warning(f"无法读取 {artifact.artifact_key}：{exc}")
                     continue
-                # 安全渲染：Markdown 允许；不清除脚本内容以防 text/markdown 注入 HTML
                 if artifact.artifact_key.endswith(".md"):
                     st.markdown(text)
                 else:
@@ -92,11 +97,21 @@ def _render_report_and_artifacts(client: ResearchApiClient, job_id: str) -> None
 
 
 def main() -> None:
-    job_id = st.text_input("任务 job_id", placeholder="粘贴创建任务后返回的 job_id")
-    if not job_id.strip():
-        st.info("请输入 job_id 查看报告与工件。")
+    col_back, col_detail = st.columns(2)
+    with col_back:
+        if st.button("← 返回任务中心", key="report_back_home"):
+            st.switch_page("Home.py")
+    with col_detail:
+        if st.button("🔍 查看任务详情", key="report_view_detail"):
+            st.switch_page("pages/2_任务状态.py")
+
+    job_id = load_job_id()
+    if job_id is None:
+        st.info("请先在「创建投研任务」页面创建任务，或从任务中心选择任务。")
         return
-    _render_report_and_artifacts(_build_client(), job_id.strip())
+
+    st.caption(f"当前任务：`{job_id}`")
+    _render_report_and_artifacts(_cached_client(), job_id)
 
 
 main()
