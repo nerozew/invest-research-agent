@@ -406,3 +406,25 @@ class Artifact(Base):
     content_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IdempotencyKeyRow(Base):
+    """idempotency_keys：Idempotency-Key → 已创建任务（P04-10A 生产幂等池）。
+
+    - key 唯一：数据库 UNIQUE 约束兜底，防止并发下同一 key 创建两个任务；
+    - request_fingerprint：请求体规范化指纹，判断同 key 是否同一请求（同请求复用，
+      异请求 409）；
+    - status 冗余保存创建时刻任务状态，供幂等复用返回。
+    """
+
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (UniqueConstraint("key", name="uq_idempotency_keys_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(200), nullable=False)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

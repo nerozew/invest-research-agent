@@ -51,6 +51,7 @@ from invest_research.application.idempotency import (
     IdempotencyConflict,
     IdempotencyStore,
 )
+from invest_research.application.job_dispatcher import JobDispatcher
 from invest_research.application.jobs import (
     CreatedJob,
     CreateResearchJobService,
@@ -100,6 +101,7 @@ def create_app(
     artifact_content_store: ArtifactContentStore | None = None,
     idempotency_store: IdempotencyStore | None = None,
     cancel_status_writer: CancelStatusWriter | None = None,
+    job_dispatcher: JobDispatcher | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例（application factory）。
 
@@ -161,6 +163,7 @@ def create_app(
     app.state.artifact_content_service = artifact_content_service
     app.state.cancel_job_service = cancel_job_service
     app.state.idempotent_job_service = idempotent_job_service
+    app.state.job_dispatcher = job_dispatcher
 
     @app.get(
         "/health",
@@ -249,6 +252,9 @@ def create_app(
             CreateResearchJobIdempotentService | None,
             request.app.state.idempotent_job_service,
         )
+
+    def _get_job_dispatcher(request: Request) -> JobDispatcher | None:
+        return cast(JobDispatcher | None, request.app.state.job_dispatcher)
 
     def _get_artifact_catalog_service(request: Request) -> GetJobArtifactsService | None:
         return cast(GetJobArtifactsService | None, request.app.state.artifact_catalog_service)
@@ -349,6 +355,7 @@ def create_app(
             _get_idempotent_job_service
         ),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        dispatcher: JobDispatcher | None = Depends(_get_job_dispatcher),
     ) -> Response:
         if service is None:
             return JSONResponse(
@@ -364,6 +371,9 @@ def create_app(
                     status_code=status.HTTP_409_CONFLICT,
                     content={"detail": str(exc)},
                 )
+            # 仅首次创建成功后投递；幂等复用旧 job_id 时不重复投递。
+            if dispatcher is not None and created_now:
+                dispatcher.dispatch(stored.job_id)
             payload = CreateResearchJobResponse(job_id=stored.job_id, status=stored.status)
             status_code = status.HTTP_202_ACCEPTED if created_now else status.HTTP_200_OK
             return JSONResponse(
@@ -371,6 +381,9 @@ def create_app(
                 content=payload.model_dump(mode="json"),
             )
         created: CreatedJob = service.create(body)
+        # 非幂等路径也投递（首次创建成功）。
+        if dispatcher is not None:
+            dispatcher.dispatch(created.job_id)
         payload = CreateResearchJobResponse(job_id=created.job_id, status=created.status)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,

@@ -12,7 +12,6 @@ import uuid
 from invest_research.infrastructure.queue.celery_app import RESEARCH_QUEUE, create_celery_app
 from invest_research.infrastructure.queue.tasks import (
     TASK_PROCESS_JOB,
-    JobTaskHandler,
     register_tasks,
 )
 

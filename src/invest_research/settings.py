@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     # ---- 基础设施（P01 起启用，本地开发默认值）----
     database_url: str = "postgresql+psycopg://invest:invest@localhost:5432/invest"
     redis_url: str = "redis://localhost:6379/0"
+    # Celery broker（P04-10A：API→Worker 投递；生产红 Redis，测试 memory://）
+    broker_url: str = "redis://localhost:6379/0"
 
     # ---- Readiness 探测超时（P04-01）----
     # /readiness 对依赖的探测必须设置显式超时，避免请求被卡在无响应的依赖上；

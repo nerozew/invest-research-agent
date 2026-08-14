@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
+from kombu import Queue  # type: ignore[import-untyped]  # kombu 无 mypy stub
 
 __all__ = ["RESEARCH_QUEUE", "create_celery_app"]
 
@@ -38,7 +39,7 @@ def create_celery_app(
     app.conf.broker_url = broker_url
     app.conf.result_backend = resolved_backend
     app.conf.task_default_queue = RESEARCH_QUEUE
-    app.conf.task_queues = (RESEARCH_QUEUE,)
+    app.conf.task_queues = (Queue(RESEARCH_QUEUE),)
     # 显式关闭 pickle（安全）；仅允许 JSON 序列化。
     app.conf.task_serializer = "json"
     app.conf.result_serializer = "json"

@@ -1,4 +1,4 @@
-# P04-10/UI-05：本地 Docker Compose（API / Worker / Streamlit / PostgreSQL / Redis）
+# P04-10/UI-05：本地 Docker Compose（migrate / API / Worker / Streamlit / PostgreSQL / Redis）
 # 远程运行优先使用 GHCR 预构建镜像（GitHub Actions 构建并推送，见 .github/workflows/docker-image.yml）。
 # 服务内部用服务名通信；不公开 DB/Redis 端口；PostgreSQL 使用持久化 volume；
 # healthcheck 配置齐全；不含任何真实密钥（敏感配置由运行时 .env 提供，不进镜像）。
@@ -11,7 +11,7 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   BROKER_URL: redis://redis:6379/0
   ARTIFACT_ROOT: /app/artifacts
-  SEC_USER_AGENT_CONTACT: your-email@example.com
+  SEC_USER_AGENT_CONTACT: ${SEC_USER_AGENT_CONTACT:-your-email@example.com}
   LLM_API_KEY: ${LLM_API_KEY:-your-llm-api-key-placeholder}
   LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
   LLM_MODEL_RESEARCH: ${LLM_MODEL_RESEARCH:-qwen-max}
@@ -19,6 +19,10 @@ x-app-env: &app-env
   LLM_MODEL_WRITER: ${LLM_MODEL_WRITER:-qwen-max}
   # 后端 API 地址（Streamlit 通过服务名访问）
   API_BASE_URL: http://api:8000
+  # src 布局：把源码目录加入 PYTHONPATH（镜像内源码位于 /app/src）
+  PYTHONPATH: /app/src
+  # 非 root 用户 app 无 /home/app；crewai(chromadb) 需要可写数据目录，HOME 指向可写的 /tmp
+  HOME: /tmp
 
 services:
   postgres:
@@ -47,20 +51,33 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase4}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "alembic upgrade head"
+    environment:
+      DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase4}
     build:
       context: .
       dockerfile: Dockerfile
-    command: >
-      sh -c "uvicorn invest_research.api.app:create_app --factory
-             --host 0.0.0.0 --port 8000"
+    command: sh -c "uvicorn invest_research.infrastructure.wiring:create_production_app_factory --factory --host 0.0.0.0 --port 8000"
     environment: *app-env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     healthcheck:
@@ -77,15 +94,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: >
-      sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app
-             worker --loglevel=info --queues=research-jobs"
+    command: sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app worker --loglevel=info --queues=research-jobs"
     environment: *app-env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - artifacts_data:/app/artifacts
 
@@ -94,10 +111,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: >
-      sh -c "streamlit run frontend/Home.py
-             --server.address 0.0.0.0 --server.port 8501
-             --server.headless true"
+    command: sh -c "streamlit run frontend/Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true"
     environment:
       API_BASE_URL: http://api:8000
       API_TIMEOUT: "30"
