@@ -17,6 +17,7 @@ dependencies = [
     "redis>=8.1.0",
     "sqlalchemy>=2.0.51",
     "streamlit>=1.48.0",
+    "tenacity>=9.1.4",
     "uvicorn>=0.52.1",
 ]
 

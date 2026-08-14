@@ -1663,3 +1663,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么 keyset 分页可以做到「无重复、无遗漏」，而 offset 分页在任务不断创建/状态变化时做不到？如果两条任务 created_at 完全相同，排序键为什么要加上 job_id？
 
 ---
+
+## P05-01：实现通用 retry policy ✅
+
+**产物**：`src/invest_research/infrastructure/retry.py`（RetryableError / compute_backoff_delay / RetryPolicy / build_retrying / retry_call）、`tests/test_retry_policy.py`；pyproject 增加 tenacity 依赖。
+
+### 3 个知识点
+
+1. **错误码白名单优先于「异常类型可见」**：只允许把 domain 层白名单错误码（RATE_LIMITED / NETWORK_TRANSIENT / UPSTREAM_5XX / SCHEMA_INVALID）包装成 `RetryableError`，构造时校验；`AuthError`、`InputInvalid` 等非白名单错误码根本无法被当成可重试异常抛出。这把「能不能重试」的决策收敛到 domain 层，避免调用方随意把业务错误划成可重试。
+
+2. **可注入 sleep 让重试测试既快又确定**：tenacity `Retrying` 接受 `sleep=` 参数；先推进模拟时钟（每步 1s→2s→4s）并记录每次 sleep 时长，即可断言「尝试了 4 次」「等待序列是 [1.0, 2.0, 4.0]」，完全不需要真实等待（配合 docs/04 §5.1「测试不得依赖真实等待时间」）。
+
+3. **`reraise=True` 保证「耗尽后抛出最后一次原始异常」**：默认 tenacity 在重试次数耗尽后抛 RetryError，业务侧会用 `except RetryableError` 而不是原始异常；`reraise=True` 直接抛原始异常（含 error_code 字段），让上层按错误码分支、不丢失语义。
+
+### 检查问题（请用自己的话回答）
+为什么 `RetryableError` 构造时要对 `error_code` 做「白名单校验」？如果把 `AUTH_ERROR`（key 无效）也包装成可重试错误，会发生什么不好的结果？
+
+---

@@ -179,9 +179,10 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |
 |---|---|---|---|---|
-| P05-01 | 实现通用 retry policy | Tenacity policy + tests | 只重试白名单错误，测试无真实 sleep | backoff/jitter |
+| P05-01 ✅ | 实现通用 retry policy | Tenacity policy + tests | 只重试白名单错误，测试无真实 sleep | backoff/jitter |
 | P05-02 | 尊重 `Retry-After` 并动态降速 | HTTP policy + tests | 429 fixture 行为可证明 | rate-limit cooperation |
 | P05-03 | 实现步骤 lease 与 stale recovery | recovery job + tests | 模拟 worker 崩溃后可恢复 | at-least-once execution |
+| P05-03A | Worker 启动自动 stale recovery 与恢复计数 | recovery bootstrap + tests | worker 启动自动扫描超租约步骤，恢复次数可观测 | at-least-once 启动语义 |
 | P05-04 | 实现输入 hash 和下游失效 | versioning service | prompt/schema 变化触发正确重算 | cache invalidation |
 | P05-05 | 结构化日志与敏感字段脱敏 | structlog config + tests | key/header/cookie 不出现在日志 | observability security |
 | P05-06 | 暴露 Prometheus 指标 | `/metrics` + tests | 无 job_id 高基数 label | metrics design |
@@ -191,6 +192,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-10 | 故障注入：坏 PDF/非法 LLM JSON | tests | 降级和 guardrail 上限正确 | bounded recovery |
 | P05-11 | 故障注入：数据库/本地工件写入失败 | tests | 不能误报成功，无半成品发布 | commit semantics |
 | P05-12 | 录制一家公司 SEC 契约 fixture | fixture + sanitizer | CI 离线可回放，无敏感字段 | record/replay |
+| P05-12A | FLOW_MODE=fake/live 与生产 Flow wiring | wiring + contract tests | fake/live 模式切换，普通测试用 fake | production wiring |
 | P05-13 | 真实服务 E2E smoke | opt-in test | 固定公司生成带引用报告 | external integration |
 | P05-14 | 建立 20 公司 × 5 场景基准定义 | `evals/dataset.*` | 场景、行业和截止日固定 | evaluation design |
 | P05-15 | 实现 benchmark runner 和汇总 | runner + report template | 输出成功率、P50/P95、失败分布 | SLO measurement |
