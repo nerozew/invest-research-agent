@@ -180,7 +180,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | ID | 小任务 | 产物 | 验收 | 学习点 |
 |---|---|---|---|---|
 | P05-01 ✅ | 实现通用 retry policy | Tenacity policy + tests | 只重试白名单错误，测试无真实 sleep | backoff/jitter |
-| P05-02 | 尊重 `Retry-After` 并动态降速 | HTTP policy + tests | 429 fixture 行为可证明 | rate-limit cooperation |
+| P05-02 ✅ | 尊重 `Retry-After` 并动态降速 | HTTP policy + tests | 429 fixture 行为可证明 | rate-limit cooperation |
 | P05-03 | 实现步骤 lease 与 stale recovery | recovery job + tests | 模拟 worker 崩溃后可恢复 | at-least-once execution |
 | P05-03A | Worker 启动自动 stale recovery 与恢复计数 | recovery bootstrap + tests | worker 启动自动扫描超租约步骤，恢复次数可观测 | at-least-once 启动语义 |
 | P05-04 | 实现输入 hash 和下游失效 | versioning service | prompt/schema 变化触发正确重算 | cache invalidation |

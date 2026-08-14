@@ -1680,3 +1680,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么 `RetryableError` 构造时要对 `error_code` 做「白名单校验」？如果把 `AUTH_ERROR`（key 无效）也包装成可重试错误，会发生什么不好的结果？
 
 ---
+
+## P05-02：尊重 Retry-After 并动态降速 ✅
+
+**产物**：`src/invest_research/infrastructure/retry.py`（新增 `parse_retry_after` / `RetryAfterProvider` / `ResponseHeadersRetryAfter` / `build_retrying_with_retry_after`）、`tests/test_retry_after.py`。
+
+### 3 个知识点
+
+1. **Retry-After 是上游给你的"精确等待指令"**：RFC 9110 规定 429 限流、503 服务不可用等响应可带 `Retry-After` 头，告诉客户端"过多久再试"。格式二选一：**秒数**（`Retry-After: 120`）最常用，或 **HTTP-date**（`Wed, 21 Oct 2015 07:28:00 GMT` 表示到那个时刻再试）。`parse_retry_after` 优先解析秒数、其次是 HTTP-date（用 `email.utils.parsedate_to_datetime`），非法/缺失/负秒数一律返回 None——响应头是"人写的"，绝不能因坏头导致程序崩溃。
+
+2. **动态降速 = 把"我自己等的"换成"上游要求的"**：普通退避是"我猜等多久"（指数退避），Retry-After 是"服务器告诉我等多久"（精确、配合服务器状态）。`build_retrying_with_retry_after` 的 wait 策略：有合法 Retry-After → 按其秒数等待；无/非法 → 回退指数退避。这样收到 429 时不会按本地时钟僵硬重试，而是跟随服务器的节奏"动态降速"（docs/04 §5.1「优先尊重 Retry-After」）。
+
+3. **注入 Provider 抽象让"等待策略"可独立测试**：`RetryAfterProvider` 是抽象（只声明 `get()`），`ResponseHeadersRetryAfter` 从响应头读取（大小写不敏感遍历），测试用可变 provider 模拟"有/无 Retry-After"两种场景。配合 FakeSleep 记录等待时长，断言"有头时等 10s、10s；无头时等 1s、2s"——完全不需要真实 sleep（与 P05-01 同模式）。
+
+### 检查问题（请用自己的话回答）
+为什么服务器给的 `Retry-After` 比客户端自己算的指数退避更"准"？当 `Retry-After` 是 HTTP-date 且该时刻已过去时，`parse_retry_after` 返回 0 是什么意思？为什么坏格式的 Retry-After 应该返回 None 而不是抛异常？
+
+---
