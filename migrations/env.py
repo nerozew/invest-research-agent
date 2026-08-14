@@ -22,6 +22,15 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# 12-factor：优先使用 DATABASE_URL 环境变量（Docker Compose 传入服务名），
+# 未设置时回退到 alembic.ini 的 sqlalchemy.url。
+_database_url = config.get_main_option("sqlalchemy.url")
+if "DATABASE_URL" in config.attributes or __import__("os").environ.get("DATABASE_URL"):
+    import os
+
+    _database_url = os.environ.get("DATABASE_URL", _database_url)
+    config.set_main_option("sqlalchemy.url", _database_url)
+
 target_metadata = Base.metadata
 
 
