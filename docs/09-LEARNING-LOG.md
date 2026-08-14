@@ -1731,3 +1731,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么"worker 重启时自动恢复"比"等运维手动跑恢复脚本"更可靠？`RecoveryCounter` 的累计计数对运维/监控有什么价值（提示：结合频繁崩溃模式与 P05-06 Prometheus）？
 
 ---
+
+## P05-04：输入 hash 与下游失效 ✅
+
+**产物**：`src/invest_research/application/versioning.py`（`compute_input_hash` / `should_recompute` / `VersionDecision` / `VersioningService`）、`tests/test_versioning.py`。
+
+### 3 个知识点
+
+1. **输入 hash = 缓存失效的"指纹"**：`compute_input_hash` 把"阶段标识 + 请求输入 + 上游 hash + 公式版本 + 提示词 hash + schema 版本"合成一个 sha256。任一组件变化 hash 即变——这就是 docs/04 §6「提示词/模型/公式/schema 版本变化后输入 hash 改变，下游失效重算」的机械实现。`json.dumps(sort_keys=True)` 保证字典键顺序不影响结果（确定性）。
+
+2. **失效判断 = "无缓存 → 重算；hash 不同 → 重算；schema 不匹配 → 重算"**：`should_recompute` 三档语义。特别地，schema 版本升级（current ≠ expected）即使 hash 相同也必须重算——因为旧 pack 的形状已经过期（对齐 P01-05 各 pack 的 version 字段）。
+
+3. **VersioningService 是幂等/断点续跑的开关**：`recompute_decision` 同时算出当前 hash 和是否重算，供调用方决定"复用旧工件（False）"还是"强制重算（True）"。这是断点续跑（跳过已通过 checksum 的步骤）与"版本升级后强制重算"两股力量的统一入口。
+
+### 检查问题（请用自己的话回答）
+为什么"schema 版本不匹配"时即使 hash 相同也必须重算？`json.dumps(sort_keys=True)` 对 hash 的确定性起什么作用？
+
+---
