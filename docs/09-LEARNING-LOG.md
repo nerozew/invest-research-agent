@@ -1776,3 +1776,18 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么"schema 版本不匹配"时即使 hash 相同也必须重算？`json.dumps(sort_keys=True)` 对 hash 的确定性起什么作用？
 
 ---
+
+## P05-06：Prometheus 指标 ✅
+
+**产物**：src/invest_research/infrastructure/observability/metrics.py + tests/test_metrics.py（3 测试）+/metrics 端点
+
+### 3 个知识点
+1. **Prometheus label 设计**：不添加 job_id/URL/公司名高基数 label，避免指标爆炸。
+2. **generate_latest 输出**：/metrics 用 PlainTextResponse + CONTENT_TYPE_LATEST 暴露标准格式。
+3. **Counter/Gauge 分工**：总数用 Counter（research_jobs_total），当前值用 Gauge（stale_running_steps）。
+
+### 检查问题（请用自己的话回答）
+为什么 Prometheus 不把 job_id 作为 label？高基数会带来什么问题？
+
+---
+

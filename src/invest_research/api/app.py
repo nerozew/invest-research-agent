@@ -19,6 +19,7 @@ from typing import cast
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from invest_research.api.health import (
     DependencyHealthChecker,
@@ -227,6 +228,18 @@ def create_app(
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=payload.model_dump(),
+        )
+
+    @app.get(
+        "/metrics",
+        tags=["ops"],
+        summary="Prometheus 指标",
+        description="暴露 Prometheus metrics（P05-06）。不含 job_id/URL/公司名高基数 label。",
+    )
+    def metrics() -> Response:
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST,
         )
 
     @app.get(
