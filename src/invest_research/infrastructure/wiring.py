@@ -26,6 +26,7 @@ from invest_research.infrastructure.db.application_stores import (
     SqlArtifactContentStore,
     SqlCancelStatusWriter,
     SqlIdempotencyStore,
+    SqlJobListStore,
     SqlJobQueryStore,
     SqlJobStore,
 )
@@ -58,6 +59,7 @@ class ProductionContainer:
         checker: DependencyHealthChecker,
         job_store: SqlJobStore,
         job_query_store: SqlJobQueryStore,
+        job_list_store: SqlJobListStore,
         idempotency_store: SqlIdempotencyStore,
         cancel_status_writer: SqlCancelStatusWriter,
         artifact_catalog_store: SqlArtifactCatalogStore,
@@ -70,6 +72,7 @@ class ProductionContainer:
         self.checker = checker
         self.job_store = job_store
         self.job_query_store = job_query_store
+        self.job_list_store = job_list_store
         self.idempotency_store = idempotency_store
         self.cancel_status_writer = cancel_status_writer
         self.artifact_catalog_store = artifact_catalog_store
@@ -94,12 +97,11 @@ def create_production_app(
 
     job_store = SqlJobStore(session_factory)
     job_query_store = SqlJobQueryStore(session_factory)
+    job_list_store = SqlJobListStore(session_factory)
     idempotency_store = SqlIdempotencyStore(session_factory)
     cancel_status_writer = SqlCancelStatusWriter(session_factory)
     artifact_catalog_store = SqlArtifactCatalogStore(session_factory)
-    artifact_content_store = SqlArtifactContentStore(
-        session_factory, resolved.artifact_root
-    )
+    artifact_content_store = SqlArtifactContentStore(session_factory, resolved.artifact_root)
 
     celery_app = create_celery_app(broker_url=resolved.broker_url)
     dispatcher = CeleryJobDispatcher(celery_app)
@@ -111,6 +113,7 @@ def create_production_app(
         checker=checker,
         job_store=job_store,
         job_query_store=job_query_store,
+        job_list_store=job_list_store,
         idempotency_store=idempotency_store,
         cancel_status_writer=cancel_status_writer,
         artifact_catalog_store=artifact_catalog_store,
@@ -123,6 +126,7 @@ def create_production_app(
         health_checker=checker,
         job_store=job_store,
         job_query_store=job_query_store,
+        job_list_store=job_list_store,
         idempotency_store=idempotency_store,
         cancel_status_writer=cancel_status_writer,
         artifact_catalog_store=artifact_catalog_store,

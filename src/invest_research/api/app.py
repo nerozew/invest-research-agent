@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
 
-from fastapi import Depends, FastAPI, Header, Request, Response, status
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from invest_research.api.health import (
@@ -52,6 +52,12 @@ from invest_research.application.idempotency import (
     IdempotencyStore,
 )
 from invest_research.application.job_dispatcher import JobDispatcher
+from invest_research.application.job_listing import (
+    InvalidJobListCursor,
+    JobListPage,
+    JobListStore,
+    ListResearchJobService,
+)
 from invest_research.application.jobs import (
     CreatedJob,
     CreateResearchJobService,
@@ -60,6 +66,7 @@ from invest_research.application.jobs import (
     JobSnapshot,
     JobStore,
 )
+from invest_research.domain.status import JobStatus
 from invest_research.settings import Settings, get_settings
 
 __all__ = ["create_app"]
@@ -97,6 +104,7 @@ def create_app(
     health_checker: HealthChecker | None = None,
     job_store: JobStore | None = None,
     job_query_store: JobQueryStore | None = None,
+    job_list_store: JobListStore | None = None,
     artifact_catalog_store: ArtifactCatalogStore | None = None,
     artifact_content_store: ArtifactContentStore | None = None,
     idempotency_store: IdempotencyStore | None = None,
@@ -119,6 +127,9 @@ def create_app(
     job_service = CreateResearchJobService(store=job_store) if job_store is not None else None
     job_query_service = (
         GetResearchJobService(store=job_query_store) if job_query_store is not None else None
+    )
+    job_list_service = (
+        ListResearchJobService(store=job_list_store) if job_list_store is not None else None
     )
     artifact_catalog_service = (
         GetJobArtifactsService(catalog=artifact_catalog_store)
@@ -159,6 +170,7 @@ def create_app(
     app.state.health_checker = checker
     app.state.job_service = job_service
     app.state.job_query_service = job_query_service
+    app.state.job_list_service = job_list_service
     app.state.artifact_catalog_service = artifact_catalog_service
     app.state.artifact_content_service = artifact_content_service
     app.state.cancel_job_service = cancel_job_service
@@ -243,6 +255,47 @@ def create_app(
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content=snapshot.model_dump(mode="json"),
+        )
+
+    def _get_job_list_service(request: Request) -> ListResearchJobService | None:
+        return cast(ListResearchJobService | None, request.app.state.job_list_service)
+
+    @app.get(
+        "/v1/research-jobs",
+        response_model=JobListPage,
+        tags=["jobs"],
+        summary="任务列表（最近任务）",
+        description=(
+            "按 created_at 倒序稳定分页列出任务（created_at 相同时用 job_id 打破平局）。"
+            "支持 limit（1~100，默认 20）、status 过滤与 cursor 分页；"
+            "不暴露 config_snapshot、数据库 URL 或内部路径。"
+        ),
+        responses={
+            status.HTTP_200_OK: {"model": JobListPage},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "任务列表存储未连接"},
+        },
+    )
+    def list_jobs(
+        limit: int = Query(default=20, ge=1, le=100),
+        status_filter: JobStatus | None = Query(default=None, alias="status"),
+        cursor: str | None = Query(default=None),
+        list_service: ListResearchJobService | None = Depends(_get_job_list_service),
+    ) -> Response:
+        if list_service is None:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "任务列表存储未连接，无法列出任务"},
+            )
+        try:
+            page = list_service.list_jobs(status=status_filter, limit=limit, cursor=cursor)
+        except InvalidJobListCursor:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "cursor 非法"},
+            )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=page.model_dump(mode="json"),
         )
 
     def _get_idempotent_job_service(

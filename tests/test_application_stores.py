@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,52 @@ def test_job_store_creates_and_query_roundtrip(sf):
     # 该断言由 SQLite 落库的 store 行为覆盖
 
 
+def test_job_list_store_defaults_and_paginates(sf):
+    """SqlJobListStore：created_at 倒序稳定 + keyset 分页无重复/遗漏。"""
+    from invest_research.infrastructure.db.application_stores import SqlJobListStore
+
+    job_ids = []
+    for i in range(30):
+        jid = uuid.uuid4()
+        job_ids.append(jid)
+        SqlJobStore(sf).create(request=_request(input_company=f"C{i}"), job_id=jid)
+        with sf() as session:
+            row = session.get(ResearchJobORM, jid)
+            row.created_at = datetime(2026, 1, 1, 0, 0, 0) + timedelta(minutes=i)
+            session.commit()
+
+    store = SqlJobListStore(sf)
+    page1 = store.list_jobs(status=None, limit=10, before=None)
+    assert len(page1) == 10
+    assert [e.input_company for e in page1] == [f"C{29 - i}" for i in range(10)]
+
+    last = page1[-1]
+    page2 = store.list_jobs(status=None, limit=10, before=(last.created_at, last.job_id))
+    assert len(page2) == 10
+    seen = {e.job_id for e in page1} | {e.job_id for e in page2}
+    assert len(seen) == 20
+    page3 = store.list_jobs(status=None, limit=10, before=(page2[-1].created_at, page2[-1].job_id))
+    assert len(page3) == 10
+    assert len({e.job_id for e in page3} & seen) == 0  # 无重复
+
+
+def test_job_list_store_filters_by_status(sf):
+    from invest_research.infrastructure.db.application_stores import SqlJobListStore
+
+    running_id = uuid.uuid4()
+    SqlJobStore(sf).create(request=_request(input_company="Running"), job_id=running_id)
+    with sf() as session:
+        row = session.get(ResearchJobORM, running_id)
+        row.status = "running"
+        session.commit()
+    SqlJobStore(sf).create(request=_request(input_company="Succeeded"), job_id=uuid.uuid4())
+
+    store = SqlJobListStore(sf)
+    running = store.list_jobs(status=JobStatus.RUNNING, limit=20, before=None)
+    assert len(running) == 1
+    assert running[0].input_company == "Running"
+
+
 def test_job_query_returns_none_for_missing(sf):
     query = SqlJobQueryStore(sf)
     assert query.get(uuid.uuid4()) is None
@@ -94,14 +141,26 @@ def test_job_query_includes_steps_sorted_by_sequence(sf):
     with sf() as session:
         session.add(
             WorkflowStepORM(
-                job_id=job_id, step_name="step_b", sequence_no=2, status="pending",
-                attempt_count=0, input_json={}, output_json={}, error_json={},
+                job_id=job_id,
+                step_name="step_b",
+                sequence_no=2,
+                status="pending",
+                attempt_count=0,
+                input_json={},
+                output_json={},
+                error_json={},
             )
         )
         session.add(
             WorkflowStepORM(
-                job_id=job_id, step_name="step_a", sequence_no=1, status="succeeded",
-                attempt_count=0, input_json={}, output_json={}, error_json={},
+                job_id=job_id,
+                step_name="step_a",
+                sequence_no=1,
+                status="succeeded",
+                attempt_count=0,
+                input_json={},
+                output_json={},
+                error_json={},
             )
         )
         session.commit()
@@ -188,8 +247,12 @@ def test_artifact_catalog_lists_only_job_artifacts(sf):
         for jid in (job_id, other):
             session.add(
                 ArtifactORM(
-                    job_id=jid, artifact_key="report.md", artifact_type="markdown",
-                    storage_uri="", content_checksum="sum", byte_size=3,
+                    job_id=jid,
+                    artifact_key="report.md",
+                    artifact_type="markdown",
+                    storage_uri="",
+                    content_checksum="sum",
+                    byte_size=3,
                 )
             )
         session.commit()
@@ -209,8 +272,12 @@ def test_artifact_content_only_registered_and_safe(sf, tmp_path: Path):
     with sf() as session:
         session.add(
             ArtifactORM(
-                job_id=job_id, artifact_key="report.md", artifact_type="markdown",
-                storage_uri="", content_checksum="sum", byte_size=5,
+                job_id=job_id,
+                artifact_key="report.md",
+                artifact_type="markdown",
+                storage_uri="",
+                content_checksum="sum",
+                byte_size=5,
             )
         )
         session.commit()

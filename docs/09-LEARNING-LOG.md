@@ -1632,3 +1632,34 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 而不是必须先做 transactional outbox？它计划在哪个阶段处理？
 
 ---
+
+## P04-UI-06~10：任务列表 API、最近任务页、job_id 持久化、局部轮询、连贯导航 ✅
+
+**产物**：`application/job_listing.py`、`infrastructure/db/application_stores.py`（SqlJobListStore）、
+`api/app.py`（GET /v1/research-jobs）、`wiring.py`、`frontend/state.py`、`frontend/render.py`、
+`frontend/Home.py`（任务中心）、三个页面（创建/状态/报告）、`tests/test_api_list_jobs.py`、
+`tests/test_frontend_state.py`、`tests/test_ui_smoke_flow.py`（smoke 串联）
+
+### 3 个知识点
+
+1. **keyset（游标）分页 vs offset 分页**：offset 在大数据量下会有重复/遗漏（数据变更时），
+   且越翻越慢。keyset 用「上一页最后一条的 (created_at, job_id) 作为游标」，
+   配合 `created_at DESC, job_id DESC` 稳定排序，保证无重复、无遗漏。实现上
+   `SqlJobListStore.list_jobs(before=(created_at, job_id))` 返回严格更早的行，
+   API 层「多取一条判断是否有下一页」再裁剪，下一页游标由最后一条编码生成。
+
+2. **URL 是任务上下文的持久化载体**：`st.query_params`（正式 API，非实验接口）把
+   job_id 写进 URL，浏览器刷新/复制链接即可恢复；`session_state` 只是同会话内的
+   回退缓存。恢复优先级 = URL > session > 手动输入，且一律先做 UUID 校验，
+   非法值不调用 API。这也回答「多页面导航清理 query params」的坑：我们不做
+   依赖偶然行为的页面跳转，而是统一入口 `load_job_id()` 显式解析。
+
+3. **st.fragment(run_every=...) 实现局部轮询**：把「任务状态/耗时/步骤」放进
+   fragment，`run_every=2` 只重跑该片段，页面标题与导航不重建，明显减少闪烁。
+   终态（succeeded/partial/failed/cancelled）在 fragment 内直接停止自动轮询；
+   网络失败只提示「下次轮询重试」，不抛异常中断整页。
+
+### 检查问题（请用自己的话回答）
+为什么 keyset 分页可以做到「无重复、无遗漏」，而 offset 分页在任务不断创建/状态变化时做不到？如果两条任务 created_at 完全相同，排序键为什么要加上 job_id？
+
+---

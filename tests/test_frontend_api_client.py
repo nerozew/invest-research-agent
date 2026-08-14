@@ -23,9 +23,11 @@ from invest_research.frontend.errors import (
     HttpStatusError,
 )
 from invest_research.frontend.models import (
+    CancelJobResponse,
     CreateResearchJobRequest,
     CreateResearchJobResponse,
     HealthResponse,
+    JobListPage,
     JobSnapshot,
     ReadinessResponse,
 )
@@ -141,9 +143,7 @@ def test_create_research_job_sends_idempotency_key_and_parses_202() -> None:
 
 def test_create_research_job_409_raises_http_status_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(
-            409, {"detail": "Idempotency-Key 已被不同的请求体使用，禁止复用"}
-        )
+        return _json_response(409, {"detail": "Idempotency-Key 已被不同的请求体使用，禁止复用"})
 
     client = _make_client(handler)
     with pytest.raises(HttpStatusError) as exc_info:
@@ -160,9 +160,7 @@ def test_create_research_job_409_raises_http_status_error() -> None:
 def test_create_research_job_rejects_empty_idempotency_key() -> None:
     client = _make_client(httpx.Response(202, json={}))
     with pytest.raises(ValueError, match="idempotency_key"):
-        client.create_research_job(
-            request=_sample_create_request(), idempotency_key="  "
-        )
+        client.create_research_job(request=_sample_create_request(), idempotency_key="  ")
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +230,7 @@ def test_5xx_raises_http_status_error_with_server_flag() -> None:
 
     client = _make_client(handler)
     with pytest.raises(HttpStatusError) as exc_info:
-        client.create_research_job(
-            request=_sample_create_request(), idempotency_key="key-503"
-        )
+        client.create_research_job(request=_sample_create_request(), idempotency_key="key-503")
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.is_server_error is True
@@ -267,6 +263,7 @@ def test_client_rejects_empty_base_url() -> None:
     with pytest.raises(ValueError, match="base_url"):
         ResearchApiClient(base_url="   ")
 
+
 # ---------------------------------------------------------------------------
 # 工件清单与下载（P04-UI-04）
 # ---------------------------------------------------------------------------
@@ -274,7 +271,8 @@ def test_client_rejects_empty_base_url() -> None:
 
 def test_list_artifacts_parses_catalog() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/research-jobs/00000000-0000-0000-0000-000000000001/artifacts"
+        path = "/v1/research-jobs/00000000-0000-0000-0000-000000000001/artifacts"
+        assert request.url.path == path
         return _json_response(
             200,
             [
@@ -299,13 +297,12 @@ def test_list_artifacts_parses_catalog() -> None:
 
 def test_download_artifact_returns_bytes() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/research-jobs/00000000-0000-0000-0000-000000000001/artifacts/report.md"
+        path = "/v1/research-jobs/00000000-0000-0000-0000-000000000001/artifacts/report.md"
+        assert request.url.path == path
         return httpx.Response(200, content=b"# Report")
 
     client = _make_client(handler)
-    content = client.download_artifact(
-        "00000000-0000-0000-0000-000000000001", "report.md"
-    )
+    content = client.download_artifact("00000000-0000-0000-0000-000000000001", "report.md")
 
     assert content == b"# Report"
 
@@ -316,6 +313,109 @@ def test_download_artifact_404_raises_not_found() -> None:
 
     client = _make_client(handler)
     with pytest.raises(ApiNotFoundError):
-        client.download_artifact(
-            "00000000-0000-0000-0000-000000000001", "missing.md"
+        client.download_artifact("00000000-0000-0000-0000-000000000001", "missing.md")
+
+
+# ---------------------------------------------------------------------------
+# 任务列表（P04-UI-06）
+# ---------------------------------------------------------------------------
+
+
+def test_list_jobs_parses_page_and_sends_query_params() -> None:
+    job_id = uuid.uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/research-jobs"
+        assert request.method == "GET"
+        assert request.url.params["limit"] == "5"
+        assert request.url.params["status"] == "running"
+        return _json_response(
+            200,
+            {
+                "items": [
+                    {
+                        "job_id": str(job_id),
+                        "input_company": "Microsoft",
+                        "as_of_date": "2026-07-31",
+                        "language": "zh-CN",
+                        "status": "running",
+                        "current_step": "03_research",
+                        "error_code": None,
+                        "created_at": "2026-08-14T09:00:00",
+                        "started_at": "2026-08-14T09:00:00",
+                        "completed_at": None,
+                    }
+                ],
+                "next_cursor": "abc123",
+            },
         )
+
+    client = _make_client(handler)
+    page = client.list_jobs(limit=5, status="running", cursor="xyz")
+
+    assert isinstance(page, JobListPage)
+    assert len(page.items) == 1
+    assert page.items[0].input_company == "Microsoft"
+    assert page.items[0].status.value == "running"
+    assert page.next_cursor == "abc123"
+
+
+def test_list_jobs_empty_page_parses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(200, {"items": [], "next_cursor": None})
+
+    client = _make_client(handler)
+    page = client.list_jobs()
+
+    assert page.items == ()
+    assert page.next_cursor is None
+
+
+def test_list_jobs_503_raises_http_status_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(503, {"detail": "任务列表存储未连接，无法列出任务"})
+
+    client = _make_client(handler)
+    with pytest.raises(HttpStatusError) as exc_info:
+        client.list_jobs()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.is_server_error is True
+
+
+# ---------------------------------------------------------------------------
+# 取消任务（P04-08 / P04-UI-10）
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_research_job_parses_response() -> None:
+    job_id = uuid.uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v1/research-jobs/{job_id}"
+        assert request.method == "DELETE"
+        return _json_response(
+            200,
+            {
+                "job_id": str(job_id),
+                "status": "cancelled",
+                "did_cancel": True,
+                "already_cancelled": None,
+            },
+        )
+
+    client = _make_client(handler)
+    result = client.cancel_research_job(str(job_id))
+
+    assert isinstance(result, CancelJobResponse)
+    assert result.did_cancel is True
+    assert result.status.value == "cancelled"
+
+
+def test_cancel_research_job_404_raises_not_found() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(404, {"detail": "任务不存在"})
+
+    client = _make_client(handler)
+    with pytest.raises(ApiNotFoundError):
+        client.cancel_research_job(str(uuid.uuid4()))

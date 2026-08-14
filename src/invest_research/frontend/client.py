@@ -25,9 +25,11 @@ from invest_research.frontend.errors import (
 )
 from invest_research.frontend.models import (
     ArtifactInfo,
+    CancelJobResponse,
     CreateResearchJobRequest,
     CreateResearchJobResponse,
     HealthResponse,
+    JobListPage,
     JobSnapshot,
     ReadinessResponse,
 )
@@ -138,6 +140,49 @@ class ResearchApiClient:
         return JobSnapshot.model_validate(payload)
 
     # ------------------------------------------------------------------
+    # 任务列表（P04-UI-06）
+    # ------------------------------------------------------------------
+
+    def list_jobs(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+        cursor: str | None = None,
+    ) -> JobListPage:
+        """GET /v1/research-jobs：分页列出最近任务。
+
+        - ``limit`` 1~100；
+        - ``status`` 可选过滤；
+        - ``cursor`` 不透明分页游标（无则首页）。
+        """
+        params: dict[str, str | int | float | bool | None] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = self._request("GET", "/v1/research-jobs", params=params)
+        payload = self._decode_json(resp)
+        if payload is None or not isinstance(payload, dict):
+            raise ApiTimeoutError("list jobs 响应格式非法")
+        return JobListPage.model_validate(payload)
+
+    # ------------------------------------------------------------------
+    # 取消任务（P04-08）
+    # ------------------------------------------------------------------
+
+    def cancel_research_job(self, job_id: str) -> CancelJobResponse:
+        """DELETE /v1/research-jobs/{id}：协作式取消任务。
+
+        404（任务不存在）抛 ``ApiNotFoundError``；重复取消保持幂等返回 200。
+        """
+        resp = self._request("DELETE", f"/v1/research-jobs/{job_id}")
+        payload = self._decode_json(resp)
+        if payload is None or not isinstance(payload, dict):
+            raise ApiTimeoutError("cancel job 响应格式非法")
+        return CancelJobResponse.model_validate(payload)
+
+    # ------------------------------------------------------------------
     # 工件清单与下载（P04-04 后端接口）
     # ------------------------------------------------------------------
 
@@ -178,6 +223,7 @@ class ResearchApiClient:
         path: str,
         *,
         json: Any = None,
+        params: dict[str, str | int | float | bool | None] | None = None,
         headers: dict[str, str] | None = None,
         ok_statuses: set[int] | None = None,
     ) -> httpx.Response:
@@ -188,7 +234,7 @@ class ResearchApiClient:
         - 超时/网络错误归为 ``ApiTimeoutError`` / ``ApiNetworkError``。
         """
         try:
-            resp = self._client.request(method, path, json=json, headers=headers)
+            resp = self._client.request(method, path, json=json, params=params, headers=headers)
         except httpx.TimeoutException as exc:
             raise ApiTimeoutError("请求超时（请检查 API 地址与网络）") from exc
         except httpx.TransportError as exc:

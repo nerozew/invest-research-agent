@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,10 +24,13 @@ from invest_research.domain.status import JobStatus, StepStatus
 
 __all__ = [
     "ArtifactInfo",
+    "CancelJobResponse",
     "CreateResearchJobRequest",
     "CreateResearchJobResponse",
     "DependencyStatus",
     "HealthResponse",
+    "JobListEntry",
+    "JobListPage",
     "JobSnapshot",
     "ReadinessResponse",
     "StepSnapshot",
@@ -103,6 +106,43 @@ class JobSnapshot(BaseModel):
     completed_at: datetime | None = None
     duration_seconds: float | None = None
     steps: tuple[StepSnapshot, ...] = Field(default_factory=tuple)
+
+
+class JobListEntry(BaseModel):
+    """GET /v1/research-jobs 的列表条目。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: uuid.UUID
+    input_company: str
+    as_of_date: date
+    language: str
+    status: JobStatus
+    current_step: str | None = None
+    error_code: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class JobListPage(BaseModel):
+    """GET /v1/research-jobs 的分页响应。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    items: tuple[JobListEntry, ...] = Field(default_factory=tuple)
+    next_cursor: str | None = None
+
+
+class CancelJobResponse(BaseModel):
+    """DELETE /v1/research-jobs/{id} 的响应体。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: uuid.UUID
+    status: JobStatus
+    did_cancel: bool = False
+    already_cancelled: bool | None = None
 
 
 class ArtifactInfo(BaseModel):

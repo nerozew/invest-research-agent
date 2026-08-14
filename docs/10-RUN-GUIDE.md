@@ -80,6 +80,9 @@ curl -X POST http://localhost:8000/v1/research-jobs \
 
 # 查询任务状态（pending/succeeded 等）
 curl http://localhost:8000/v1/research-jobs/<返回的job_id>
+
+# 最近任务列表（created_at 倒序；支持 status/limit/cursor）
+curl http://localhost:8000/v1/research-jobs?limit=5
 ```
 
 ## 5. 常用操作
@@ -94,3 +97,9 @@ curl http://localhost:8000/v1/research-jobs/<返回的job_id>
 - 数据库提交成功但 Celery 投递失败之间存在窗口（无 transactional outbox，计划 P05-03 处理）。
 - Worker 当前用 fake Flow（`ResearchFlowRunner`，P03 全链离线演练），不调用真实付费模型。
 - CLI 演示：`python -m invest_research.cli --api-base http://localhost:8000 status <job_id>`
+
+### 6.1 单用户边界（P04-UI-06~10 起）
+
+> 当前为**单用户本地部署**：任务列表会展示该实例中的**全部任务**。
+> 暂无用户认证与多用户数据隔离；**不应将该系统直接暴露到不可信公网**。
+> 若需对外提供，请务必先添加认证、授权与多用户隔离（不在本阶段范围）。

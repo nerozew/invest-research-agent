@@ -1,8 +1,9 @@
 """SQLAlchemy 实现的 Application Store 适配器（P04-10A 生产 wiring）。
 
-把 ORM 仓库/表组装成 application layer 需要的 6 个端口：
+把 ORM 仓库/表组装成 application layer 需要的 7 个端口：
 - ``SqlJobStore``：JobStore —— 创建 ResearchJob（含 pending 初始状态）
 - ``SqlJobQueryStore``：JobQueryStore —— 读取 JobSnapshot（含 steps，按 sequence_no 排序）
+- ``SqlJobListStore``：JobListStore —— keyset 游标稳定分页列出任务
 - ``SqlIdempotencyStore``：IdempotencyStore —— 独立 idempotency_keys 表保存
   key → (job_id, status, request_fingerprint)，DB UNIQUE 兜底防并发重复
 - ``SqlCancelStatusWriter``：CancelStatusWriter —— 条件 UPDATE（乐观锁）pending/running→cancelled
@@ -17,13 +18,16 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
 
 from invest_research.application.artifacts import ArtifactInfo
 from invest_research.application.idempotency import StoredJob
+from invest_research.application.job_listing import JobListCursor, JobListEntry
 from invest_research.application.jobs import JobSnapshot, StepSnapshot
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus, StepStatus
@@ -44,6 +48,7 @@ from invest_research.infrastructure.db.repositories import SessionFactory
 __all__ = [
     "SqlJobStore",
     "SqlJobQueryStore",
+    "SqlJobListStore",
     "SqlIdempotencyStore",
     "SqlCancelStatusWriter",
     "SqlArtifactCatalogStore",
@@ -125,6 +130,63 @@ class SqlJobQueryStore:
         )
 
 
+class SqlJobListStore:
+    """JobListStore：按 keyset 游标稳定分页列出任务。
+
+    - 排序：``created_at DESC, job_id DESC``（created_at 相同时用 job_id 打破平局），
+      保证分页无重复、无遗漏；
+    - 过滤：可选 status（JobStatus 枚举）；
+    - 分页：``before=(created_at, job_id)`` 返回严格排在它之前的行，最多 ``limit`` 条；
+    - 安全：只投影列表 DTO 字段，不读取 config_snapshot/idempotency_key。
+    """
+
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._sf = session_factory
+
+    def list_jobs(
+        self,
+        *,
+        status: JobStatus | None,
+        limit: int,
+        before: JobListCursor | None,
+    ) -> tuple[JobListEntry, ...]:
+        with self._sf() as session:
+            stmt = select(ResearchJobORM)
+            if status is not None:
+                stmt = stmt.where(ResearchJobORM.status == status.value)
+            if before is not None:
+                created_at, job_id = before
+                stmt = stmt.where(_before_keyset(created_at, job_id))
+            stmt = stmt.order_by(
+                ResearchJobORM.created_at.desc(),
+                ResearchJobORM.id.desc(),
+            ).limit(limit)
+            rows = session.execute(stmt).scalars().all()
+        return tuple(
+            JobListEntry(
+                job_id=r.id,
+                input_company=r.input_company,
+                as_of_date=r.as_of_date,
+                language=r.language,
+                status=JobStatus(r.status),
+                current_step=r.current_step,
+                error_code=r.error_code,
+                created_at=r.created_at,
+                started_at=r.started_at,
+                completed_at=r.completed_at,
+            )
+            for r in rows
+        )
+
+
+def _before_keyset(created_at: datetime, job_id: uuid.UUID) -> ColumnElement[bool]:
+    """keyset 条件：稳定序 ``(created_at, job_id)`` 小于给定位置才返回。"""
+    return or_(
+        ResearchJobORM.created_at < created_at,
+        (ResearchJobORM.created_at == created_at) & (ResearchJobORM.id < job_id),
+    )
+
+
 class SqlIdempotencyStore:
     """IdempotencyStore：独立 idempotency_keys 表（key 唯一兜底防并发）。"""
 
@@ -192,7 +254,9 @@ class SqlCancelStatusWriter:
                 )
                 .values(status=JobStatus.CANCELLED.value)
             )
-            affected = result.rowcount
+            # CursorResult 类型未声明 rowcount；运行时行为正确，
+            # 用 inline ignore 保持 mypy strict 通过。
+            affected = int(result.rowcount)  # type: ignore[attr-defined]
             session.commit()
             return affected == 1
 
@@ -205,11 +269,15 @@ class SqlArtifactCatalogStore:
 
     def list_artifacts(self, job_id: uuid.UUID) -> tuple[ArtifactInfo, ...]:
         with self._sf() as session:
-            rows = session.execute(
-                select(ArtifactORM)
-                .where(ArtifactORM.job_id == job_id)
-                .order_by(ArtifactORM.created_at.asc())
-            ).scalars().all()
+            rows = (
+                session.execute(
+                    select(ArtifactORM)
+                    .where(ArtifactORM.job_id == job_id)
+                    .order_by(ArtifactORM.created_at.asc())
+                )
+                .scalars()
+                .all()
+            )
         return tuple(
             ArtifactInfo(
                 artifact_key=r.artifact_key,

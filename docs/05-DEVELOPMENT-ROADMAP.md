@@ -128,6 +128,11 @@ Cline 完成任务后必须停止，并给出：
 | P04-09 ✅ | 编写 Dockerfile | multi-stage image | 非 root 运行、healthcheck 通过 | 容器最小权限 |
 | P04-10 ✅ | 编写 Docker Compose | API/worker/Postgres/Redis/migrate | 一条命令启动；创建任务→Worker→终态 smoke 全过 | 本地编排 |
 | P04-UI-05 ✅ | 将 Streamlit 加入 Docker Compose | compose 服务 + frontend | 前后端一条命令启动；UI health 200 | 前后端编排 |
+| P04-UI-06 ✅ | 任务列表 API 与稳定分页 | `GET /v1/research-jobs` + DTO/Service/Store/tests | limit/status/cursor 过滤正确，created_at 倒序稳定，cursor 无重复遗漏，非法入参 422，空库 items=[]，production wiring 不返回 503 | cursor 分页、稳定排序 |
+| P04-UI-07 ✅ | 最近任务/任务中心页面 | 任务中心页面 + 分页/筛选/查看详情/tests | 只调用列表 API，中文状态标签，分页与筛选，空态与错误重试，刷新后重新读取 | 列表 UX、分页状态 |
+| P04-UI-08 ✅ | job_id 状态与 URL 持久化 | `frontend/state.py` + URL/session 恢复/tests | 创建写 session+query_params，初始化优先 URL，无 job_id 回退 session 与选择器，UUID 校验，非法不调 API | URL 作为任务上下文 |
+| P04-UI-09 ✅ | 局部轮询与终态停止 | `st.fragment(run_every=...)` + 轮询决策/tests | 仅刷新状态/耗时区域，终态停止自动轮询，不重复创建，不生成新幂等键 | fragment 局部更新 |
+| P04-UI-10 ✅ | 创建→详情→结果连贯导航 | 创建成功写 job_id → 详情（状态/耗时/步骤/取消/错误建议）→ 报告工件（空态）→ 返回任务中心 | 表单稳定幂等键，取消后刷新，failed/partial 展示可读建议，共享展示函数 | 用户路径连贯性 |
 | P04-11 ✅ | 编写 CLI demo | `research run/status/artifacts` | CLI 通过 HTTP 创建/轮询/列工件；fake HTTP 测试过 | API client UX |
 
 ### Phase 4 UI：Streamlit 轻量操作界面（P04-UI 系列）
@@ -155,6 +160,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
       → P04-06 → P04-07 → P04-08 → P04-09 → P04-10
       → P04-UI-05
       → P04-11
+      → P04-UI-06 → P04-UI-07 → P04-UI-08 → P04-UI-09 → P04-UI-10
 ```
 
 - `P04-UI-01` 依赖 `P04-01`（health/readiness 可用于 typed client 验收）。
@@ -162,6 +168,12 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 - `P04-UI-03` 依赖 `P04-03`（任务/步骤状态查询 API）。
 - `P04-UI-04` 依赖 `P04-04`（工件清单与安全下载 API）。
 - `P04-UI-05` 依赖 `P04-10`（Docker Compose）与 `P04-UI-01~04`（前端已可运行）。
+- `P04-UI-06` 依赖 `P04-10A`（生产 wiring 与真实 SQL Store）与 `P04-03`（查询 DTO 基础）。
+- `P04-UI-07` 依赖 `P04-UI-06`（任务列表 API）。
+- `P04-UI-08` 依赖 `P04-UI-07`（最近任务选择）与 `P04-UI-02`（创建成功拿 job_id）。
+- `P04-UI-09` 依赖 `P04-UI-03`（轮询服务）与 `P04-UI-08`（job_id 上下文）。
+- `P04-UI-10` 依赖 `P04-UI-07/08/09`（连贯导航收口）。
+- 单用户边界：当前为单用户本地部署，任务列表展示该实例的全部任务；暂无用户认证与多用户隔离，不应直接暴露到不可信公网。
 
 ## Phase 5：可靠性、监控与评估（补齐第 5 周）
 
