@@ -185,7 +185,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-03A ✅ | Worker 启动自动 stale recovery 与恢复计数 | recovery bootstrap + tests | worker 启动自动扫描超租约步骤，恢复次数可观测 | at-least-once 启动语义 |
 | P05-03B ✅ | Transactional Outbox 与 pending 投递恢复 | outbox_events 表 + relay + tests | Job 创建与事件同事务；dispatch 失败持久化重试；重启恢复；防重复投递 | transactional outbox |
 | P05-04 ✅ | 实现输入 hash 和下游失效 | versioning service | prompt/schema 变化触发正确重算 | cache invalidation |
-| P05-05 | 结构化日志与敏感字段脱敏 | structlog config + tests | key/header/cookie 不出现在日志 | observability security |
+| P05-05 ✅ | 结构化日志与敏感字段脱敏 | structlog config + tests | key/header/cookie 不出现在日志 | observability security |
 | P05-06 | 暴露 Prometheus 指标 | `/metrics` + tests | 无 job_id 高基数 label | metrics design |
 | P05-07 | 添加 OpenTelemetry trace | tracing config | API→worker→step trace 可关联 | distributed tracing |
 | P05-08 | 写 Grafana 本地最小 dashboard | dashboard JSON | 成功率、P95、重试、错误可见 | RED/USE 指标 |
