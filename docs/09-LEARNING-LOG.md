@@ -1697,3 +1697,20 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么服务器给的 `Retry-After` 比客户端自己算的指数退避更"准"？当 `Retry-After` 是 HTTP-date 且该时刻已过去时，`parse_retry_after` 返回 0 是什么意思？为什么坏格式的 Retry-After 应该返回 None 而不是抛异常？
 
 ---
+
+## P05-03：步骤 lease 与 stale recovery ✅
+
+**产物**：`src/invest_research/application/recovery.py`（`StaleStepSnapshot` / `StepLeaseStore` 端口 / `RecoverySettings` / `RecoveryResult` / `StaleRecoveryService`）、`tests/test_recovery.py`。
+
+### 3 个知识点
+
+1. **at-least-once execution（至少一次语义）与 lease**：worker 开始处理步骤时把状态置为 `running` 并开始计时（`started_at`），只有"持有 lease"（未超过 `lease_seconds`）的 worker 才有权继续。若 worker 崩溃，其 `running` 步骤会一直停着；这就是"stale"（陈旧）。恢复任务扫描所有 `running` 且 `started_at + lease > now` 的步骤，把它们标记回 `failed_retryable` 以便再次入队——先标记不直接重跑，保证至少一次（不丢）但可能重复（靠幂等键去重）。
+
+2. **条件更新避免"恢复任务"与"慢 worker"互相覆盖**：恢复时用 `mark_failed_retryable(job_id, step_name)` 且**仅当当前仍是 running 才成功**（乐观锁）。如果真实 worker 只是慢、并没崩溃，它可能已把步骤推进成 succeeded/failed——恢复任务的条件更新会失败（返回 False），不会把已完成的步骤错误地拉回可重试。这是"恢复安全性"的关键：宁可少恢复，不可误伤。
+
+3. **协议注入让恢复逻辑可独立测试**：`StepLeaseStore` 是 Protocol（只声明 `list_running_steps` / `mark_failed_retryable`），`StaleRecoveryService` 只依赖这个抽象；测试用内存 fake store + 固定 `now`，覆盖"未超时/超时/自定义lease/混合/条件更新失败"五类场景，无需数据库、不依赖真实时钟。这与 P05-01/02 的模式一致：**逻辑在 application，存储经端口注入**。
+
+### 检查问题（请用自己的话回答）
+为什么恢复任务要把 stale 的 `running` 步骤改成 `failed_retryable` 而不是直接改成 `pending` 或直接重跑？"仅当当前是 running 才更新"（条件更新）如何防止恢复任务误伤一个只是运行得慢的真实 worker？
+
+---
