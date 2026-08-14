@@ -1,0 +1,75 @@
+# 本地一键启动指南（Phase 4）
+
+> 目标：一条命令启动 **API + Worker + Streamlit + PostgreSQL + Redis + migrate**，
+> 然后浏览器打开前端做前后端联调。本指南适合你自己在本地验证。
+
+## 1. 前置条件
+
+- 装有 Docker（Windows Docker Desktop 或 Ubuntu Docker）
+- 有项目源码（本仓库）
+- （可选）准备真实 `.env`：`LLM_API_KEY`、`SEC_USER_AGENT_CONTACT`
+  - 不填也能启动：任务创建、查询、取消、工件、UI 联调都可用；
+  - 真正执行到 Agent/LLM 环节才需要 key（本阶段 Worker 用 fake Flow，不联网）。
+
+## 2. 一键启动
+
+```bash
+# 在项目根目录（含 compose.yml）
+# 方式 A：直接用 GHCR 预构建镜像（推荐，无需本地构建，但需要能访问 ghcr.io）
+docker pull ghcr.io/nerozew/invest-research-agent:phase4
+export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase4
+docker compose up -d
+
+# 方式 B：本地构建（网络好或不想依赖 GHCR）
+docker compose build
+docker compose up -d
+```
+
+> 若未设置 `INVEST_RESEARCH_IMAGE`，compose 会回退到 `invest-research:phase4`
+> （即 `docker compose build` 产出的同名镜像）。
+
+启动后 compose 会自动：
+1. 等 postgres/redis healthy；
+2. 跑一次性 `migrate`（`alembic upgrade head`，建 0001–0005 表）；
+3. 再启动 api / worker / streamlit。
+
+## 3. 访问地址
+
+| 服务 | 地址 | 说明 |
+|---|---|---|
+| Streamlit 前端 | http://localhost:8501 | 创建任务 → 展示 job_id → 轮询状态 → 工件 |
+| FastAPI | http://localhost:8000 | API；`/health`、`/readiness`、`/docs`(Swagger) |
+| PostgreSQL / Redis | 容器内部互连 | 未对外暴露端口（安全默认） |
+
+## 4. 验证一条命令跑通
+
+```bash
+# 查看服务状态（全部应为 healthy / Up）
+docker compose ps
+
+# API 探活
+curl http://localhost:8000/health
+curl http://localhost:8000/readiness
+
+# 创建任务（真实落库）
+curl -X POST http://localhost:8000/v1/research-jobs \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-1" \
+  -d '{"input_company":"Apple Inc.","as_of_date":"2024-12-31","language":"zh-CN","requested_forms":["10-K"]}'
+
+# 查询任务状态（pending/succeeded 等）
+curl http://localhost:8000/v1/research-jobs/<返回的job_id>
+```
+
+## 5. 常用操作
+
+- 停止：`docker compose down`
+- 停止并清数据：`docker compose down -v`（会删 postgres_data 等 volume）
+- 看日志：`docker compose logs -f api`（或 worker/migrate/streamlit）
+- 单独重跑迁移：`docker compose run --rm migrate`
+
+## 6. 已知限制（Phase 4）
+
+- 数据库提交成功但 Celery 投递失败之间存在窗口（无 transactional outbox，计划 P05-03 处理）。
+- Worker 当前用 fake Flow（`ResearchFlowRunner`，P03 全链离线演练），不调用真实付费模型。
+- CLI 演示：`python -m invest_research.cli --api-base http://localhost:8000 status <job_id>`
