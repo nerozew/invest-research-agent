@@ -59,12 +59,8 @@ services:
     command: sh -c "alembic upgrade head"
     environment:
       DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
-      # src 布局：alembic env.py 需 import invest_research 包
+      # src 布局：alembic env.py 需 import invest_research 包（镜像内 /app/src）
       PYTHONPATH: /app/src
-    volumes:
-      # 覆盖镜像内旧 env.py/migrations：使用仓库最新迁移（含 DATABASE_URL override）
-      - ./migrations:/app/migrations
-      - ./alembic.ini:/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
