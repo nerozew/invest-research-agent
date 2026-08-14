@@ -11,27 +11,48 @@
   - 不填也能启动：任务创建、查询、取消、工件、UI 联调都可用；
   - 真正执行到 Agent/LLM 环节才需要 key（本阶段 Worker 用 fake Flow，不联网）。
 
-## 2. 一键启动
+## 2. 一键启动（默认：直接从 GHCR 拉取）
+
+> 推荐的部署方式是 **GitHub Actions 负责 build + push，部署机只执行
+> `docker pull` + `docker compose up`**。仓库提供一体化脚本：
+
+```bash
+# 在项目根目录执行（自动 pull GHCR 最新 phase4 镜像 + compose up + 健康检查）
+bash scripts/deploy_phase4.sh
+```
+
+等价的手工命令：
 
 ```bash
 # 在项目根目录（含 compose.yml）
-# 方式 A：直接用 GHCR 预构建镜像（推荐，无需本地构建，但需要能访问 ghcr.io）
-docker pull ghcr.io/nerozew/invest-research-agent:phase4
 export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase4
-docker compose up -d
-
-# 方式 B：本地构建（网络好或不想依赖 GHCR）
-docker compose build
-docker compose up -d
+docker pull "$INVEST_RESEARCH_IMAGE"
+docker compose up -d --force-recreate --remove-orphans
 ```
 
 > 若未设置 `INVEST_RESEARCH_IMAGE`，compose 会回退到 `invest-research:phase4`
-> （即 `docker compose build` 产出的同名镜像）。
+> （即 `docker compose build` 产出的同名镜像，用于本地开发调试）。
 
 启动后 compose 会自动：
 1. 等 postgres/redis healthy；
 2. 跑一次性 `migrate`（`alembic upgrade head`，建 0001–0005 表）；
 3. 再启动 api / worker / streamlit。
+
+## 2b. 备用：断网 / GHCR 不可达时（artifact + docker load）
+
+> 仅当 `docker pull ghcr.io/...` 不可用时才需要。通常不需要，也尽量避免：
+> GitHub Actions 每个 run 的 `invest-research-phase4-image` artifact 是当时构建的镜像快照。
+
+```bash
+# 1) 在 GitHub Actions 页面下载最新 run 的 invest-research-phase4-image artifact
+#    （zip 内含 invest-research-phase4.tar.gz）
+# 2) 解压后上传到部署机，然后：
+gzip -d -c invest-research-phase4.tar.gz > invest-research-phase4.tar
+docker load -i invest-research-phase4.tar
+docker tag ghcr.io/nerozew/invest-research-agent:phase4 invest-research:phase4
+# 3) 启动（非 GHCR 镜像，INVEST_RESEARCH_IMAGE 可不设，用回退名）
+docker compose up -d
+```
 
 ## 3. 访问地址
 
