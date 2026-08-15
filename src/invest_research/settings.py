@@ -11,8 +11,26 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# P06-04：占位符密钥识别（production 环境 fail-fast 用）。
+# .env.example 只允许占位符；这些标记出现即视为"未配置真实密钥"。
+_PLACEHOLDER_MARKERS: tuple[str, ...] = (
+    "your-",
+    "placeholder",
+    "change-me",
+    "replace-me",
+    "xxx",
+)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """判断字符串是否仍是占位符（空、纯空白、占位标记或 'secret'）。"""
+    lowered = value.strip().lower()
+    if not lowered or lowered == "secret":
+        return True
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
 
 
 class ResearchProfile(BaseModel):
@@ -125,6 +143,27 @@ class Settings(BaseSettings):
     # Serper API Key 用 SecretStr：str()/repr() 不泄露明文；.env.example 只放占位符。
     serper_api_key: SecretStr | None = None
     serper_endpoint: str = "https://google.serper.dev/search"
+
+    # P06-04：production 环境禁止占位符密钥/联系邮箱（fail-fast，见 .env.example 说明）。
+    @model_validator(mode="after")
+    def _production_secrets_guard(self) -> "Settings":
+        if self.environment != "production":
+            return self
+        problems: list[str] = []
+        if is_placeholder_secret(self.llm_api_key.get_secret_value()):
+            problems.append("LLM_API_KEY")
+        if self.serper_api_key is not None and is_placeholder_secret(
+            self.serper_api_key.get_secret_value()
+        ):
+            problems.append("SERPER_API_KEY")
+        if is_placeholder_secret(self.sec_user_agent_contact):
+            problems.append("SEC_USER_AGENT_CONTACT")
+        if problems:
+            raise ValueError(
+                "environment=production 不允许占位符密钥/联系邮箱"
+                f"（请在 .env 配置真实值）: {', '.join(problems)}"
+            )
+        return self
 
     def build_research_profile(self) -> ResearchProfile:
         """按 research_profile 档位返回集中预算配置（P05.5）。"""

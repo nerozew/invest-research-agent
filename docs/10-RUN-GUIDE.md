@@ -105,3 +105,35 @@ curl http://localhost:8000/v1/research-jobs?limit=5
 > 当前为**单用户本地部署**：任务列表会展示该实例中的**全部任务**。
 > 暂无用户认证与多用户数据隔离；**不应将该系统直接暴露到不可信公网**。
 > 若需对外提供，请务必先添加认证、授权与多用户隔离（不在本阶段范围）。
+
+## 7. 生产配置与密钥管理（P06-04）
+
+### 7.1 配置档位（profile）
+
+- `ENVIRONMENT=development`（默认）：允许占位符密钥，便于本地快速启动演示。
+- `ENVIRONMENT=production`：`Settings` 构造时 **fail-fast** 校验——
+  `LLM_API_KEY` / `SERPER_API_KEY` / `SEC_USER_AGENT_CONTACT` 仍为占位符
+  （`your-*` / `placeholder` / `change-me` 等）时直接抛 `ValidationError`，
+  绝不带占位符跑生产。校验逻辑见 `src/invest_research/settings.py`
+  （`is_placeholder_secret` + `_production_secrets_guard`），测试见
+  `tests/test_secrets_config.py`。
+
+### 7.2 密钥卫生红线（本项目全阶段约束）
+
+1. **密钥只从环境变量 / `.env` 读取**（`SecretStr`），绝不写入代码、日志、工件或 manifest；
+2. **`.env` 已被 `.gitignore` 忽略**，`.env.example` 只放占位符；
+3. **镜像不带密钥**：`compose.yml` 用 `${VAR:-占位符}` 注入，运行时由宿主机 `.env` 提供；
+4. **日志脱敏**（P05-05 structlog redaction）与 **manifest 只记录模型名/计数**（P05.5），
+   不含任何密钥或完整 Prompt。
+
+### 7.3 生产部署前的检查清单
+
+```bash
+# 1) 准备真实 .env（复制示例后填写真实值，绝不提交）
+cp .env.example .env
+# 2) 验证 production 配置可构建（真实密钥 + production 档位）
+#    （如报占位符错误，说明仍有字段未替换）
+uv run python -c "from invest_research.settings import Settings; s = Settings(_env_file='.env'); assert s.environment == 'production'; print('production config OK')"
+# 3) 确认仓库不含密钥
+git status --porcelain | grep -i env   # 应只出现 .env.example
+```
