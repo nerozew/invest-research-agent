@@ -1848,3 +1848,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-10：故障注入（坏 PDF/非法 LLM JSON） ✅
+
+**产物**：`tests/test_fault_injection_pdf.py`（损坏 PDF/降级路由）、`tests/test_fault_injection_llm.py`（非法 LLM 输出/guardrail/reflection 上限）。**零生产代码改动，纯测试复用现有模块。**
+
+### 3 个知识点
+
+1. **"内部故障注入"与"外部故障注入"分层**：P05-09 注入 HTTP 层故障（timeout/429/5xx），P05-10 注入**系统内部**故障——损坏/空白 PDF、PDF 主解析失败、非法 LLM JSON、缺字段、Pydantic 验证失败、guardrail/reflection 达上限。分层验证"有界恢复"：外部网络故障走重试策略，内部解析/结构故障走降级/修复循环，两类各有上限、互不混淆。
+2. **复用 ≠ 重写**：P05-10 不新造整条 Flow，而是直接对 `ParserRouter.parse_document`、`run_with_guardrail`、`ReflectionController.step` 注入 spy/bomb 测试替身，用断言"调用次数=1/0、attempts_used=max、repeat_reject"证明**降级恰好一次、guardrail 有限、反思不无限**。这正是"为测试不重新设计整条 Flow"的落地。
+3. **失败语义分层可查询**：损坏 PDF → `DocumentParseError(failed_parsers, detail)`（分类可查）；空白 PDF → 空 blocks（不是虚假成功）；非法 LLM JSON → 可读错误列表（含字段路径）；guardrail 达上限 → `valid=False + errors` 保留；reflection 达上限 → `repeat_reject`。每个失败点都有结构化、可断言、可查询的结果，不吞错、不产生半成品。
+
+### 检查问题（请用自己的话回答）
+为什么"降级路由（PDF→HTML）"和"guardrail 修复循环"都强调**恰好一次/有上限**，而不是允许无限重试？这两类"有限恢复"与 P05-09 的 HTTP 重试在语义上有什么共同点（提示：都受 docs/04 的"重试次数上限"约束，都是把无限失败转化为可分类的终态）？
+
+### 已知限制
+- 测试注入的 PDF/HTML 解析器是替身，未用真实 PyMuPDF 解析损坏 PDF（真实解析器行为已在 P02-10 覆盖）。
+- 未对"真实 LLM 反复输出非法 JSON"做集成级验证（guardrail 修复循环的行为是纯函数测试）。
+- 未触发"降级成功但 HTML 解析结果为空"到 Flow 层面的产物判定（属于 P05-11/12A 范围）。
+
+---
+
