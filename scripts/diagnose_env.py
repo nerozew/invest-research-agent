@@ -96,11 +96,19 @@ def main() -> int:
         print("[信息] 无系统环境变量覆盖 .env 的 LLM/Serper/FLOW_MODE 配置")
 
     print(f"[测试开关] RUN_LIVE_E2E={os.environ.get('RUN_LIVE_E2E', '(未设置)')} "
-          f"FLOW_MODE={os.environ.get('FLOW_MODE', '(未设置，Settings 默认 fake)')}")
-    if os.environ.get("RUN_LIVE_E2E") != "1" or os.environ.get("FLOW_MODE") != "live":
+          f"FLOW_MODE(env)={os.environ.get('FLOW_MODE', '(未设置)')} "
+          f"FLOW_MODE(.env)={settings.flow_mode if 'settings' in dir() else '(未加载)'}")
+    if os.environ.get("RUN_LIVE_E2E") != "1":
         issues.append(
-            "测试未启用 live：需要 export RUN_LIVE_E2E=1 FLOW_MODE=live "
-            "才执行真实 E2E（否则全部 skip）"
+            "RUN_LIVE_E2E 未设为 1：真实 E2E 恒 skip。"
+            "PowerShell: $env:RUN_LIVE_E2E=\"1\";  cmd: set RUN_LIVE_E2E=1"
+        )
+    flow_mode = os.environ.get("FLOW_MODE") or getattr(settings, "flow_mode", "fake")
+    if flow_mode != "live":
+        issues.append(
+            f"FLOW_MODE 当前是 {flow_mode!r}（需要 'live' 才走真实模型/SEC/Serper）。"
+            "PowerShell: $env:FLOW_MODE=\"live\";  cmd: set FLOW_MODE=live；"
+            "或把根目录 .env 的 FLOW_MODE 改为 live"
         )
 
     if issues:
