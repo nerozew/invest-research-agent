@@ -39,7 +39,7 @@ def msft_payload() -> dict[str, Any]:
 
 def test_build_urls() -> None:
     """submissions 端点与 primary document URL 构造正确（CIK 去前导零、accession 去连字符）。"""
-    assert build_submissions_url("0000789019") == "https://data.sec.gov/submissions/0000789019.json"
+    assert build_submissions_url("0000789019") == "https://data.sec.gov/submissions/CIK0000789019.json"
     assert (
         build_document_url("0000789019", "0000950170-25-000009", "msft-20250630.htm")
         == "https://www.sec.gov/Archives/edgar/data/789019/000095017025000009/msft-20250630.htm"

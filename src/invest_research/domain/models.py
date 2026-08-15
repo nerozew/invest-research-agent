@@ -239,7 +239,8 @@ class FinancialFact(BaseModel):
     taxonomy: str = Field(min_length=1)
     concept: str = Field(min_length=1)
     label: str | None = None
-    value: Decimal = Field(gt=0)
+    # 允许负值/零：净亏损、负现金流是真实业务（对齐 MetricResult 的口径，见下）
+    value: Decimal
     unit: str = Field(min_length=1)
     period_start: date | None = None
     period_end: date | None = None

@@ -51,8 +51,8 @@ class FetchSubmissionsResponse(BaseModel):
 
 
 def build_submissions_url(cik: str) -> str:
-    """构造 submissions 端点 URL。"""
-    return f"{SUBMISSIONS_BASE}/{cik}.json"
+    """构造 submissions 端点 URL（SEC 要求 CIK 前缀，如 CIK0000320193.json）。"""
+    return f"{SUBMISSIONS_BASE}/CIK{cik}.json"
 
 
 def build_document_url(cik: str, accession: str, primary_document: str) -> str:

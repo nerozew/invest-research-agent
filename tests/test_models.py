@@ -315,19 +315,31 @@ def test_financial_fact_uses_decimal_type() -> None:
     assert fact.value == Decimal("1000000.00")
 
 
-def test_financial_fact_non_positive_value_rejected() -> None:
-    """value 非正数被拒绝。"""
-    with pytest.raises(ValidationError):
-        FinancialFact(
-            company_id="c1",
-            source_id="s1",
-            taxonomy="us-gaap",
-            concept="Revenues",
-            value=Decimal("0"),
-            unit="USD",
-            period_start=date(2026, 1, 1),
-            period_end=date(2026, 3, 31),
-        )
+def test_financial_fact_negative_value_allowed() -> None:
+    """value 允许负值/零：净亏损、负现金流是真实业务（对齐 MetricResult 口径）。"""
+    fact = FinancialFact(
+        company_id="c1",
+        source_id="s1",
+        taxonomy="us-gaap",
+        concept="NetIncomeLoss",
+        value=Decimal("-5000000.00"),
+        unit="USD",
+        period_start=date(2026, 1, 1),
+        period_end=date(2026, 3, 31),
+    )
+    assert fact.value == Decimal("-5000000.00")
+
+    zero = FinancialFact(
+        company_id="c1",
+        source_id="s1",
+        taxonomy="us-gaap",
+        concept="LongTermDebt",
+        value=Decimal("0"),
+        unit="USD",
+        period_start=date(2026, 1, 1),
+        period_end=date(2026, 3, 31),
+    )
+    assert zero.value == Decimal("0")
 
 
 def test_metric_result_computed_requires_value() -> None:
