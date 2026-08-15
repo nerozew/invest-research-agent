@@ -60,12 +60,28 @@ def _build_session_factory() -> SessionFactory:
     return factory
 
 
-def _build_handler() -> ResearchJobExecutionHandler:
-    """构造 worker 侧 handler：真实 Repository 加载/写状态 + fake Flow 执行。
+def _default_flow_runner() -> ResearchFlowRunner:
+    """按 FLOW_MODE 环境变量构建 FlowRunner（默认 fake，不读 Settings/不依赖 key）。
 
+    - ``FLOW_MODE=fake``（默认）：返回 ``ResearchFlowRunner``（P03 纯 fake 00-07 全链，
+      不联网、不产生模型费用），保持 worker 模块导入零 Settings 依赖；
+    - ``FLOW_MODE=live``：委托 ``flow_wiring.build_flow_runner(get_settings())``，
+      API Key 缺失/为空时 fail-fast（可读错误），不允许缺配置启动真实模型运行。
+    """
+    if os.environ.get("FLOW_MODE", "fake") == "fake":
+        return ResearchFlowRunner()
+    from invest_research.infrastructure.flow_wiring import build_flow_runner
+    from invest_research.settings import get_settings
+
+    return build_flow_runner(get_settings())  # type: ignore[return-value]
+
+
+def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJobExecutionHandler:
+    """构造 worker 侧 handler：真实 Repository 加载/写状态 + Flow 执行。
+
+    - 未显式传入 ``flow_runner`` 时按 ``FLOW_MODE`` 环境变量构建（默认 fake）；
     - loader：``JobRepository.get(job)`` → 用 ORM 字段重建 ``ResearchRequest``；
-    - writer：``JobRepository.update_status``（pending→running、running→succeeded）；
-    - flow_runner：``ResearchFlowRunner``（P03 fake 00-07 全链，不联网）。
+    - writer：``JobRepository.update_status``（pending→running、running→succeeded）。
     """
     repo = JobRepository(_build_session_factory())
 
@@ -92,10 +108,11 @@ def _build_handler() -> ResearchJobExecutionHandler:
 
             repo.update_status(job_id, JobStatus.RUNNING, JobStatus.SUCCEEDED)
 
+    runner = flow_runner if flow_runner is not None else _default_flow_runner()
     service = ExecuteResearchJobService(
         loader=_RepoLoader(),
         writer=_RepoWriter(),
-        flow_runner=ResearchFlowRunner(),
+        flow_runner=runner,  # type: ignore[arg-type]
     )
     return ResearchJobExecutionHandler(service)
 

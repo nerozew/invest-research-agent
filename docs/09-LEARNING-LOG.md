@@ -1909,3 +1909,22 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-12A：FLOW_MODE=fake/live 与生产 Flow wiring ✅
+
+**产物**：`src/invest_research/infrastructure/flow_wiring.py`（`build_flow_runner`/`LiveResearchFlowRunner`/`FlowModeError`）、`tests/test_flow_wiring.py`（10 contract tests）、`settings.py` 新增 `flow_mode`、`worker.py` 新增 `_default_flow_runner`、`.env.example` 新增 `FLOW_MODE`。
+
+### 3 个知识点
+
+1. **Composition Root 集中按模式分支**：生产 wiring（`build_flow_runner`）是唯一按 `FLOW_MODE` 分支组装依赖的地方——fake 返回 `ResearchFlowRunner`（离线全链，不联网），live 返回 `LiveResearchFlowRunner`（持有配置但允许 run 前先校验 key）。业务/application 层只依赖 `FlowRunner` 端口，不感知模式，保持依赖方向 `infrastructure -> application -> domain`。
+2. **fail-fast 用"配置校验"而非"运行时静默降级"**：live 模式下 `_ensure_live_api_key` 在返回 runner 之前就检查 `SECRET_API_KEY` 是否为空/空白，缺失即抛可读 `FlowModeError`。这避免把"缺 key"误当成"可以跑"——宁可启动即失败，也不允许带着坏配置悄悄执行真实模型调用。
+3. **live wiring 契约可用"注入 fake LLM"离线验证**：`LiveResearchFlowRunner.assemble_crew` 接受三个 fake LLM 组装真实 Crew（`build_research_crew`），因此"真实三 Agent wiring 正确"可以在不联网、不付费、不发请求的前提下被测试覆盖；`run()` 显式抛 `NotImplementedError` 表示真实执行尚属 P05-13。
+
+### 检查问题（请用自己的话回答）
+为什么 `build_flow_runner`（composition root 分支）必须放在 infrastructure 层，而不是业务/application 层？"live 缺 key fail-fast"和"普通测试默认 fake"这两条约束，分别通过什么机制保证（一个靠构造时校验，一个靠默认值）？
+
+### 已知限制（必须诚实记录）
+- live 分支只完成 wiring 契约：`run()` 抛 `NotImplementedError`，真实受控 live run 属 P05-13，等待用户授权。
+- `llm_api_key` 仍为 Settings 必需字段；fake 模式构造 Settings 时仍需占位 key（不触发任何请求）。
+- worker 的 `_default_flow_runner` 只在 `FLOW_MODE=live` 时才读取 Settings 并触发 key 校验，fake 路径保持模块导入零 Settings 依赖。
+
+---

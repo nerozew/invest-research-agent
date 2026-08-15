@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     project_name: str = "invest-research"
     environment: Literal["development", "production"] = "development"
     log_level: str = "INFO"
+    # Flow 运行模式（P05-12A）：fake=离线确定性（默认，不调用模型）；live=真实模型（需 API Key）
+    flow_mode: Literal["fake", "live"] = "fake"
 
     # ---- LLM（OpenAI-compatible，供应商无关；默认阿里云百炼 qwen-max，见架构 §8）----
     # provider 当前仅支持 openai_compatible；未来切换供应商只改 env，不改业务代码。
