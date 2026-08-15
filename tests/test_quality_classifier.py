@@ -146,3 +146,29 @@ def test_run_quality_gate_compat() -> None:
     bad = run_quality_gate(_state(report_draft=_draft(complete=False)))
     assert bad.all_passed is False
     assert any("执行摘要" in m for m in bad.issues)
+
+def test_period_end_after_as_of_is_rejected() -> None:
+    """period_end 晚于 as_of_date → period_end_mismatch（CRITICAL，禁止用未来数据）。"""
+    as_of = date(2025, 10, 31)
+    state = ResearchFlowState(
+        request=ResearchRequest(input_company="MSFT", as_of_date=as_of),
+        research_pack=_pack(as_of),
+        analysis_pack=_analysis(date(2025, 12, 31)),  # 晚于 as_of
+        report_draft=_draft(),
+    )
+    issues = classify_state(state)
+    assert "period_end_mismatch" in [i.code for i in issues]
+
+
+def test_period_end_before_as_of_is_allowed() -> None:
+    """period_end 早于 as_of_date（如财年结束日）不触发 mismatch（P05.5-fix）。"""
+    as_of = date(2025, 10, 31)
+    state = ResearchFlowState(
+        request=ResearchRequest(input_company="MSFT", as_of_date=as_of),
+        research_pack=_pack(as_of),
+        analysis_pack=_analysis(date(2025, 9, 27)),  # 财年结束日 < as_of
+        report_draft=_draft(),
+    )
+    issues = classify_state(state)
+    assert all(i.code != "period_end_mismatch" for i in issues)
+

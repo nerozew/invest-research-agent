@@ -41,7 +41,8 @@ MetricResult 列表、以及清楚区分「事实 / 派生指标 / 分析」的�
 输出必须是一个可被 Pydantic 模型 `FinancialAnalysisPack` 校验通过的结构化对象：
 
 - `version`：固定为 `analysis_pack_v1`
-- `period_end`：分析的期间截止日（date）
+- `period_end`：分析的最新年报/季报期间截止日（date）；**必须 ≤ as_of_date**，
+  不得晚于数据截止日（例如 AAPL FY2025 财年截至 2025-09-27，as_of=2025-10-31）
 - `facts`：财务事实列表，**至少 1 条**
 - `metrics`：MetricResult 列表（全部由 FinancialCalculator 产出，可空）
 - `analysis_notes`：趋势与异常的解释（可选）

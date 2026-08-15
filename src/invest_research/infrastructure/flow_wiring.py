@@ -116,6 +116,32 @@ def _validate_json_text(raw: str, model: type[_PackModel]) -> _PackModel:
         raise
 
 
+def _is_sec_source(src: Source) -> bool:
+    """判断来源是否为 SEC 官方来源（URL 域名或 source_type）。"""
+    url = src.canonical_url or ""
+    return src.source_type in (SourceType.SEC_FILING, SourceType.SEC_XBRL) or "sec.gov" in url
+
+
+def _normalize_research_sources(research_pack: ResearchPack) -> ResearchPack:
+    """确定性来源规范化：SEC 来源缺 locator 时用表单类型补全（如 10-K）。
+
+    P05-13 验收要求至少一个 SEC 来源带非空 locator；LLM 或收尾产物可能缺
+    locator，这里做确定性补全（不伪造 URL/日期，locator 取表单类型）。
+    """
+    changed = False
+    sources: list[Source] = []
+    for src in research_pack.sources:
+        if src.locator or not _is_sec_source(src):
+            sources.append(src)
+            continue
+        form = (src.title or "").split(" filed ")[0].strip()
+        sources.append(src.model_copy(update={"locator": form or "SEC filing"}))
+        changed = True
+    if not changed:
+        return research_pack
+    return research_pack.model_copy(update={"sources": sources})
+
+
 class LiveResearchFlowRunner:
     """live 模式的 FlowRunner 契约实现（真实 Crew + 质量门禁 + 受控反思）。
 
@@ -318,9 +344,10 @@ class LiveResearchFlowRunner:
     def _extract_research_pack(self, obj: Any, request: ResearchRequest) -> ResearchPack:
         """解析 Research 输出；失败时尝试一次有界结构化收尾（不伪造来源）。"""
         try:
-            return _to_packed(obj, ResearchPack)
+            pack = _to_packed(obj, ResearchPack)
         except LiveFlowExecutionError as exc:
-            return self._finalize_research_pack(request, exc)
+            pack = self._finalize_research_pack(request, exc)
+        return _normalize_research_sources(pack)
 
     def _finalize_research_pack(self, request: ResearchRequest, cause: Exception) -> ResearchPack:
         """有界结构化收尾：从缓存中的 SEC 申报结果构建 ResearchPack（只允许一次）。
@@ -385,6 +412,8 @@ class LiveResearchFlowRunner:
                         date.fromisoformat(filing_date) if filing_date else request.as_of_date
                     ),
                     accessed_at=request.as_of_date,
+                    # P05.5-fix：表单类型作确定性 locator（P05-13 验收要求 SEC 来源带 locator）
+                    locator=form_type,
                 )
             )
         if not sources:

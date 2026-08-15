@@ -570,3 +570,78 @@ def test_deep_profile_thinking_follows_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(runner_true, LiveResearchFlowRunner)
     assert runner_true.config.enable_thinking is True
 
+
+def test_research_sec_sources_get_deterministic_locator(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """SEC 来源缺 locator 时确定性补全；财年 period_end 门禁放行（P05.5-fix）。"""
+    as_of = date(2025, 10, 31)
+    identity = CompanyIdentity(
+        cik="0000320193", ticker="AAPL", legal_name="APPLE INC", exchange="NASDAQ"
+    )
+    research = ResearchPack(
+        version="research_pack_v1",
+        company_identity=identity,
+        as_of_date=as_of,
+        sources=[
+            Source(
+                source_type=SourceType.SEC_FILING,
+                canonical_url=(
+                    "https://www.sec.gov/Archives/edgar/data/320193/"
+                    "000032019325000079/aapl-20250927.htm"
+                ),
+                title="10-K filed 2025-10-31",
+                accessed_at=as_of,
+                # locator 缺失：应被确定性补全为表单类型 "10-K"
+            )
+        ],
+    )
+    analysis = FinancialAnalysisPack(
+        version="analysis_pack_v1",
+        period_end=date(2025, 9, 27),  # 财年结束日 < as_of，门禁应放行
+        facts=[
+            FinancialFact(
+                company_id="0000320193",
+                source_id="s1",
+                taxonomy="us-gaap",
+                concept="Revenue",
+                value=100,
+                unit="USD",
+                period_start=date(2024, 9, 29),
+                period_end=date(2025, 9, 27),
+            )
+        ],
+    )
+    draft = ReportDraft(
+        version="report_draft_v1",
+        title="t",
+        markdown=(
+            "# t\n\n## 执行摘要\n内容\n## 公司与业务概览\n内容\n"
+            "## 财务表现\n内容\n## 风险\n内容\n## 数据限制\n内容\n"
+            "## 非投资建议\n内容"
+        ),
+        citation_keys=["c1"],
+    )
+
+    class _FakeCrew:
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(tasks_output=[research, analysis, draft])
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("locator")),
+        crew_factory=lambda cfg, rt: _FakeCrew(),  # type: ignore[no-any-return]
+    )
+    runner.run(ResearchRequest(input_company="AAPL", as_of_date=as_of))
+
+    state = runner.last_state
+    assert state is not None
+    assert state.research_pack is not None
+    sec_sources = [s for s in state.research_pack.sources if "sec.gov" in (s.canonical_url or "")]
+    assert sec_sources, "应保留 SEC 来源"
+    assert all(s.locator for s in sec_sources), "SEC 来源应补全非空 locator"
+    # 门禁放行：财年 period_end ≤ as_of + 章节/引用齐全 → published
+    assert state.quality_report is not None
+    assert state.quality_report.all_passed is True
+    assert state.run_manifest.get("status") == "published"
+

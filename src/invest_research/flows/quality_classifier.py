@@ -88,14 +88,17 @@ def classify_state(state: ResearchFlowState) -> list[QualityIssue]:
     if (
         state.analysis_pack is not None
         and state.research_pack is not None
-        and state.analysis_pack.period_end != state.research_pack.as_of_date
+        and state.analysis_pack.period_end > state.research_pack.as_of_date
     ):
+        # P05.5-fix：分析的是财年/季度期间，period_end 是期间截止日（如 AAPL FY2025
+        # 截至 2025-09-27），只需不晚于数据截止日 as_of_date（禁止使用截止日之后数据），
+        # 不应与 as_of_date 精确相等。
         issues.append(
             _issue(
                 "period_end_mismatch",
                 QualitySeverity.CRITICAL,
                 "analysis",
-                "period_end 不一致",
+                "period_end 晚于 as_of_date（禁止使用截止日之后的数据）",
                 QualityAction.REJECT,
             )
         )
