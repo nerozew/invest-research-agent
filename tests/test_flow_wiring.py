@@ -39,13 +39,21 @@ from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.settings import Settings
 
 
-def _settings(*, flow_mode: str = "fake", api_key: str = "sk-test") -> Settings:
-    """构造不读 .env 的 Settings（必需字段 + flow_mode/llm_api_key 覆盖）。"""
+def _settings(
+    *,
+    flow_mode: str = "fake",
+    api_key: str = "sk-test",
+    research_profile: str | None = None,
+) -> Settings:
+    """构造不读 .env 的 Settings（必需字段 + flow_mode/llm_api_key/research_profile 覆盖）。"""
+    kwargs: dict[str, object] = {"flow_mode": flow_mode}
+    if research_profile is not None:
+        kwargs["research_profile"] = research_profile
     return Settings(
         _env_file=None,
         llm_api_key=api_key,
         sec_user_agent_contact="test@example.com",
-        flow_mode=flow_mode,
+        **kwargs,
     )
 
 
@@ -536,4 +544,29 @@ def test_tool_budget_exhausted_returns_typed_result() -> None:
     result = sec_tool.run(cik="0000320193", as_of_date="2024-01-01", requested_forms="10-K,10-Q")
     assert submissions.calls == 2
     assert "BUDGET_EXHAUSTED" in json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# P05.5-fix：fast 强制非思考模式 / deep 由 LLM_ENABLE_THINKING 环境变量决定
+# ---------------------------------------------------------------------------
+
+
+def test_fast_profile_forces_non_thinking() -> None:
+    """fast 模式明确使用非思考模式（enable_thinking=False，Qwen3.5 提速）。"""
+    settings = _settings(flow_mode="live", api_key="sk-live", research_profile="fast")
+    runner = build_flow_runner(settings)
+    assert isinstance(runner, LiveResearchFlowRunner)
+    assert runner.config.enable_thinking is False
+
+
+def test_deep_profile_thinking_follows_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deep 模式是否开启思考由 LLM_ENABLE_THINKING 环境变量决定，不写死。"""
+    runner_none = build_flow_runner(_settings(flow_mode="live", api_key="sk-live"))
+    assert isinstance(runner_none, LiveResearchFlowRunner)
+    assert runner_none.config.enable_thinking is None  # 未配置 → 不传供应商专有参数
+
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "true")
+    runner_true = build_flow_runner(_settings(flow_mode="live", api_key="sk-live"))
+    assert isinstance(runner_true, LiveResearchFlowRunner)
+    assert runner_true.config.enable_thinking is True
 

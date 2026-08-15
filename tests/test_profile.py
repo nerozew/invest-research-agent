@@ -45,7 +45,7 @@ def test_fast_profile_budgets() -> None:
     assert p.analysis_max_iter == 2
     assert p.writer_max_iter == 1
     assert p.max_retry_limit == 1
-    assert p.max_execution_time == 300
+    assert p.max_execution_time == 180
     assert p.max_rpm == 60
 
 
@@ -97,7 +97,7 @@ def test_research_agent_applies_fast_budget() -> None:
     try:
         assert agent.max_iter == 5
         assert agent.max_retry_limit == 1
-        assert agent.max_execution_time == 300
+        assert agent.max_execution_time == 180
         assert agent.max_rpm == 60
     finally:
         _stop_rpm_controller(agent)
@@ -122,7 +122,7 @@ def test_analysis_and_writer_agents_apply_own_max_iter() -> None:
         assert analysis.max_iter == 2
         assert writer.max_iter == 1
         assert analysis.max_retry_limit == 1
-        assert writer.max_execution_time == 300
+        assert writer.max_execution_time == 180
     finally:
         _stop_rpm_controller(analysis)
         _stop_rpm_controller(writer)

@@ -201,6 +201,44 @@ def test_model_name_is_stripped() -> None:
     assert config.model_research == "qwen-turbo"
 
 
+# ---- 17. enable_thinking（Qwen3.5 思考模式开关，P05.5-fix） ----
+def test_enable_thinking_false_passed_to_llm() -> None:
+    """false 必须进入 CrewAI LLM 的 additional_params/extra_body。"""
+    config = _config(llm_enable_thinking=False)
+    llm = build_real_llm(config, LLMRole.RESEARCH)
+    params = getattr(llm, "additional_params", {}) or {}
+    assert params.get("extra_body") == {"enable_thinking": False}
+
+
+def test_enable_thinking_true_passed_to_llm() -> None:
+    config = _config(llm_enable_thinking=True)
+    llm = build_real_llm(config, LLMRole.ANALYSIS)
+    params = getattr(llm, "additional_params", {}) or {}
+    assert params.get("extra_body") == {"enable_thinking": True}
+
+
+def test_enable_thinking_none_not_passed() -> None:
+    """None（未配置）时不传供应商专有参数，保持其它 OpenAI-compatible 兼容。"""
+    config = _config()  # llm_enable_thinking 默认 None
+    llm = build_real_llm(config, LLMRole.WRITER)
+    params = getattr(llm, "additional_params", {}) or {}
+    assert "extra_body" not in params
+
+
+def test_enable_thinking_does_not_leak_secret() -> None:
+    config = _config(llm_enable_thinking=False)
+    llm = build_real_llm(config, LLMRole.RESEARCH)
+    assert SECRET not in repr(llm)
+    assert SECRET not in str(llm)
+    assert SECRET not in repr(config)
+
+
+def test_enable_thinking_maps_from_settings() -> None:
+    assert _config().enable_thinking is None
+    assert _config(llm_enable_thinking=False).enable_thinking is False
+    assert _config(llm_enable_thinking=True).enable_thinking is True
+
+
 # ---- 11. factory 构建不发网络请求 ----
 def test_factory_build_makes_no_network_requests() -> None:
     factory = OpenAICompatibleLLMFactory()

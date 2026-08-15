@@ -42,7 +42,7 @@ class ResearchProfile(BaseModel):
                 analysis_max_iter=2,
                 writer_max_iter=1,
                 max_retry_limit=1,
-                max_execution_time=300,
+                max_execution_time=180,
                 max_rpm=60,
             )
         return cls(
@@ -89,7 +89,11 @@ class Settings(BaseSettings):
     llm_model_analysis: str = "qwen-max"
     llm_model_writer: str = "qwen-max"
     llm_temperature: float = 0.2
-    llm_timeout: float = 120.0
+    llm_timeout: float = 60.0
+    # Qwen3.5 等模型默认开启思考模式（reasoning），响应极慢易超时：
+    # None=不传供应商专有参数（deep 模式默认，保持其它 OpenAI-compatible 兼容）；
+    # false=显式关闭思考（fast 模式由 flow_wiring 强制）；true=显式开启
+    llm_enable_thinking: bool | None = None
 
     # ---- SEC EDGAR 合规（见可靠性 §5.2：User-Agent 必须含联系邮箱）----
     sec_user_agent_contact: str

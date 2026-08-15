@@ -502,6 +502,10 @@ def build_flow_runner(
     _ensure_live_api_key(settings)
     config = LLMConfig.from_settings(settings)
     resolved_profile = profile if profile is not None else settings.build_research_profile()
+    if resolved_profile.mode == "fast":
+        # fast 模式明确使用非思考模式：Qwen3.5 等默认思考模式（reasoning）响应极慢，
+        # 显式关闭后显著提速；deep 模式是否开启由 LLM_ENABLE_THINKING 环境变量决定。
+        config = config.model_copy(update={"enable_thinking": False})
     return LiveResearchFlowRunner(
         config=config,
         research_tools=research_tools,

@@ -66,6 +66,9 @@ class LLMConfig(BaseModel):
     model_writer: str = Field(min_length=1)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     timeout: float = Field(default=60.0, gt=0.0)
+    # 供应商专有参数：Qwen3.5 等默认思考模式（reasoning），显式关闭可显著提速；
+    # None=不传（保持其它 OpenAI-compatible 供应商兼容）
+    enable_thinking: bool | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "LLMConfig":
@@ -79,6 +82,7 @@ class LLMConfig(BaseModel):
             model_writer=settings.llm_model_writer,
             temperature=settings.llm_temperature,
             timeout=settings.llm_timeout,
+            enable_thinking=settings.llm_enable_thinking,
         )
 
     def model_for(self, role: LLMRole) -> str:
@@ -234,12 +238,18 @@ def build_real_llm(config: LLMConfig, role: LLMRole) -> AnyLLM:
     """
     from crewai import LLM as CrewAILLM
 
+    kwargs: dict[str, Any] = {}
+    if config.enable_thinking is not None:
+        # 仅当显式配置时才传供应商专有参数：Qwen3.5 思考模式默认开启导致响应极慢，
+        # enable_thinking=false 显著提速；None 时不传，保持其它 OpenAI-compatible 兼容。
+        kwargs["extra_body"] = {"enable_thinking": config.enable_thinking}
     return CrewAILLM(
         model=config.model_for(role),
         base_url=config.base_url,
         api_key=config.api_key.get_secret_value(),
         temperature=config.temperature,
         timeout=config.timeout,
+        **kwargs,
     )
 
 
