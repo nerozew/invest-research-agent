@@ -108,6 +108,15 @@ class LLMConfig(BaseModel):
             raise ValueError("base_url 必须是有效的 http/https URL")
         return value.rstrip("/")
 
+    @field_validator("model_research", "model_analysis", "model_writer")
+    @classmethod
+    def _non_blank_model(cls, value: str) -> str:
+        """模型名不得为空或纯空白（fail-fast：禁止空模型名启动，不降级 fake）。"""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("模型名不能为空或纯空白")
+        return cleaned
+
 
 # CrewAI 1.6.1 已安装；惰性导入 BaseLLM/LLM，避免在未安装环境（如纯配置测试）导入失败。
 try:  # pragma: no cover - 惰性导入分支

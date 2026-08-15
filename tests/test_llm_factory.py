@@ -94,7 +94,8 @@ def test_roles_can_use_different_models(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # ---- 5. Base URL 正确传给 builder ----
-def test_base_url_passed_to_builder() -> None:
+def test_base_url_passed_to_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     factory = OpenAICompatibleLLMFactory()
     captured: dict[str, object] = {}
 
@@ -183,6 +184,21 @@ def test_invalid_base_url_rejected() -> None:
             model_analysis="m",
             model_writer="m",
         )
+
+
+# ---- 4b. 空/空白模型名 fail-fast（不写死供应商，但禁止空名启动） ----
+def test_blank_model_name_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _config(llm_model_research="   ")
+    with pytest.raises(ValidationError):
+        _config(llm_model_analysis="   ")
+    with pytest.raises(ValidationError):
+        _config(llm_model_writer="   ")
+
+
+def test_model_name_is_stripped() -> None:
+    config = _config(llm_model_research="  qwen-turbo  ")
+    assert config.model_research == "qwen-turbo"
 
 
 # ---- 11. factory 构建不发网络请求 ----
