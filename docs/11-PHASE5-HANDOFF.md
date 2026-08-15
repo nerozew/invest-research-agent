@@ -71,15 +71,15 @@ P05-14 20公司×5场景 evals 数据集；P05-15 benchmark runner（fake/fixtur
 
 ## 7. Git 状态（本快照）
 
-P05-12A 完成后工作区已清空（所有变更已 commit）。最新 commit：`7bcbae0`。
-分支 `agent/m2-deterministic-tools` 领先 origin 23 commits（未 push）。
+P05-12A 完成后工作区已清空（所有变更已 commit）。最新 commit：`8abe7d1`。
+分支 `agent/m2-deterministic-tools` 领先 origin 24 commits（未 push）。
 
 ## 8. 新窗口继续短提示词
 
 > 【Phase 5 继续（安全交接）】请读取 `docs/11-PHASE5-HANDOFF.md` 和
 > `docs/05-DEVELOPMENT-ROADMAP.md`，确认当前在 P05-13。
 > 当前分支 `agent/m2-deterministic-tools`，已完成 P05-01 ~ P05-11（✅）+ P05-12 离线部分
-> （最新 commit `7bcbae0`），工作区干净。按 P05 自动连续执行规则从 P05-13 开始继续；
+> （最新 commit `8abe7d1`），工作区干净。按 P05 自动连续执行规则从 P05-13 开始继续；
 > P05-12A（FLOW_MODE=fake/live wiring）已完成 ✅；P05-13 无 live 授权保持"实现完成，等待受控
 > live run"（不调用真实千问/搜索）；P05-14/15 可离线完成。
 > 每任务完成 → 测试 → ruff/mypy → 标✅（P05-12 待真实录制授权才可标✅）→ 学习日志 → commit；
