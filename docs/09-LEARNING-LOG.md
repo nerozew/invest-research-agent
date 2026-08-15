@@ -1791,3 +1791,60 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-07：OpenTelemetry Trace ✅
+
+**产物**：`src/invest_research/infrastructure/observability/tracing.py`（`setup_tracing` / `get_tracer` / `trace_id_from_context`）、`tests/test_tracing.py`。commit `f830367`。
+
+### 3 个知识点
+
+1. **Trace 是"跨进程/跨步骤的胶水"**：单靠结构化日志（P05-05）只能看到"某个进程里这一秒发生了什么"，无法把 API 请求 → Worker 消费 → Flow 各步骤 → Tool 调用串成一条完整链路。`trace.set_tracer_provider(provider)` 建立全局 TracerProvider，所有模块用 `get_tracer(name)` 按名称取 tracer 创建 span，`trace_id` 成为贯穿全链路的同一条"案件编号"。
+2. **资源语义化（SERVICE_NAME Resource）**：TracerProvider 用 `Resource.create({SERVICE_NAME: ...})` 打上服务名标签，所有 span 自动携带该资源属性。多服务部署时（API/Worker），按 service.name 就能区分 span 归属，而不必在每条 span 手工加标签。
+3. **可注入导出器 + 与结构化日志关联**：`setup_tracing(exporter=...)` 默认 `SimpleSpanProcessor + ConsoleSpanExporter`（本地可观测），生产可传入 OTLP exporter（对象注入，不硬编码依赖）；`trace_id_from_context()` 读取当前 span context 的 trace_id（无则 None），供 P05-05 的日志 processor 把 `trace_id` 写进每条日志——日志与 trace 通过同一条 id 关联，是"排障时先看 trace、再按 trace_id 过滤日志"的桥梁。
+
+### 检查问题（请用自己的话回答）
+为什么 `setup_tracing` 要把 exporter 作为可注入参数，而不是在函数里直接创建 OTLP exporter？`trace_id_from_context()` 返回 `None` 的语义是什么（什么时候会没有当前 span）？
+
+### 已知限制
+- 当前未接入真实 OTLP Collector 与 Zipkin/Jaeger 后端；span 只输出到控制台/内存（完整 Collector 接入属于 P06-05）。
+- Flow/工具层尚未普遍创建自定义 span，仅提供 tracer 获取能力；API→Worker 的传播还需在 HTTP 客户端注入 context 头。
+
+---
+
+## P05-08：Grafana 最小 Dashboard ✅
+
+**产物**：`deploy/grafana/provisioning/dashboards/research.json`（RED/USE 面板）、`tests/test_grafana_dashboard.py`（3 测试）。commit `9e19f9e`、`3c543e5`（强制纳入 Git 跟踪）。
+
+### 3 个知识点
+
+1. **RED/USE 是 SRE 面板选指标的框架**：RED = Rate（速率）/Errors（错误）/Duration（耗时）；USE = Utilization/Saturation/Errors。面板取"成功率（research_jobs_total）→ Rate+Errors、P95 耗时（histogram_quantile(0.95)）→ Duration、重试（tool_retries_total）→ Saturation/Errors、质量门禁失败（quality_gate_failures_total）→ Errors"——每个面板的 PromQL 表达式都对应 P05-06 已暴露的一个指标，不臆造不存在的指标。
+2. **Dashboard-as-code 可校验**：dashboard 是 JSON 文件，测试把它当"配置代码"验证：`title`/`uid` 固定、必须包含 4 类关键面板表达式、`refresh=30s`、时间窗口 `now-1h`。这样"面板没漏指标""表达式拼错"会在 CI 暴露，而不是部署后才在浏览器里看到空白面板。
+3. **Git 跟踪范围是显式决策**：本项目根 `.gitignore` 是白名单模式，`deploy/` 默认不被跟踪；Dashboard 属于"交付产物"而非"运行时生成物"，通过强制添加（`git add -f`）纳入版本控制，并保持后续只修改已跟踪文件、不随意扩大 ignore 范围——"什么进 Git"是工程决策，不是 gitignore 的偶然结果。
+
+### 检查问题（请用自己的话回答）
+为什么 Dashboard 的 JSON 要写测试来校验，而不是"打开 Grafana 肉眼看一眼"？`histogram_quantile(0.95, ...)` 表达的是哪个指标的第几个百分位，它与"P95 耗时"的语义如何对应？
+
+### 已知限制
+- Dashboard 只在 Grafana provisioning 目录存在，未实际起 Grafana 容器验证渲染（真实 Grafana 部署属于 P06-06 完整 Compose profile）。
+- 面板数量保持在最小集合，未覆盖全部指标（如恢复计数、outbox 投递延迟）；后续按需增补。
+
+---
+
+## P05-09：故障注入（timeout/429/5xx） ✅
+
+**产物**：`tests/test_fault_injection.py`（状态码分类 + 429 重试恢复 + 5xx 耗尽放弃 + timeout 归类 + 最终状态矩阵）。commit `ddfacd4`。
+
+### 3 个知识点
+
+1. **故障注入 = 在"分类层"验证韧性，而非等真实故障**：测试用 `httpx.MockTransport` 构造 429/5xx/timeout 响应，验证 `classify_status_code`/`classify_http_exception` 的映射正确（429→RATE_LIMITED、5xx→UPSTREAM_5XX、timeout→NETWORK_TRANSIENT），并验证"429 重试后成功（calls==2）"与"5xx 达上限后放弃（calls==3）"两条路径——不联网、不真实 sleep，秒级确定。
+2. **MockTransport 是 httpx 的"故障发生器"**：`httpx.MockTransport(handler)` 拦截所有请求，handler 按调用次数（`calls["n"]`）分派"第 1 次返回故障、后续返回成功"。这比 mock 整个 client 更真实：走真实请求/响应管线，又能精确制造各种故障时序。
+3. **重试上限的"最终状态"才是验收**：故障注入的价值不是"重试总能成功"，而是"可恢复的（429/timeout）重试后成功、不可恢复/耗尽的（持续 5xx）按上限放弃且错误可分类"。这验证了 P05-01 白名单错误码 + P05-02 Retry-After 的"有界重试"闭环：任何情况下都不会无限重试。
+
+### 检查问题（请用自己的话回答）
+为什么"429 重试后成功"测试要断言 `calls["n"] == 2`（恰好两次），而不是只断言"最终成功"？（提示：验证了有界重试中的"有界"与"恰好一次降级"两面）
+
+### 已知限制
+- 本任务覆盖 HTTP 层 timeout/429/5xx 分类与有界重试，未覆盖"降级路由（PDF→HTML）""LLM schema guardrail/reflection 上限"等内部故障——这些属于 P05-10。
+- `_policy` 辅助函数尚未真正绑定 tenacity Retrying 实例，仅演示分类与最终状态；真正的重试执行路径由 P05-01/02 的 retry 模块覆盖。
+
+---
+
