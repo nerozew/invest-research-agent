@@ -191,7 +191,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-08 ✅ | 写 Grafana 本地最小 dashboard | dashboard JSON | 成功率、P95、重试、错误可见 | RED/USE 指标 |
 | P05-09 ✅ | 故障注入：timeout/429/5xx | tests | 重试次数和最终状态符合矩阵 | resilience testing |
 | P05-10 ✅ | 故障注入：坏 PDF/非法 LLM JSON | tests | 降级和 guardrail 上限正确 | bounded recovery |
-| P05-11 | 故障注入：数据库/本地工件写入失败 | tests | 不能误报成功，无半成品发布 | commit semantics |
+| P05-11 ✅ | 故障注入：数据库/本地工件写入失败 | tests | 不能误报成功，无半成品发布 | commit semantics |
 | P05-12 | 录制一家公司 SEC 契约 fixture | fixture + sanitizer | CI 离线可回放，无敏感字段 | record/replay |
 | P05-12A | FLOW_MODE=fake/live 与生产 Flow wiring | wiring + contract tests | fake/live 模式切换，普通测试用 fake | production wiring |
 | P05-13 | 真实服务 E2E smoke | opt-in test | 固定公司生成带引用报告 | external integration |

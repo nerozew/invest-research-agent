@@ -1868,3 +1868,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-11：故障注入（数据库/本地工件写入失败） ✅
+
+**产物**：`tests/test_fault_injection_db.py`（Job+Outbox 事务语义+连接失败）、`tests/test_fault_injection_artifact.py`（原子写各阶段故障）。**零生产代码改动。**
+
+### 3 个知识点
+
+1. **事务语义 = "要么两者都持久化，要么都不持久化"**：`SqlJobStore.create` 在同一 session 里同时 `add(ResearchJob)` 与 `add(OutboxEvent)`，一次 `commit()` 原子提交。测试注入"commit 抛错/连接断开"的双份 session 工厂，断言**没有一行 Job、也没有一行 Outbox 事件落库**——这就证明了"DB 与事件一致"：不可能出现"Job 成功但 Outbox 缺失"的半成品。
+2. **原子写入 = "临时文件 + fsync + os.replace"的每一环都可失败且不留下半成品**：`ArtifactStore.write` 用同目录临时文件，写完 `flush()`+`os.fsync()` 后 `os.replace` 原子改名。测试用 monkeypatch 分别注入 `write`/`flush`/`fsync`/`os.replace`/`hashlib.sha256` 的失败，断言**异常传播（不误报成功）+ 临时文件被清理 + 目标文件不存在（或覆盖场景下旧内容保留）**——每个故障点都不产生内部可见的半成品。
+3. **注入点必须匹配真实实现（真实调试教训）**：第一版把故障注入到 `Path.write_bytes`/`builtins.open`，但 `ArtifactStore` 实际用的是 `os.fdopen` + 文件对象方法——注入根本没命中，4 个测试"没有抛错"直接失败。修正为包装 `os.fdopen` 返回的 file 对象、patch `os.fsync`/`os.replace`/`hashlib.sha256` 后才真正命中。**教训：测试必须先读清生产代码的真实调用路径，注入点错误 = 测试假绿。**
+
+### 检查问题（请用自己的话回答）
+为什么"commit 失败"测试要同时断言 `_count_jobs == 0` 和 `_count_events == 0`（两个都是 0），而不是只断言其中一个？"覆盖场景下 os.replace 失败"为什么要求旧内容仍然保留（v1 不被破坏）？（提示：原子替换成功与否的分界在哪一步？）
+
+### 已知限制
+- 数据库测试用 SQLite 内存库验证事务写入语义，未连真实 PostgreSQL（真实 DB 集成由 P01-07/08 的 Testcontainers 覆盖）。
+- 文件系统故障用 monkeypatch 注入，未模拟真实磁盘错误/断电（该粒度不适合单测）。
+- Outbox relay 的投递失败与队列发布失败（非 Job 创建事务）已在 P05-03B 覆盖，本任务聚焦"创建事务"与"工件写入"。
+
+---
+
