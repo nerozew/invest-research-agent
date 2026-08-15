@@ -64,8 +64,24 @@ _SEC_OFFICIAL_HOSTS = ("sec.gov", "data.sec.gov", "www.sec.gov")
 
 
 def _live_enabled() -> bool:
-    """真实 E2E 启用条件：RUN_LIVE_E2E=1 且 FLOW_MODE=live。"""
-    return os.environ.get("RUN_LIVE_E2E") == "1" and os.environ.get("FLOW_MODE") == "live"
+    """真实 E2E 启用条件：RUN_LIVE_E2E=1 且 FLOW_MODE=live。
+
+    - ``RUN_LIVE_E2E`` 是显式测试开关，只能来自环境变量；
+    - ``FLOW_MODE`` 与 run_live_e2e.py 同一来源：优先环境变量，否则读
+      Settings（根目录 .env）。修复"key/URL 都对但测试全 skip"的陷阱。
+    - 任何缺失/异常都返回 False（安全，绝不联网）。
+    """
+    if os.environ.get("RUN_LIVE_E2E") != "1":
+        return False
+    env_mode = os.environ.get("FLOW_MODE")
+    if env_mode is not None:
+        return env_mode == "live"
+    try:
+        from invest_research.settings import get_settings
+
+        return get_settings().flow_mode == "live"
+    except Exception:
+        return False
 
 
 def _e2e_request() -> ResearchRequest:
