@@ -1928,3 +1928,29 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - worker 的 `_default_flow_runner` 只在 `FLOW_MODE=live` 时才读取 Settings 并触发 key 校验，fake 路径保持模块导入零 Settings 依赖。
 
 ---
+
+## P05-12B：真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装 ✅
+
+**产物**：`agents/llm_factory.py`（`build_real_llm`/`AnyLLM`）；`agents/{research,analysis,writer,revision}_task.py`（统一 LLM 接口 + tools 注入）；
+`agents/crew_factory.py`（`build_live_research_crew`）；`infrastructure/real_tools.py`（真实工具白名单）；
+`infrastructure/flow_wiring.py`（`LiveResearchFlowRunner.run` 完整控制流）；`infrastructure/queue/worker.py`（live 工具组装 + Serper fail-fast）；
+`settings.py`/`.env.example`/`compose.yml`（`SERPER_API_KEY`/`FLOW_MODE` 传递）；`tests/test_real_tools.py` + 更新 4 个既有测试文件。
+
+### 3 个知识点
+
+1. **CrewAI 1.6.1 的真实 LLM 构造契约**：`crewai.LLM(model, base_url, api_key, temperature, timeout)` 是 OpenAI-compatible 的官方入口，`issubclass(LLM, BaseLLM)=True`，构造阶段**不发起网络请求**（仅模型/provider 解析，实测 provider 自动识别为 `openai`）；API Key 用 `SecretStr.get_secret_value()` 只在构造那一刻解包，此后由 CrewAI 内部持有，绝不进入 repr/日志/异常。这回答了"真实 LLM builder 如何不猜测接口"——以当前安装版本源码/签名实测为准。
+2. **统一 LLM 接口 = 联合类型而非抽象基类**：`AnyLLM = FakeLLM | BaseLLM`（`type alias`），三个 Agent 的 `fake: AnyLLM | None = None` 参数同时接受测试替身和真实 LLM；`fake=None` 时默认走 `build_real_llm`。这比让 Agent 继承抽象基类更贴合 CrewAI 生态（FakeLLM 本就是 BaseLLM 子类），且 mypy strict 可静态验证。删除"仅支持 fake"的 `NotImplementedError` 后，调用方无需区分模式。
+3. **composition root 里把 P02 确定性工具包装为 CrewAI @tool**：真实工具（CompanyResolver/SEC/下载/解析/搜索）是 P02-01 的 `Tool` 协议对象（`execute(request) -> ToolResult`），不能直接挂到 CrewAI `Agent(tools=...)`；需要经 `@tool("Name")` 包装成"函数收原始参数 → 返回 JSON 字符串"。关键决策：**工具失败返回结构化 JSON（含 ErrorCode）而非抛异常**——CrewAI 会把异常当作工具调用失败，丢失统一错误语义；用 ToolFailure 的 ErrorCode 保留可重试分类。SEC Company Facts 结果受控（`as_of_date` 过滤 + 条数上限），防止把整份 XBRL 塞进 LLM context。
+4. **live 模式 fail-fast 的完整闭环**：`flow_wiring.build_flow_runner` 校验 `LLM_API_KEY`；`worker._build_live_research_tools` 校验 `SERPER_API_KEY`（缺 key 直接抛 `FlowModeError`，禁止自动退回 fake）；`LiveResearchFlowRunner.run()` 的 `crew_factory` 可注入（默认真实 `build_live_research_crew`），因此"完整控制流（Crew→pack→质量门禁→受控反思→manifest→工件落盘）"可在离线用 fake crew 验证；任何 Crew 异常转 `LiveFlowExecutionError`，绝不偷偷降级 fake。
+5. **Worker 按 FLOW_MODE 路由**：`_default_flow_runner()` 默认 `FLOW_MODE=fake`（模块导入零 Settings 依赖，保持 CI 离线）；`FLOW_MODE=live` 时才读 Settings、组装真实工具、fail-fast。`compose.yml` 的 `x-app-env` 已补 `FLOW_MODE`/`SERPER_API_KEY`/`SERPER_ENDPOINT`（默认 fake + 占位符，真实 key 只从运行环境注入，不进镜像/Git）。
+
+### 检查问题（请用自己的话回答）
+为什么"真实工具失败"要返回结构化 JSON（含 ErrorCode）而不是让 CrewAI 工具抛异常？如果工具直接抛异常，统一错误分类和可重试语义会丢失什么？（提示：对比 ToolFailure.error_code 与 CrewAI 对异常的处理）
+
+### 已知限制（必须诚实记录）
+- `LiveResearchFlowRunner.run()` 的真实**反思**（修订/补证的真实 LLM 重跑）仍以确定性占位记录审计（反思决策落进 manifest），真正触发真实 LLM 重跑属于 P05-13 live smoke。
+- 本任务只在离线/CI 用 fake crew + 预置 pack 验证完整控制流；**真实模型调用未发生**（无真实 API Key），真实 E2E 等待 P05-13 受控授权。
+- Serper 真实 Key 未配置（`.env.example` 只放占位符）；worker live 路径在缺 key 时会 fail-fast，属于预期行为。
+- `docs/05` 中 P03-01~等历史行仍无 `✅`（与现有交接快照一致，非本任务范围）。
+
+---

@@ -1,4 +1,4 @@
-"""P03-18 Writer 定向修订 Task（Phase 3.5，fake LLM 不联网）。
+"""P03-18 Writer 定向修订 Task（Phase 3.5；P05-12B 起支持统一 LLM 接口）。
 
 对齐 docs/04 §2.5 与 docs/06 §12.4.1（writer_revision_prompt_v1）：
 - 只修复 RevisionRequest.issues 指出的问题；
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from crewai import Agent, Task
 
-from invest_research.agents.llm_factory import FakeLLM, LLMConfig
+from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.agents.writer_task import (
     artifact_reader,
     citation_verifier,
@@ -36,15 +36,17 @@ REVISION_PROMPT_V1 = (
 _REVISION_TOOLS = [artifact_reader, citation_verifier, template_guide]
 
 
-def build_revision_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agent:
-    """定向修订 Agent：复用 Writer 最小工具白名单 + 修订提示词。"""
-    if fake is None:
-        raise NotImplementedError("P03-18 仅支持 fake LLM")
+def build_revision_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
+    """定向修订 Agent：复用 Writer 最小工具白名单 + 修订提示词。
+
+    - 传 fake 时直接复用（不联网）；未传时构造真实 LLM（P05-12B）。
+    """
+    llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
     return Agent(
         role="定向修订编辑",
         goal="只修复 QualityIssue 指出的问题，产出修订版 ReportDraft（不新增事实）。",
         backstory=REVISION_PROMPT_V1,
-        llm=fake,
+        llm=llm,
         tools=_REVISION_TOOLS,
         allow_delegation=False,
         verbose=False,
@@ -53,13 +55,13 @@ def build_revision_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agen
 
 def build_revision_task(
     config: LLMConfig,
-    fake: FakeLLM,
+    fake: AnyLLM,
     issues: list[QualityIssue],
     original_draft_version: str,
     revision_number: int,
     agent: Agent | None = None,
 ) -> Task:
-    """构建定向修订 Task。"""
+    """构建定向修订 Task（统一 LLM 接口）。"""
     if not issues:
         raise ValueError("issues 不能为空：定向修订必须指定要修复的问题")
     if revision_number < 1:
@@ -82,7 +84,7 @@ def build_revision_task(
 
 def build_revision_pair(
     config: LLMConfig,
-    fake: FakeLLM,
+    fake: AnyLLM,
     issues: list[QualityIssue],
     original_draft_version: str,
     revision_number: int,

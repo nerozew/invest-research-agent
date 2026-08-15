@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # ---- SEC 合规（P02-03：全局限流，项目安全上限 5 req/s，低于官方 10 req/s）----
     sec_rate_limit_per_second: float = 5.0
 
+    # ---- 搜索服务（P02-17/18：Serper provider，P05-12B live 需要）----
+    # Serper API Key 用 SecretStr：str()/repr() 不泄露明文；.env.example 只放占位符。
+    serper_api_key: SecretStr | None = None
+    serper_endpoint: str = "https://google.serper.dev/search"
+
 
 @lru_cache
 def get_settings() -> Settings:

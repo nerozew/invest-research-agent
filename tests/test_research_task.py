@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
 from crewai import BaseLLM
 
 from invest_research.agents.llm_factory import (
@@ -120,7 +119,10 @@ def test_fake_llm_call_instantiates_research_pack() -> None:
     assert fake.invoked_prompts == ["请收集 MSFT 的公开信息"]
 
 
-def test_build_research_agent_requires_fake() -> None:
-    """P03-05 暂不支持真实 LLM：未传 fake 时抛 NotImplementedError（不联网）。"""
-    with pytest.raises(NotImplementedError):
-        build_research_agent(_config(), fake=None)
+def test_build_research_agent_without_fake_uses_real_llm() -> None:
+    """P05-12B：未传 fake 时构造真实 LLM（不联网，仅构造），不再抛 NotImplementedError。"""
+    agent = build_research_agent(_config(), fake=None)
+    assert agent.role == "信息搜集 Agent"
+    assert agent.llm is not None
+    # 真实构造不发起任何网络请求
+    assert "sk-test-placeholder" not in repr(agent.llm)

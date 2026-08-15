@@ -13,8 +13,6 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-import pytest
-
 from invest_research.agents.analysis_task import (
     build_analysis_agent,
     build_analysis_pair,
@@ -111,6 +109,10 @@ def test_fake_llm_instantiates_analysis_pack() -> None:
     assert result.version == "analysis_pack_v1"
 
 
-def test_build_analysis_agent_requires_fake() -> None:
-    with pytest.raises(NotImplementedError):
-        build_analysis_agent(_config(), fake=None)
+def test_build_analysis_agent_without_fake_uses_real_llm() -> None:
+    """P05-12B：未传 fake 时构造真实 LLM（不联网，仅构造），不再抛 NotImplementedError。"""
+    agent = build_analysis_agent(_config(), fake=None)
+    assert agent.role == "财报分析 Agent"
+    assert agent.llm is not None
+    # 真实构造不发起任何网络请求
+    assert "sk-test-placeholder" not in repr(agent.llm)

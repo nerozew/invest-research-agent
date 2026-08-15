@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from invest_research.agents.llm_factory import FakeLLM, LLMConfig, LLMRole
 from invest_research.agents.writer_task import (
     REPORT_SECTIONS,
@@ -100,6 +98,10 @@ def test_fake_llm_instantiates_report_draft() -> None:
     assert result.title.startswith("微软")
 
 
-def test_build_writer_agent_requires_fake() -> None:
-    with pytest.raises(NotImplementedError):
-        build_writer_agent(_config(), fake=None)
+def test_build_writer_agent_without_fake_uses_real_llm() -> None:
+    """P05-12B：未传 fake 时构造真实 LLM（不联网，仅构造），不再抛 NotImplementedError。"""
+    agent = build_writer_agent(_config(), fake=None)
+    assert agent.role == "报告撰写 Agent"
+    assert agent.llm is not None
+    # 真实构造不发起任何网络请求
+    assert "sk-test-placeholder" not in repr(agent.llm)

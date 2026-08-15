@@ -122,9 +122,103 @@ def test_live_runner_assembles_crew_contract() -> None:
     assert len(crew.tasks) == 3
 
 
-def test_live_runner_run_not_allowed_yet() -> None:
-    runner = build_flow_runner(_settings(flow_mode="live", api_key="sk-live"))
-    assert isinstance(runner, LiveResearchFlowRunner)
+def test_live_runner_run_with_injected_fake_crew_offline(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """run() 可通过注入 fake crew 离线跑完整控制流（不联网，不调真实模型）。"""
+    from types import SimpleNamespace
 
-    with pytest.raises(NotImplementedError):
+    from invest_research.domain.models import (
+        CompanyIdentity,
+        FinancialAnalysisPack,
+        FinancialFact,
+        ReportDraft,
+        ResearchPack,
+        Source,
+        SourceType,
+    )
+
+    as_of = _request().as_of_date
+    identity = CompanyIdentity(cik="0000789019", legal_name="Microsoft Corp")
+    research = ResearchPack(
+        version="research_pack_v1",
+        company_identity=identity,
+        as_of_date=as_of,
+        sources=[
+            Source(
+                source_type=SourceType.SEC_FILING,
+                canonical_url="https://example.com/filing",
+                title="Latest 10-K",
+                accessed_at=as_of,
+            )
+        ],
+    )
+    analysis = FinancialAnalysisPack(
+        version="analysis_pack_v1",
+        period_end=as_of,
+        facts=[
+            FinancialFact(
+                company_id="0000789019",
+                source_id="fake-source",
+                taxonomy="us-gaap",
+                concept="Revenue",
+                value=100000000000,
+                unit="USD",
+                period_start=date(2024, 1, 1),
+                period_end=as_of,
+            )
+        ],
+        analysis_notes="fake 分析占位",
+    )
+    draft = ReportDraft(
+        version="report_draft_v1",
+        title="Microsoft Corp 投资研究初稿",
+        markdown=(
+            "# Microsoft Corp\n\n"
+            "## 执行摘要\n内容\n"
+            "## 公司与业务概览\n内容\n"
+            "## 财务表现\n内容\n"
+            "## 风险\n内容\n"
+            "## 数据限制\n内容\n"
+            "## 非投资建议\n内容"
+        ),
+        citation_keys=["fake-claim-1"],
+    )
+
+    class _FakeCrew:
+        def kickoff(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(tasks_output=[research, analysis, draft])
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("live_artifacts")),
+        crew_factory=lambda cfg, rt: _FakeCrew(),  # type: ignore[no-any-return]
+    )
+    runner.run(_request())
+
+    assert runner.last_state is not None
+    assert runner.last_state.research_pack is not None
+    assert runner.last_state.analysis_pack is not None
+    assert runner.last_state.report_draft is not None
+    assert runner.last_state.quality_report is not None
+    assert runner.last_state.run_manifest.get("status") in ("published", "rejected")
+
+
+def test_live_failure_does_not_degrade_to_fake(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """live 失败抛 LiveFlowExecutionError，绝不偷偷调用 fake。"""
+    from invest_research.infrastructure.flow_wiring import LiveFlowExecutionError
+
+    class _BrokenCrew:
+        def kickoff(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("boom")
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("live_broken")),
+        crew_factory=lambda cfg, rt: _BrokenCrew(),  # type: ignore[no-any-return]
+    )
+    with pytest.raises(LiveFlowExecutionError):
         runner.run(_request())
+    assert runner.last_state is None  # 不残留运行状态

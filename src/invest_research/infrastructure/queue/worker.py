@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Callable
+from typing import Any, Callable
 
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
 from sqlalchemy.engine import Engine
@@ -60,20 +60,59 @@ def _build_session_factory() -> SessionFactory:
     return factory
 
 
+def _build_live_research_tools(settings: Any) -> list[Any]:
+    """构造 live 模式的 Research 真实工具白名单（SEC/搜索/下载）。
+
+    - 构建共享 httpx client（SEC 请求 + User-Agent 合规）；
+    - Serper API Key 缺失/为空时 fail-fast（禁止缺配置启动真实搜索）；
+    - 返回 from real_tools.build_research_tools 的 CrewAI 工具列表。
+    """
+    from invest_research.infrastructure.flow_wiring import FlowModeError
+    from invest_research.infrastructure.http.client import build_http_client
+    from invest_research.infrastructure.real_tools import build_research_tools
+    from invest_research.tools.serper_adapter import SerperAdapter, SerperConfig
+
+    serper_key = settings.serper_api_key
+    if serper_key is None:
+        raise FlowModeError(
+            "FLOW_MODE=live 需要配置 SERPER_API_KEY（仅从环境变量/.env 读取，"
+            "缺失时禁止启动真实搜索）。"
+        )
+    key_value = serper_key.get_secret_value()
+    if not key_value or not key_value.strip():
+        raise FlowModeError("FLOW_MODE=live 需要配置 SERPER_API_KEY（不能为空值）。")
+
+    client = build_http_client(
+        connect_timeout=settings.http_connect_timeout,
+        read_timeout=settings.http_read_timeout,
+        user_agent=settings.http_user_agent
+        or f"invest-research/0.1 (+{settings.sec_user_agent_contact})",
+    )
+    serper = SerperAdapter(
+        client=client,
+        config=SerperConfig(api_key=serper_key, endpoint=settings.serper_endpoint),
+    )
+    return build_research_tools(client=client, serper=serper)
+
+
 def _default_flow_runner() -> ResearchFlowRunner:
     """按 FLOW_MODE 环境变量构建 FlowRunner（默认 fake，不读 Settings/不依赖 key）。
 
     - ``FLOW_MODE=fake``（默认）：返回 ``ResearchFlowRunner``（P03 纯 fake 00-07 全链，
       不联网、不产生模型费用），保持 worker 模块导入零 Settings 依赖；
     - ``FLOW_MODE=live``：委托 ``flow_wiring.build_flow_runner(get_settings())``，
-      API Key 缺失/为空时 fail-fast（可读错误），不允许缺配置启动真实模型运行。
+      LLM API Key / Serper Key 缺失或为空时 fail-fast（可读错误），
+      不允许缺配置启动真实模型运行。
     """
     if os.environ.get("FLOW_MODE", "fake") == "fake":
         return ResearchFlowRunner()
     from invest_research.infrastructure.flow_wiring import build_flow_runner
     from invest_research.settings import get_settings
 
-    return build_flow_runner(get_settings())  # type: ignore[return-value]
+    settings = get_settings()
+    research_tools = _build_live_research_tools(settings)
+    runner = build_flow_runner(settings, research_tools=research_tools)
+    return runner  # type: ignore[return-value]
 
 
 def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJobExecutionHandler:
@@ -112,7 +151,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
     service = ExecuteResearchJobService(
         loader=_RepoLoader(),
         writer=_RepoWriter(),
-        flow_runner=runner,  # type: ignore[arg-type]
+        flow_runner=runner,
     )
     return ResearchJobExecutionHandler(service)
 

@@ -1,7 +1,7 @@
-"""P03-07 用 fake LLM 构建 Writer Task（CrewAI 1.6.1，不联网）。
+"""P03-07 构建 Writer Task（CrewAI 1.6.1；P05-12B 起支持统一 LLM 接口）。
 
 目标（docs/05 P03-07 验收）：
-- 组装报告撰写 Agent（注入 ``FakeLLM``）与 ``Task``；
+- 组装报告撰写 Agent（注入 ``AnyLLM``：FakeLLM 或 crewai.BaseLLM）与 ``Task``；
 - Task 绑定 ``output_pydantic=ReportDraft``；
 - **只暴露允许的写作工具**（least-privilege）：ArtifactReader + CitationVerifier + TemplateGuide，
   不暴露搜索/计算等无关工具；Writer 只能使用上游 context（grounded generation）。
@@ -9,8 +9,6 @@
 CrewAI 1.6.1 关键 API（依据官方 docs/edge 的 AGENTS 模板）：
 - ``@tool("Name")`` 装饰器把函数包成 CrewAI 工具；
 - ``Agent(..., tools=[tool1, tool2])`` 注入工具白名单。
-
-注意：P03-07 只构建 Agent+Task，不组合 Crew（P03-08 才做）。
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ from __future__ import annotations
 from crewai import Agent, Task
 from crewai.tools import tool
 
-from invest_research.agents.llm_factory import FakeLLM, LLMConfig
+from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.domain.models import ReportDraft
 from invest_research.prompts.loader import PromptName, load_prompt
 from invest_research.tools.citation_verifier import (
@@ -94,16 +92,15 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
 _WRITER_TOOLS = [artifact_reader, citation_verifier, template_guide]
 
 
-def build_writer_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agent:
-    """构建报告撰写 Agent。
+def build_writer_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
+    """构建报告撰写 Agent（统一 LLM 接口）。
 
     - 只注入 ArtifactReader + CitationVerifier + TemplateGuide；
-    - backstory 使用 writer_prompt_v1（明确禁止引入新事实）。
+    - backstory 使用 writer_prompt_v1（明确禁止引入新事实）；
+    - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.WRITER)
-    llm = fake if fake is not None else None  # P03-08 前仅支持 fake
-    if llm is None:  # pragma: no cover - 真实 LLM 待 P03-08
-        raise NotImplementedError("P03-07 仅支持 fake LLM；真实 LLM 待 P03-08 接入")
+    llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
     return Agent(
         role="报告撰写 Agent",
         goal=(
@@ -120,7 +117,7 @@ def build_writer_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agent:
 
 def build_writer_task(
     config: LLMConfig,
-    fake: FakeLLM | None = None,
+    fake: AnyLLM | None = None,
     agent: Agent | None = None,
 ) -> Task:
     """构建 Writer Task：fake LLM + 写作工具白名单，输出绑定 ReportDraft。"""
@@ -137,7 +134,7 @@ def build_writer_task(
     )
 
 
-def build_writer_pair(config: LLMConfig, fake: FakeLLM) -> tuple[Agent, Task]:
+def build_writer_pair(config: LLMConfig, fake: AnyLLM) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
     agent = build_writer_agent(config, fake=fake)
     task = build_writer_task(config, fake=fake, agent=agent)

@@ -6,13 +6,20 @@
 - 默认适配阿里云百炼（Model Studio）qwen-max，通过 OpenAI-compatible 接口调用；
   未来切换供应商只改环境变量，不改 Agent/Task/Flow 代码。
 - 构建 factory 期间不发任何网络请求；真实 builder 采用惰性 import，
-  避免在 P03-01 引入尚未使用的 CrewAI/LiteLLM 重依赖。
+  只有真正构造 LLM 实例的一瞬间才导入 CrewAI 并解包 SecretStr。
 - API Key 只在真正构造 LLM 实例的一瞬间取出，且不进 repr/str/异常/日志。
+
+统一 LLM 接口（P05-12B）：
+- ``AnyLLM``：``FakeLLM | crewai.BaseLLM``——三个 Agent 都接受该联合类型，
+  FakeLLM 用于测试/CI，``crewai.LLM`` 用于真实运行；业务层不感知具体实现。
+- ``_build_real_llm``：按当前安装的 CrewAI 版本实现 OpenAI-compatible LLM
+  构造（CrewAI 1.6.1：``LLM(model, base_url, api_key, temperature, timeout)``，
+  provider 自动识别为 openai；构造阶段不发起网络请求）。
 
 依赖边界：
 - P03-01 阶段：只导入标准库与 Pydantic，禁止导入 CrewAI/LiteLLM/OpenAI SDK；
 - P03-05 起：项目已安装 CrewAI 1.6.1，`FakeLLM` 继承 ``crewai.BaseLLM``
-  以被 ``Agent(llm=...)`` 接受（不联网测试替身）；真实 builder 仍惰性占位。
+  以被 ``Agent(llm=...)`` 接受（不联网测试替身）；真实 builder 惰性构造。
 """
 
 from __future__ import annotations
@@ -102,13 +109,7 @@ class LLMConfig(BaseModel):
         return value.rstrip("/")
 
 
-# LLM 实例的类型占位：P03-08 安装 CrewAI 后，真实 builder 返回其 LLM 对象。
-# P03-01 阶段不 import CrewAI/LiteLLM，因此用 object 表示"外部可调用对象"。
-# 测试通过注入 fake builder 验证配置传递，不产生任何网络请求。
-LLMInstance = object
-
-
-# CrewAI 1.6.1 已安装；惰性导入 BaseLLM，避免在未安装环境（如纯配置测试）导入失败。
+# CrewAI 1.6.1 已安装；惰性导入 BaseLLM/LLM，避免在未安装环境（如纯配置测试）导入失败。
 try:  # pragma: no cover - 惰性导入分支
     from crewai import BaseLLM
 except ImportError:  # pragma: no cover - 依赖缺失时降级为普通对象
@@ -204,19 +205,32 @@ class FakeLLM(BaseLLM):
         return f"FakeLLM(role={self._role.value}, model={self.model_name})"
 
 
-LLMBuilder = Callable[[LLMConfig, LLMRole], Any]
+# 统一 LLM 接口（P05-12B）：三个 Agent 接受 FakeLLM 或 crewai.BaseLLM（含真实
+# crewai.LLM，其继承自 BaseLLM —— 已在 CrewAI 1.6.1 实测 issubclass(LLM, BaseLLM)=True）。
+# 业务层只依赖该联合类型，不感知具体实现；普通测试/CI 一律注入 FakeLLM，不联网。
+AnyLLM = FakeLLM | BaseLLM
+
+LLMBuilder = Callable[[LLMConfig, LLMRole], AnyLLM]
 
 
-def _build_real_llm(config: LLMConfig, role: LLMRole) -> Any:
-    """惰性构造真实 OpenAI-compatible LLM 实例。
+def build_real_llm(config: LLMConfig, role: LLMRole) -> AnyLLM:
+    """惰性构造真实 OpenAI-compatible LLM 实例（P05-12B 实现）。
 
-    当前 P03-01 不安装 CrewAI/LiteLLM/OpenAI SDK。当这些依赖在 P03-08 引入时，
-    按当时官方文档实现（注意：某些库要求模型名前缀如 ``openai/qwen-max``）。
-    在此之前，调用真实 builder 会得到明确的未实现提示，绝不偷偷发起网络请求。
+    依据当前安装的 CrewAI 1.6.1 官方 API：
+    ``crewai.LLM(model=..., base_url=..., api_key=..., temperature=..., timeout=...)``。
+    - API Key 只在构造真实客户端的这一刻解包（``SecretStr.get_secret_value()``），
+      之后由 CrewAI 内部持有，不进入本模块的 repr/日志/异常；
+    - 构造阶段不发起任何网络请求（CrewAI 1.6.1 实测：仅 model/provider 解析）；
+    - 供应商无关：不做任何 Qwen/DeepSeek 专属业务类，仅透传配置。
     """
-    raise NotImplementedError(
-        "真实 LLM builder 将在 P03-08 引入 CrewAI 后按官方文档实现；"
-        "P03-01 仅提供 fake builder 与配置契约。"
+    from crewai import LLM as CrewAILLM
+
+    return CrewAILLM(
+        model=config.model_for(role),
+        base_url=config.base_url,
+        api_key=config.api_key.get_secret_value(),
+        temperature=config.temperature,
+        timeout=config.timeout,
     )
 
 
@@ -225,7 +239,7 @@ class OpenAICompatibleLLMFactory:
 
     - ``create(config, role, builder=None)``：按角色返回 LLM 实例；
     - builder 可注入：测试传入 fake builder 验证配置传递与 key 安全，不联网；
-    - 默认 builder 为惰性真实构造（当前返回 NotImplementedError，不产生请求）。
+    - 默认 builder 为惰性真实构造（``build_real_llm``，仅构造真正需要时）。
     """
 
     def create(
@@ -233,10 +247,10 @@ class OpenAICompatibleLLMFactory:
         config: LLMConfig,
         role: LLMRole,
         builder: LLMBuilder | None = None,
-    ) -> Any:
+    ) -> AnyLLM:
         if builder is not None:
             return builder(config, role)
-        return _build_real_llm(config, role)
+        return build_real_llm(config, role)
 
     def create_fake(
         self,

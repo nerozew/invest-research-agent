@@ -6,10 +6,10 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`
-- **已提交 Phase 5 任务**：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制完成）**；**P05-12A ✅**
-- **下一个待执行任务**：**P05-12B（真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装）**
-- **已补充到路线图的子任务**：P05-03A、P05-12A、**P05-12B**（见 docs/05-DEVELOPMENT-ROADMAP.md）
-- **上下文快照**：P05-12 真实补完后已刷新（详见第 8 节）
+- **已提交 Phase 5 任务**：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制完成）**；**P05-12A ✅**；**P05-12B ✅（真实 LLM/工具/FlowRunner 生产组装 + 离线验收）**
+- **下一个待执行任务**：**P05-13（真实 E2E smoke，opt-in）**
+- **已补充到路线图的子任务**：P05-03A、P05-12A、P05-12B（见 docs/05-DEVELOPMENT-ROADMAP.md）
+- **上下文快照**：P05-12B 离线验收通过后已刷新（详见第 8 节）
 
 ## 2. 已完成任务与本地 commit
 
@@ -30,7 +30,7 @@
 | P05-11 ✅ | 故障注入 DB/工件写入失败 | 11 passed + 54 passed 回归 | `3d24926` |
 | P05-12 ✅ | 录制一家公司 SEC 契约 fixture（真实录制 AAPL） | test_fixture_sanitizer 12 passed + 回放验证 | `da2f07d` |
 | P05-12A ✅ | FLOW_MODE=fake/live 与生产 Flow wiring | test_flow_wiring 10 passed + 608 回归 | `7bcbae0` |
-| P05-12B | 真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装（待实现） | live builder + wiring tests | — |
+| P05-12B ✅ | 真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装（离线验收通过） | `build_real_llm`/`AnyLLM`/real_tools/LiveResearchFlowRunner.run + 37 测试全绿 | 见 commit `P05-12B` |
 
 ## 3. 完成任务的产物文件（P05-10~12 增量）
 
@@ -55,17 +55,9 @@ tests/test_flow_wiring.py                # P05-12A（10 contract tests）
 
 ## 5. 下一任务 P05-12B 的准备工作
 
-**任务**：真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装
-**要求（审计确认缺口）**：
-1. `llm_factory._build_real_llm` 仍抛 NotImplementedError → 需实现真实 OpenAI-compatible LLM builder；
-2. research/analysis/writer 三 Agent 的 `llm` 参数仍绑定 `FakeLLM` → 需改为统一 LLM 协议（保留 FakeLLM 默认用于测试/CI）；
-3. `LiveResearchFlowRunner.run` 仍抛 NotImplementedError → 需实现真实 run（质量门禁+有界反思保持：修订≤1、补证≤1）；
-4. 真实工具未注入 Agent → Research 注入 CompanyResolver/SEC/搜索/下载；Analysis 只注入财务事实+确定性计算；Writer 只注入上游上下文+引用+工件；
-5. `compose.yml` 的 `x-app-env` 缺 `FLOW_MODE` → 需补以传 live 配置给 Worker；
-6. 缺真实配置必须 fail-fast，禁止自动退回 fake；
-7. 添加离线 contract tests，普通测试不调用真实服务。
+**P05-12B 已完成（离线验收）**：真实 LLM builder（CrewAI 1.6.1 实测 `LLM(model, base_url, api_key, temperature, timeout)`）；统一 `AnyLLM` 接口；真实工具注入（real_tools.py，Research=6 工具白名单）；`LiveResearchFlowRunner.run` 完整控制流（Crew→pack→质量门禁→受控反思→manifest→工件落盘，可注入 fake crew 离线验证）；worker/compose 传递 FLOW_MODE+Serper 配置；37 测试 + Ruff + mypy strict 全绿。
 
-**P05-13~P05-15 路线**：P05-13 真实 E2E smoke（默认 skip，需 live 授权 + `.env` 真实 key）；
+**P05-13~P05-15 路线**：P05-13 真实 E2E smoke（默认 skip，需 live 授权 + `.env` 真实 key + `RUN_LIVE_E2E=1`）；
 P05-14 20公司×5场景 evals 数据集（可离线）；P05-15 benchmark runner（fake/fixture 验证）。
 
 ## 6. 已知风险与注意事项

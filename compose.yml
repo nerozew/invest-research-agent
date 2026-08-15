@@ -17,6 +17,10 @@ x-app-env: &app-env
   LLM_MODEL_RESEARCH: ${LLM_MODEL_RESEARCH:-qwen-max}
   LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen-max}
   LLM_MODEL_WRITER: ${LLM_MODEL_WRITER:-qwen-max}
+  # P05-12A/B：Flow 运行模式（默认 fake 不调用模型；live 需真实 LLM/SERPER key）
+  FLOW_MODE: ${FLOW_MODE:-fake}
+  SERPER_API_KEY: ${SERPER_API_KEY:-your-serper-api-key-placeholder}
+  SERPER_ENDPOINT: ${SERPER_ENDPOINT:-https://google.serper.dev/search}
   # 后端 API 地址（Streamlit 通过服务名访问）
   API_BASE_URL: http://api:8000
   # src 布局：把源码目录加入 PYTHONPATH（镜像内源码位于 /app/src）

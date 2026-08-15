@@ -1,7 +1,7 @@
-"""P03-06 用 fake LLM 构建 Analysis Task（CrewAI 1.6.1，不联网）。
+"""P03-06 构建 Analysis Task（CrewAI 1.6.1；P05-12B 起支持统一 LLM 接口）。
 
 目标（docs/05 P03-06 验收）：
-- 组装财报分析 Agent（注入 ``FakeLLM``）与 ``Task``；
+- 组装财报分析 Agent（注入 ``AnyLLM``：FakeLLM 或 crewai.BaseLLM）与 ``Task``；
 - Task 绑定 ``output_pydantic=FinancialAnalysisPack``；
 - **只暴露允许的分析工具**（least-privilege）：FinancialFactQuery + FinancialCalculator，
   不暴露搜索/下载等无关工具；LLM 不自算，算术经确定性 FinancialCalculator 工具。
@@ -10,8 +10,6 @@ CrewAI 1.6.1 关键 API（依据官方 docs/edge 的 AGENTS 模板）：
 - ``@tool("Name")`` 装饰器把函数包成 CrewAI 工具；
 - ``Agent(..., tools=[tool1, tool2])`` 注入工具白名单；
 - 工具内部调用 ``financial/`` 确定性纯函数（Decimal / 版本化公式）。
-
-注意：P03-06 只构建 Agent+Task，不组合 Crew（P03-08 才做）。
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from pathlib import Path
 from crewai import Agent, Task
 from crewai.tools import tool
 
-from invest_research.agents.llm_factory import FakeLLM, LLMConfig
+from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.domain.models import FinancialAnalysisPack
 from invest_research.financial.concept_mapping import (
     ConceptMapping,
@@ -169,16 +167,15 @@ def financial_calculator(
 _ANALYSIS_TOOLS = [financial_fact_query, financial_calculator]
 
 
-def build_analysis_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agent:
-    """构建财报分析 Agent。
+def build_analysis_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
+    """构建财报分析 Agent（统一 LLM 接口）。
 
     - 只注入 FinancialFactQuery + FinancialCalculator（不给搜索/下载工具）；
-    - backstory 使用 analysis_prompt_v1（明确禁止 LLM 算术）。
+    - backstory 使用 analysis_prompt_v1（明确禁止 LLM 算术）；
+    - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.ANALYSIS)
-    llm = fake if fake is not None else None  # P03-07 前仅支持 fake 测试
-    if llm is None:  # pragma: no cover - 真实 LLM 待 P03-08
-        raise NotImplementedError("P03-06 仅支持 fake LLM；真实 LLM 待 P03-08 接入")
+    llm = fake if fake is not None else build_real_llm(config, LLMRole.ANALYSIS)
     return Agent(
         role="财报分析 Agent",
         goal=(
@@ -195,7 +192,7 @@ def build_analysis_agent(config: LLMConfig, fake: FakeLLM | None = None) -> Agen
 
 def build_analysis_task(
     config: LLMConfig,
-    fake: FakeLLM | None = None,
+    fake: AnyLLM | None = None,
     agent: Agent | None = None,
 ) -> Task:
     """构建 Analysis Task：用 fake LLM + 分析工具白名单，输出绑定 FinancialAnalysisPack。"""
@@ -212,7 +209,7 @@ def build_analysis_task(
     )
 
 
-def build_analysis_pair(config: LLMConfig, fake: FakeLLM) -> tuple[Agent, Task]:
+def build_analysis_pair(config: LLMConfig, fake: AnyLLM) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
     agent = build_analysis_agent(config, fake=fake)
     task = build_analysis_task(config, fake=fake, agent=agent)
