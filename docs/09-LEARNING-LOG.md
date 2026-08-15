@@ -2170,3 +2170,22 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-05 ✅：本地 OpenTelemetry 链路查看（collector/exporter 配置 + 离线测试）
+
+**产物**：`infrastructure/observability/tracing.py`（OTLP 端点/批量导出/`span()` 助手）、四层打点（API middleware `api.request`、Celery task `worker.process`、`flow_wiring` `flow.run`、`real_tools._timed` `tool.*`）、`deploy/otel-collector.yaml`（本地 collector 配置）、`tests/test_tracing_local.py`（9 测试）、`.env.example` OTEL 变量、pyproject 增加 `opentelemetry-exporter-otlp-proto-http`。
+
+### 3 个知识点
+
+1. **trace 关联 = trace_id 共享 + parent/child 链**：API→Worker→Flow→Tool 四层 span 共享同一 `trace_id`，且每个 span 的 `parent.span_id` 指向上层 span 的 `span_id`。跨进程真实环境靠 W3C traceparent 上下文传播；离线测试在进程内用 `with span(...)` 嵌套模拟，即可验证"链路可关联"——**acceptance 的核心是层级结构而非传输方式**。
+2. **OTel SDK 的 Once 守卫坑**：`set_tracer_provider` 默认只允许设置一次（`_TRACER_PROVIDER_SET_ONCE` 内部 Once 对象），测试里多次 `setup_tracing` 会静默失败（只打 warning、provider 不换）。解法是在 `setup_tracing` 里重置 `_done` 守卫，得到"最后一次调用生效"语义——对测试隔离和进程内重配都是正确行为。
+3. **no-op provider 是零成本的默认**：所有 span 打点都在真实代码路径里（middleware、task、runner、工具包装），但**未调用 `setup_tracing` 时 OTel 用 no-op provider**，span 创建零开销——所以普通测试不加任何 tracing 依赖也能跑，打点是"可选观测"而非"强制副作用"。
+
+### 检查问题（请用自己的话回答）
+为什么"工具 span 放在 `_timed` 计时上下文里"而不是在 8 个工具调用点各写一行？`ExitStack` 嵌套多个 context manager 的好处是什么？
+
+### 已知限制
+- 本地 collector 配置已提供（`deploy/otel-collector.yaml`），但**未实际启动 collector/导入 compose**（属 P06-06/07 本地部署范围，本任务只做离线配置与测试）；
+- 跨进程真实链路（API 进程 → broker → Worker 进程）的 W3C 上下文传播未在本任务接入队列消息头，离线测试是进程内模拟——真实跨进程验证留待 P06-07 部署 smoke。
+
+---
+

@@ -219,7 +219,7 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P06-02 ⏳ | 增加 PDF 渲染 | PDF adapter + visual check | 中文字体、链接、分页正常（实现完成：自动化测试通过 + 示例 PDF/截图已生成；**视觉检查待人工确认，未标 ✅**） | 文档渲染 |
 | P06-03 ✅ | 完善本地工件生命周期 | cleanup service + tests | 临时文件、过期工件和基准工件按策略处理 | retention、atomic files |
 | P06-04 ✅ | 完善本地密钥与生产配置 | settings profiles + docs | 密钥不进镜像、Git、日志或 manifest | secrets、configuration |
-| P06-05 | 完成本地 OpenTelemetry 链路查看 | collector/exporter config | FastAPI→Worker→Flow→Tool trace 可关联 | trace、span、context |
+| P06-05 ✅ | 完成本地 OpenTelemetry 链路查看 | collector/exporter config | FastAPI→Worker→Flow→Tool trace 可关联 | trace、span、context |
 | P06-06 | 建立完整本地 Docker Compose profile | compose + config | API、Worker、PostgreSQL、Redis、Prometheus、Grafana 和 trace 组件可启动 | local operations |
 | P06-07 | 执行本地部署 smoke test | scripts/docs | health、任务执行、报告下载、指标和链路查询通过 | deployment verification |
 | P06-08 | 实现 PostgreSQL 与工件备份恢复演练 | scripts + runbook | 从备份恢复一个完整 job、步骤和报告 | RPO/RTO、recovery |
