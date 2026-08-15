@@ -34,8 +34,8 @@
 
 ## 引用与来源（模板自动生成）
 
-1. Apple Inc. Annual Report (Form 10-K)（SEC EDGAR）：https://www.sec.gov/Archives/edgar/data/320193/000032019325000123/aapl-20250927.htm（定位：10-K）
-2. Apple Inc. News Article：https://news.example.com/apple/2025
+1. [Apple Inc. Annual Report (Form 10-K)（SEC EDGAR）](https://www.sec.gov/Archives/edgar/data/320193/000032019325000123/aapl-20250927.htm)（定位：10-K）
+2. [Apple Inc. News Article](https://news.example.com/apple/2025)
 
 引用键：src_sec_2025_10k、metric_revenue_growth
 

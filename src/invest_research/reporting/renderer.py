@@ -85,11 +85,16 @@ def _language_label(value: str) -> str:
 
 
 def _source_line(src: ReportSource) -> str:
-    """把一条来源渲染成列表项文本（在 Python 侧拼装，避免模板行尾块标签吞换行）。"""
-    parts: list[str] = [_md_cell(src.title or "来源")]
+    """把一条来源渲染成列表项文本（在 Python 侧拼装，避免模板行尾块标签吞换行）。
+
+    - 标题 + 发布方作为可点击链接的标签（``[text](url)``），Markdown 与 PDF 都生成链接；
+    - 标签内只剔除 ``[]`` 字符（会破坏 Markdown 链接语法），括号可保留。
+    """
+    label = _md_cell(src.title or "来源")
     if src.publisher:
-        parts.append(f"（{_md_cell(src.publisher)}）")
-    parts.append(f"：{src.url}")
+        label += f"（{_md_cell(src.publisher)}）"
+    label = label.replace("[", "").replace("]", "")
+    parts: list[str] = [f"[{label}]({src.url})"]
     if src.locator:
         parts.append(f"（定位：{_md_cell(src.locator)}）")
     return "".join(parts)

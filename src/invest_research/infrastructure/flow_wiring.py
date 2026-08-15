@@ -491,13 +491,14 @@ class LiveResearchFlowRunner:
 
     def _persist_intermediates(self, request: ResearchRequest, state: ResearchFlowState) -> None:
         """把中间产物写入工件目录（原子写，不覆盖）。"""
+        from invest_research.reporting.pdf import MarkdownPdfRenderer
         from invest_research.reporting.renderer import ReportRenderer, build_render_input
         from invest_research.tools.artifact_store import ArtifactStore
 
         job_root = self._artifact_root / f"{request.input_company}_{request.as_of_date.isoformat()}"
         store = ArtifactStore(job_root)
 
-        payloads: dict[str, str] = {
+        payloads: dict[str, str | bytes] = {
             "00_request.json": request.model_dump_json(),
             "02_research_pack.json": (
                 state.research_pack.model_dump_json() if state.research_pack else "null"
@@ -513,13 +514,16 @@ class LiveResearchFlowRunner:
             ),
             "07_manifest.json": json.dumps(state.run_manifest, ensure_ascii=False, default=str),
         }
-        # P06-01：Jinja2 模板渲染的最终 Markdown 报告（骨架确定性，正文为初稿原文）
+        # P06-01/02：Jinja2 模板渲染的最终 Markdown 报告 + PyMuPDF 渲染的 PDF 版本
         rendered = build_render_input(state)
         if rendered is not None:
-            payloads["08_report.md"] = ReportRenderer().render(rendered)
+            report_md = ReportRenderer().render(rendered)
+            payloads["08_report.md"] = report_md
+            payloads["09_report.pdf"] = MarkdownPdfRenderer().render_to_bytes(report_md)
         for key, content in payloads.items():
             # P05.5-fix：live 单次运行覆盖旧工件，保证工件反映本次运行（诊断不误导）
-            store.write(key, content.encode("utf-8"), overwrite=True)
+            data = content if isinstance(content, bytes) else content.encode("utf-8")
+            store.write(key, data, overwrite=True)
 
 
 def _ensure_live_api_key(settings: Settings) -> str:

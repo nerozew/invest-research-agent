@@ -112,11 +112,11 @@ def test_required_template_sections_stable() -> None:
 def test_sources_render_in_order_with_locator_and_publisher() -> None:
     out = ReportRenderer().render(_fixed_input())
     assert (
-        "1. Apple Inc. Annual Report (Form 10-K)（SEC EDGAR）："
-        "https://www.sec.gov/Archives/edgar/data/320193/000032019325000123/aapl-20250927.htm"
+        "1. [Apple Inc. Annual Report (Form 10-K)（SEC EDGAR）]"
+        "(https://www.sec.gov/Archives/edgar/data/320193/000032019325000123/aapl-20250927.htm)"
         "（定位：10-K）"
     ) in out
-    assert "2. Apple Inc. News Article：https://news.example.com/apple/2025" in out
+    assert "2. [Apple Inc. News Article](https://news.example.com/apple/2025)" in out
     assert "引用键：src_sec_2025_10k、metric_revenue_growth" in out
 
 

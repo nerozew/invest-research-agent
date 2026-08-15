@@ -250,7 +250,7 @@ def test_live_failure_does_not_degrade_to_fake(
 def test_live_runner_persists_rendered_markdown_report(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """P06-01：live 运行后工件目录包含 Jinja2 渲染的 08_report.md（骨架确定性）。"""
+    """P06-01/02：live 运行后工件目录含 08_report.md（模板渲染）与 09_report.pdf（PyMuPDF）。"""
     from pathlib import Path
 
     artifact_root = str(tmp_path_factory.mktemp("report_md"))
@@ -266,7 +266,8 @@ def test_live_runner_persists_rendered_markdown_report(
     )
     runner.run(_request())
 
-    report_path = Path(artifact_root) / "MSFT_2025-12-31" / "08_report.md"
+    job_dir = Path(artifact_root) / "MSFT_2025-12-31"
+    report_path = job_dir / "08_report.md"
     assert report_path.exists()
     content = report_path.read_text(encoding="utf-8")
     assert "# Microsoft Corp 报告" in content
@@ -276,6 +277,10 @@ def test_live_runner_persists_rendered_markdown_report(
     assert "非投资建议声明（固定文本）" in content
     # 正文（Writer 初稿）原样透传
     assert "## 执行摘要" in content
+
+    pdf_path = job_dir / "09_report.pdf"
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes().startswith(b"%PDF")
 
 # ---------------------------------------------------------------------------
 # P05.5-fix：ResearchRequest 注入 / prefetch 注入 / 结构化收尾 / Action 拒绝 / 工具预算
