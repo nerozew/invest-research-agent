@@ -246,6 +246,37 @@ def test_live_failure_does_not_degrade_to_fake(
         runner.run(_request())
     assert runner.last_state is None  # 不残留运行状态
 
+
+def test_live_runner_persists_rendered_markdown_report(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """P06-01：live 运行后工件目录包含 Jinja2 渲染的 08_report.md（骨架确定性）。"""
+    from pathlib import Path
+
+    artifact_root = str(tmp_path_factory.mktemp("report_md"))
+
+    class _FakeCrew:
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            return _fake_outputs(date(2025, 12, 31))
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=artifact_root,
+        crew_factory=lambda cfg, rt: _FakeCrew(),  # type: ignore[no-any-return]
+    )
+    runner.run(_request())
+
+    report_path = Path(artifact_root) / "MSFT_2025-12-31" / "08_report.md"
+    assert report_path.exists()
+    content = report_path.read_text(encoding="utf-8")
+    assert "# Microsoft Corp 报告" in content
+    assert "| 公司 | Microsoft Corp |" in content
+    assert "| CIK | 0000789019 |" in content
+    assert "引用与来源（模板自动生成）" in content
+    assert "非投资建议声明（固定文本）" in content
+    # 正文（Writer 初稿）原样透传
+    assert "## 执行摘要" in content
+
 # ---------------------------------------------------------------------------
 # P05.5-fix：ResearchRequest 注入 / prefetch 注入 / 结构化收尾 / Action 拒绝 / 工具预算
 # ---------------------------------------------------------------------------

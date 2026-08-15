@@ -1,0 +1,44 @@
+# {{ data.title }}
+
+> 本报告由 invest-research 自动化生成，仅供信息整理与技术演示，不构成投资建议。
+
+| 项目 | 内容 |
+| :--- | :--- |
+| 公司 | {{ data.legal_name | md_cell }} |
+| Ticker | {{ data.ticker | md_cell }} |
+| CIK | {{ data.cik | md_cell }} |
+| 数据截止日 | {{ data.as_of_date }} |
+| 生成时间 | {{ data.generated_at }} |
+| 报告语言 | {{ data.language | language_label }} |
+
+---
+
+{{ data.body_markdown }}
+
+---
+
+## 引用与来源（模板自动生成）
+
+{% if data.sources %}
+{% for src in data.sources %}
+{{ loop.index }}. {{ source_line(src) }}
+{% endfor %}
+{% else %}
+- 无可用来源
+{% endif %}
+
+{% if data.citation_keys %}
+引用键：{{ data.citation_keys | join("、") }}
+{% endif %}
+
+{% if data.limitations %}
+## 数据限制（结构化）
+
+{% for lim in data.limitations %}
+- {{ lim | md_cell }}
+{% endfor %}
+{% endif %}
+
+## 非投资建议声明（固定文本）
+
+{{ data.disclaimer }}

@@ -491,6 +491,7 @@ class LiveResearchFlowRunner:
 
     def _persist_intermediates(self, request: ResearchRequest, state: ResearchFlowState) -> None:
         """把中间产物写入工件目录（原子写，不覆盖）。"""
+        from invest_research.reporting.renderer import ReportRenderer, build_render_input
         from invest_research.tools.artifact_store import ArtifactStore
 
         job_root = self._artifact_root / f"{request.input_company}_{request.as_of_date.isoformat()}"
@@ -512,6 +513,10 @@ class LiveResearchFlowRunner:
             ),
             "07_manifest.json": json.dumps(state.run_manifest, ensure_ascii=False, default=str),
         }
+        # P06-01：Jinja2 模板渲染的最终 Markdown 报告（骨架确定性，正文为初稿原文）
+        rendered = build_render_input(state)
+        if rendered is not None:
+            payloads["08_report.md"] = ReportRenderer().render(rendered)
         for key, content in payloads.items():
             # P05.5-fix：live 单次运行覆盖旧工件，保证工件反映本次运行（诊断不误导）
             store.write(key, content.encode("utf-8"), overwrite=True)
