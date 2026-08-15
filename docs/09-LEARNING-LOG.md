@@ -1888,9 +1888,9 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
-## P05-12：SEC Fixture 录制与脱敏（离线部分完成 ✅ / 真实录制未授权） 🚧部分完成
+## P05-12：SEC Fixture 录制与脱敏（真实录制完成 ✅）
 
-**产物（离线部分）**：`src/invest_research/infrastructure/fixture.py`（`FixtureMeta`/`sanitize_response`/`build_meta`/`replay`）、`tests/test_fixture_sanitizer.py`（10 tests）。
+**产物**：`src/invest_research/infrastructure/fixture.py`（`FixtureMeta`/`sanitize_response`/`build_meta`/`replay`）、`tests/test_fixture_sanitizer.py`（10 + 2 tests）、`scripts/record_sec_fixture.py`、`scripts/verify_recorded_fixture.py`、`tests/fixtures/sec_recorded_aapl.json`（真实录制）。
 
 ### 3 个知识点
 
@@ -1901,11 +1901,11 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 ### 检查问题（请用自己的话回答）
 为什么脱敏必须在"录制入库前"而不是"回放时"执行？如果 fixture 文件里已经存了真实 Authorization 头，回放时才脱敏，会有什么风险？
 
-### 已知限制（必须诚实记录）
-- **真实 SEC 网络录制未执行**：未经用户确认不执行新的真实 SEC 录制（授权边界）。
-- 离线部分基于仓库已有 fixture（P02-05/06 的 MSFT 数据）完成脱敏器、meta、回放测试。
-- "录制一家公司 SEC 契约 fixture"的完整验收需真实录制授权；授权后将录制工具的输出经 `sanitize_response` + `build_meta` 落盘即可闭合。
-- P05-12 在路线图**不标 ✅**（保持"部分完成"），待真实录制授权后补完并标记。
+### 已知限制（真实录制已完成 ✅）
+- **真实 SEC 网络录制已执行（2026-08-15）**：使用 `scripts/record_sec_fixture.py` 访问 SEC 官方 Company Tickers/Submissions/Company Facts，录制 AAPL（CIK 0000320193），选定真实历史截止日 `2025-10-31`（最近 10-K 的 filingDate，非动态 today）。
+- 录制响应立即经 `sanitize_response` 脱敏并编 `FixtureMeta`（含 sha256），落盘为 `tests/fixtures/sec_recorded_aapl.json`。
+- 守卫测试 `test_recorded_aapl_fixture_replays_offline` / `test_recorded_aapl_fixture_meta_and_no_secrets` 验证离线回放 + 无敏感字段/邮箱。
+- P05-12 在路线图**标 ✅**（真实录制 + 脱敏 + 离线回放验收真实通过）。
 
 ---
 

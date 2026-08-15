@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from invest_research.infrastructure.fixture import (
+from invest_research.infrastructure.fixture import (  # type: ignore[import-untyped]
     FixtureMeta,
     build_meta,
     replay,
@@ -22,9 +22,9 @@ from invest_research.infrastructure.fixture import (
 FIXTURE_DIR = Path("tests/fixtures")
 
 
-def _load(name: str) -> dict:
+def _load(name: str) -> dict[str, object]:
     path = FIXTURE_DIR / name
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
 # ---- 脱敏器 ----
@@ -101,7 +101,7 @@ def test_fixture_meta_frozen() -> None:
         content_checksum="abc",
     )
     try:
-        meta.schema_version = "v2"  # type: ignore[misc]
+        meta.schema_version = "v2"
         raise AssertionError("should be frozen")
     except Exception:
         pass
@@ -136,3 +136,43 @@ def test_existing_fixtures_do_not_contain_secrets() -> None:
         text = fixture.read_text(encoding="utf-8")
         for pattern in secret_patterns:
             assert pattern.search(text) is None, f"{fixture.name} contains secret"
+
+
+# ---- P05-12 补完：真实 SEC 录制 fixture（AAPL，离线回放守卫）----
+
+
+def test_recorded_aapl_fixture_replays_offline() -> None:
+    """真实录制的 AAPL fixture 必须可离线回放且字段完整（普通测试不联网）。"""
+    data = replay(FIXTURE_DIR / "sec_recorded_aapl.json")
+    payload = data["payload"]
+    assert payload["ticker"] == "AAPL"
+    assert payload["cik"] == "0000320193"
+    assert payload["cik_digits"] == "320193"
+    assert payload["as_of_date"] == "2025-10-31"
+    # submissions 结构：filings.recent 真实申报列表
+    assert "10-K" in payload["submissions"]["filings"]["recent"]["form"]
+    # company facts 至少含 us-gaap 数据
+    assert len(payload["company_facts"]["facts"]["us-gaap"]) > 0
+
+
+def test_recorded_aapl_fixture_meta_and_no_secrets() -> None:
+    """录制 fixture 的 meta 完整且不含敏感字段/邮箱。"""
+    import re
+
+    data = replay(FIXTURE_DIR / "sec_recorded_aapl.json")
+    meta = data["meta"]
+    assert meta["source_url"].startswith("https://data.sec.gov")
+    assert meta["schema_version"] == "sec_fixture_v1"
+    assert len(meta["content_checksum"]) == 64
+
+    text = json.dumps(data, ensure_ascii=False)
+    for pattern in [
+        re.compile(r"(?i)authorization"),
+        re.compile(r"(?i)set-cookie"),
+        re.compile(r"(?i)api[_-]?key"),
+        re.compile(r"(?i)x-api-key"),
+        re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+    ]:
+        assert pattern.search(text) is None, (
+            f"recorded fixture contains secret/email: {pattern.pattern}"
+        )
