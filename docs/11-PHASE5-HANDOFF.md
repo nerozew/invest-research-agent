@@ -6,10 +6,10 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`
-- **已提交 Phase 5 任务**：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制完成）**；**P05-12A ✅**；**P05-12B ✅（真实 LLM/工具/FlowRunner 生产组装 + 离线验收）**
-- **下一个待执行任务**：**P05-13（真实 E2E smoke，opt-in）**
+- **已提交 Phase 5 任务**：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制）**；**P05-12A ✅**；**P05-12B ✅（真实生产组装）**；**P05-14 ✅（20x5 evals 数据集）**；**P05-15 ✅（benchmark runner）**；**P05-13 实现完成（离线契约通过，无真实 .env，未标 ✅，等待受控 live run）**
+- **下一个待执行任务**：**P05-13（受控 live run 授权后执行）→ 之后进入 P06**
 - **已补充到路线图的子任务**：P05-03A、P05-12A、P05-12B（见 docs/05-DEVELOPMENT-ROADMAP.md）
-- **上下文快照**：P05-12B 离线验收通过后已刷新（详见第 8 节）
+- **上下文快照**：P05-12B/13/14/15 完成后已刷新（详见第 8 节）
 
 ## 2. 已完成任务与本地 commit
 
@@ -30,7 +30,10 @@
 | P05-11 ✅ | 故障注入 DB/工件写入失败 | 11 passed + 54 passed 回归 | `3d24926` |
 | P05-12 ✅ | 录制一家公司 SEC 契约 fixture（真实录制 AAPL） | test_fixture_sanitizer 12 passed + 回放验证 | `da2f07d` |
 | P05-12A ✅ | FLOW_MODE=fake/live 与生产 Flow wiring | test_flow_wiring 10 passed + 608 回归 | `7bcbae0` |
-| P05-12B ✅ | 真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装（离线验收通过） | `build_real_llm`/`AnyLLM`/real_tools/LiveResearchFlowRunner.run + 37 测试全绿 | 见 commit `P05-12B` |
+| P05-12B ✅ | 真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装（离线验收通过） | 37 测试全绿 + ruff/mypy | `78cb90f` |
+| P05-13 ⏳ | 真实 E2E smoke（opt-in，实现完成） | 离线契约 3 passed + live skip；无真实 .env | `1f93fc9`（含） |
+| P05-14 ✅ | 20 公司 × 5 场景 evals 数据集 | 10 测试全绿 | `1f93fc9` |
+| P05-15 ✅ | benchmark runner + 汇总（fake/fixture/live） | 4 测试 + fake 100 条 success=1.0 | `eb3b743` |
 
 ## 3. 完成任务的产物文件（P05-10~12 增量）
 
@@ -50,8 +53,8 @@ tests/test_flow_wiring.py                # P05-12A（10 contract tests）
 
 ## 4. 已更新文档
 
-- `docs/05-DEVELOPMENT-ROADMAP.md`：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制）**；**P05-12A ✅**；**P05-12B（新增，待实现）**
-- `docs/09-LEARNING-LOG.md`：P05-01 ~ P05-12 + P05-12A 学习条目已添加（含检查问题，未附答案）
+- `docs/05-DEVELOPMENT-ROADMAP.md`：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制）**；**P05-12A ✅**；**P05-12B ✅**；**P05-13 实现完成（等待 live run，未标 ✅）**；**P05-14 ✅**；**P05-15 ✅**
+- `docs/09-LEARNING-LOG.md`：P05-01 ~ P05-12 + P05-12A + P05-12B + P05-13/14/15 学习条目已添加（含检查问题，未附答案）
 
 ## 5. 下一任务 P05-12B 的准备工作
 
@@ -72,18 +75,19 @@ P05-14 20公司×5场景 evals 数据集（可离线）；P05-15 benchmark runne
 
 ## 7. Git 状态（本快照）
 
-P05-12 真实补完后工作区已清空（所有变更已 commit）。最新 commit：`da2f07d`。
-分支 `agent/m2-deterministic-tools` 领先 origin 27 commits（未 push）。
+P05-12B/13/14/15 全部提交后工作区已清空。最新 commit：`eb3b743`。
+Phase 5 相关本地 commit：`78cb90f`（P05-12B）、`1f93fc9`（P05-13 代码 + P05-14）、`eb3b743`（P05-15）。
+分支 `agent/m2-deterministic-tools` 领先 origin 30 commits（未 push）。
 
 ## 8. 新窗口继续短提示词
 
 > 【Phase 5 继续（安全交接）】请读取 `docs/11-PHASE5-HANDOFF.md` 和
-> `docs/05-DEVELOPMENT-ROADMAP.md`，确认当前在 P05-12B。
-> 当前分支 `agent/m2-deterministic-tools`，已完成 P05-01 ~ P05-12（全部 ✅，含真实 SEC 录制）
-> + P05-12A ✅（最新 commit `da2f07d`），工作区干净。按 P05 自动连续执行规则从 P05-12B 开始继续；
-> P05-12B = 真实 LLM builder + Agent 统一 LLM 协议 + 真实工具注入 + LiveResearchFlowRunner.run
-> + compose FLOW_MODE 传递 + 离线 contract tests（普通测试/CI 仍用 fake）；
-> 缺真实配置 fail-fast，禁止自动退回 fake；P05-13 需 live 授权 + `.env` 真实 key 才执行；
-> P05-14/15 可离线完成。
+> `docs/05-DEVELOPMENT-ROADMAP.md`。
+> 当前分支 `agent/m2-deterministic-tools`，已完成 P05-01 ~ P05-12 + P05-12A/B ✅，
+> P05-14/15 ✅，P05-13 实现完成（离线契约通过，无真实 .env，**未标 ✅**，等待受控 live run）。
+> 最新 commit：`eb3b743`。Phase 5 本地 commit：`78cb90f`（P05-12B）、`1f93fc9`（P05-13+P05-14）、`eb3b743`（P05-15）。
+> P05-13 真实 E2E 需：项目根目录创建 `.env`（LLM_API_KEY + SERPER_API_KEY + FLOW_MODE=live），
+> 然后 `export RUN_LIVE_E2E=1 FLOW_MODE=live && uv run pytest tests/test_live_e2e.py -v`
+> （最多 2 次付费尝试）；P05-13 通过后才可进入 P06。
 > 每任务完成 → 测试 → ruff/mypy → 标✅ → 学习日志 → commit；
 > 不 push / 不部署 / 不进入 P06。上下文接近上限时更新本文件并停止。

@@ -1951,6 +1951,63 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - `LiveResearchFlowRunner.run()` 的真实**反思**（修订/补证的真实 LLM 重跑）仍以确定性占位记录审计（反思决策落进 manifest），真正触发真实 LLM 重跑属于 P05-13 live smoke。
 - 本任务只在离线/CI 用 fake crew + 预置 pack 验证完整控制流；**真实模型调用未发生**（无真实 API Key），真实 E2E 等待 P05-13 受控授权。
 - Serper 真实 Key 未配置（`.env.example` 只放占位符）；worker live 路径在缺 key 时会 fail-fast，属于预期行为。
-- `docs/05` 中 P03-01~等历史行仍无 `✅`（与现有交接快照一致，非本任务范围）。
+
+---
+
+## P05-13：真实服务 E2E smoke（实现完成 ✅ 离线契约；live 等待受控授权）
+
+**产物**：`tests/test_live_e2e.py`（opt-in，默认 skip）、`scripts/run_live_e2e.py`（运行入口 + 前置自检）。
+
+### 3 个知识点
+
+1. **opt-in 测试 = 用环境变量做"保险丝"**：真实 E2E 用 `@pytest.mark.skipif(not _live_enabled(), ...)`，`_live_enabled()` 要求 `RUN_LIVE_E2E=1` 且 `FLOW_MODE=live` 同时成立；普通测试/CI 下测试**恒 skip**，绝不联网。这就是"真实服务调用必须有显式授权、默认禁"的结构保证。
+2. **离线契约测试与 live 测试分层**：本文件同时含"永不 skip 的离线契约测试"（CIK/as_of/表单固定、FLOW_MODE 缺 key fail-fast）与"仅 live 触发的真实 E2E"——验收时能用 `pytest -v` 看到 `3 passed + 1 skipped` 明确区分，不被误判为"真实 E2E 已通过"。
+3. **固定测试对象来自 P05-12 真实录制**：AAPL/CIK 0000320193/as_of 2025-10-31/10-K+10-Q/zh-CN 与 `sec_recorded_aapl.json` 一致——离线已有真实 SEC 契约基线，live 只是"放行真实调用"的最后一公里。
+
+### 检查问题（请用自己的话回答）
+为什么真实 E2E 必须同时满足 `RUN_LIVE_E2E=1` 和 `FLOW_MODE=live` 两个条件才触发，而不是只设一个？
+
+### 已知限制（必须诚实记录）
+- 项目根目录**无真实 `.env`**：live E2E 未执行，P05-13 **不标 ✅**，记录为"实现完成，等待受控 live run"。
+- 运行说明（`scripts/run_live_e2e.py`）已写好真实 key 的填写/执行步骤，但未触发任何付费调用。
+
+---
+
+## P05-14 ✅：20 公司 × 5 场景 evals 数据集
+
+**产物**：`evals/build_dataset.py`（确定性生成器）、`evals/dataset.json`（100 条）、`tests/test_evals_dataset.py`（10 校验测试）。
+
+### 3 个知识点
+
+1. **数据集也是代码（deterministic generator）**：20 家公司 × 5 场景不是手写 JSON，而是用 Python 生成器 `build_dataset()` + 固定 `_COMPANIES`/`_SCENARIOS` 元数据确定性产出——改公司/场景只需改元组，且每次运行结果一致（可复现）。
+2. **固定 as_of 日期的纪律**：所有 as_of 是 `date(2025,10,31)`/`date(2024,6,30)` 写死的日期，**禁止 `date.today()`**——测试 `test_all_dates_fixed_no_today` 专门断言 `as_of != today`。历史截止场景（2024-06-30）专门用于验证"无未来数据"。
+3. **校验器把"分布正确"做成机器可断言**：正好 100、case_id 唯一、CIK 10 位、20 公司各 5 场景、每个场景恰好 20 条、`expected_source_types` 含 sec_filing、无密钥——这些验收不再靠肉眼，10 个测试秒级跑完。
+
+### 检查问题（请用自己的话回答）
+为什么 `evals/dataset.json` 用"生成器产生"而不是手写，且 `as_of_date` 必须固定而不能用 `date.today()`？
+
+### 已知限制
+- 20 家公司 CIK 为真实 SEC 10 位数字，但 as_of 是统一固定历史日期（非各公司真实年报期）；真实 live 跑时以 runner 的 `_request_from_case` 直接用 as_of 为准。
+- 本任务不调用模型；live 跑 100 条属 P06-10。
+
+---
+
+## P05-15 ✅：benchmark runner 与汇总
+
+**产物**：`evals/benchmark_runner.py`（BenchmarkRunner/BenchmarkSummary/summarize/main）、`tests/test_benchmark_runner.py`（4 测试）。
+
+### 3 个知识点
+
+1. **三种模式 = 一种 Runner 参数化**：`BenchmarkMode.FAKE/FIXTURE/LIVE` 只影响 `_execute()` 的单条执行策略——fake 走 `ResearchFlowRunner` 全链、fixture 回放 `replay(sec_recorded_aapl.json)`、live 走 `build_flow_runner`；case 选择（--case/--limit/--resume/--only-failed）、保存原始 manifest、汇总统计全部复用。默认 `--mode fake` 保证开发/CI 零成本。
+2. **断点续跑 = 按 run 目录查已存在 case**：`_run_exists(case_id)` 扫 `workdir/*/{case_id}.json` 判断是否已完成；`--resume` 跳过已完成、`--only-failed` 从所有历史 run 里挑 status=failed 的 case 重跑——"从上次断点继续"不需要额外状态文件，靠已保存的原始 manifest 本身。
+3. **汇总用 `statistics.median` + 线性插值 P95**：P50 直接用中位数；P95 用 `_percentile(sorted, 0.95)` 的线性插值（`k=(n-1)*0.95`）得到更平滑的百分位；失败类别分布用 `Counter(error_code)`、质量门禁失败分布按 `recommendation` 聚合——每项都对齐 docs/04 §10 的汇总模板。
+
+### 检查问题（请用自己的话回答）
+为什么"只重跑失败项"（--only-failed）可以不用单独保存"上次失败清单"，而是扫描已保存的 run 目录就能实现？
+
+### 已知限制
+- `retry_recovery_rate` 在 fake/fixture 无失败时为 1.0（无失败即有界恢复），live 需真实重试数据才有实际意义。
+- Token/外部 API 调用数当前为占位 0——live 模式接入真实 instrumentation 后回填（属 P06-10）。
+- 正式 100 次 live benchmark 禁止在本任务执行（明确属 P06-10）。
 
 ---
