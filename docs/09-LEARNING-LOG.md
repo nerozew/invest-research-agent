@@ -1888,3 +1888,24 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P05-12：SEC Fixture 录制与脱敏（离线部分完成 ✅ / 真实录制未授权） 🚧部分完成
+
+**产物（离线部分）**：`src/invest_research/infrastructure/fixture.py`（`FixtureMeta`/`sanitize_response`/`build_meta`/`replay`）、`tests/test_fixture_sanitizer.py`（10 tests）。
+
+### 3 个知识点
+
+1. **record/replay 的脱敏在"入库前"执行**：录制响应必须先经 `sanitize_response` 递归脱敏（敏感键→`***`、普通文本内 bearer/token 打码）再保存，而不是回放时才脱敏。这样 fixture 文件本身就不含敏感字段，任何人 checkout 也安全；测试另加一条守卫"已有 fixture 不含 Authorization/Cookie/API Key"。
+2. **FixtureMeta = fixture 的"身份证"**：来源 URL、录制日期、schema 版本、内容 sha256 checksum 四元组让每个 fixture 可追溯（哪里录的、哪天录的、什么 schema、内容是否被改过）。这与 RunManifest（P03-14）的"可复现指纹"思想一致——数据资产也要版本化。
+3. **离线回放 = 普通测试零成本且确定性**：`replay(fixture_path)` 纯本地 JSON 读取，不联网。CI 普通测试可安全调用，结果确定（同文件必同数据），是实现"CI 不访问真实 SEC"的最小手段——也符合 .clinerules"外部服务必须使用 mock/fixture"。
+
+### 检查问题（请用自己的话回答）
+为什么脱敏必须在"录制入库前"而不是"回放时"执行？如果 fixture 文件里已经存了真实 Authorization 头，回放时才脱敏，会有什么风险？
+
+### 已知限制（必须诚实记录）
+- **真实 SEC 网络录制未执行**：未经用户确认不执行新的真实 SEC 录制（授权边界）。
+- 离线部分基于仓库已有 fixture（P02-05/06 的 MSFT 数据）完成脱敏器、meta、回放测试。
+- "录制一家公司 SEC 契约 fixture"的完整验收需真实录制授权；授权后将录制工具的输出经 `sanitize_response` + `build_meta` 落盘即可闭合。
+- P05-12 在路线图**不标 ✅**（保持"部分完成"），待真实录制授权后补完并标记。
+
+---
+
