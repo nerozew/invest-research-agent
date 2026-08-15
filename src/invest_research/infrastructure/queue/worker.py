@@ -65,36 +65,15 @@ def _build_live_research_tools(
 ) -> list[Any]:
     """构造 live 模式的 Research 真实工具白名单（SEC/搜索/下载）。
 
-    - 构建共享 httpx client（SEC 请求 + User-Agent 合规）；
-    - Serper API Key 缺失/为空时 fail-fast（禁止缺配置启动真实搜索）；
+    - 兼容旧名称；内部委托 live_resources.build_live_client_and_serper 完成
+      Serper Key 校验与共享 client/serper 构建（该函数不依赖 Celery/CrewAI）；
     - ``stats``：可选调用统计 dict（P05-13 验收：外部调用证据写入 manifest）；
     - 返回 from real_tools.build_research_tools 的 CrewAI 工具列表。
     """
-    from invest_research.infrastructure.flow_wiring import FlowModeError
-    from invest_research.infrastructure.http.client import build_http_client
+    from invest_research.infrastructure.live_resources import build_live_client_and_serper
     from invest_research.infrastructure.real_tools import build_research_tools
-    from invest_research.tools.serper_adapter import SerperAdapter, SerperConfig
 
-    serper_key = settings.serper_api_key
-    if serper_key is None:
-        raise FlowModeError(
-            "FLOW_MODE=live 需要配置 SERPER_API_KEY（仅从环境变量/.env 读取，"
-            "缺失时禁止启动真实搜索）。"
-        )
-    key_value = serper_key.get_secret_value()
-    if not key_value or not key_value.strip():
-        raise FlowModeError("FLOW_MODE=live 需要配置 SERPER_API_KEY（不能为空值）。")
-
-    client = build_http_client(
-        connect_timeout=settings.http_connect_timeout,
-        read_timeout=settings.http_read_timeout,
-        user_agent=settings.http_user_agent
-        or f"invest-research/0.1 (+{settings.sec_user_agent_contact})",
-    )
-    serper = SerperAdapter(
-        client=client,
-        config=SerperConfig(api_key=serper_key, endpoint=settings.serper_endpoint),
-    )
+    client, serper = build_live_client_and_serper(settings)
     return build_research_tools(client=client, serper=serper, stats=stats)
 
 

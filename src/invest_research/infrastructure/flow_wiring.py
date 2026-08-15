@@ -42,6 +42,8 @@ from invest_research.flows.manifest import build_run_manifest
 from invest_research.flows.quality import run_quality_gate
 from invest_research.flows.reflection import ReflectionController
 from invest_research.flows.state import ResearchFlowState
+from invest_research.infrastructure.live_resources import FlowModeError
+from invest_research.infrastructure.performance import PerformanceRecorder, extract_token_usage
 from invest_research.infrastructure.queue.flow_adapter import ResearchFlowRunner
 from invest_research.settings import Settings
 
@@ -52,9 +54,8 @@ __all__ = [
     "build_flow_runner",
 ]
 
-
-class FlowModeError(RuntimeError):
-    """live 模式启动校验失败（API Key 缺失/为空）时的可读错误。"""
+# 三 Agent 的执行顺序（与 crew_factory._assemble_tasks 保持一致）
+_AGENT_ROLE_ORDER = ("research", "analysis", "writer")
 
 
 class LiveFlowExecutionError(RuntimeError):
@@ -81,6 +82,7 @@ class LiveResearchFlowRunner:
         artifact_root: str = "artifacts",
         crew_factory: Callable[..., Crew] | None = None,
         stats: dict[str, int] | None = None,
+        recorder: PerformanceRecorder | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -98,6 +100,8 @@ class LiveResearchFlowRunner:
         # 外部调用统计（P05-13）：真实工具经 build_research_tools 写入该 dict，
         # runner 在生成 manifest 时并入 evidence（不泄露任何密钥）。
         self._stats = stats if stats is not None else {}
+        # 性能记录（P05.5）：工具耗时/Agent 耗时/token usage 汇总到 manifest.performance
+        self._recorder = recorder if recorder is not None else PerformanceRecorder()
 
     @property
     def config(self) -> LLMConfig:
@@ -140,8 +144,12 @@ class LiveResearchFlowRunner:
         # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
         reflection = self._run_reflection(state)
 
-        # 5. 生成 RunManifest（质量门禁通过才 published）
-        state.run_manifest = build_run_manifest(state, self._config, started_at=started_at)
+        # 5. 采集性能并生成 RunManifest（质量门禁通过才 published）
+        self._record_performance(crew, result)
+        performance = self._recorder.snapshot()
+        state.run_manifest = build_run_manifest(
+            state, self._config, started_at=started_at, performance=performance
+        )
         # 合并反思审计记录（不丢失受控反思决策）
         state.run_manifest["reflection"] = reflection
         # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）
@@ -152,6 +160,25 @@ class LiveResearchFlowRunner:
         self._persist_intermediates(request, state)
 
         return state
+
+    def _record_performance(self, crew: Any, result: Any) -> None:
+        """采集三 Agent 耗时与 LLM token usage 到 recorder。
+
+        - Agent 耗时读 CrewAI Task.start_time/end_time（按 research/analysis/writer 顺序）；
+        - token usage 读 CrewOutput.token_usage（fake/不可得时为 None）；
+        - 工具耗时/次数由 real_tools 的 recorder 包装层直接累计。
+        """
+        tasks = getattr(crew, "tasks", None)
+        if tasks:
+            for role, task in zip(_AGENT_ROLE_ORDER, tasks):
+                start = getattr(task, "start_time", None)
+                end = getattr(task, "end_time", None)
+                if start is not None and end is not None:
+                    self._recorder.record_agent(
+                        role, int((end - start).total_seconds() * 1000)
+                    )
+        usage = getattr(result, "token_usage", None)
+        self._recorder.set_token_usage(extract_token_usage(usage))
 
     def _extract_packs(self, result: Any, request: ResearchRequest) -> ResearchFlowState:
         """从 Crew 结果解析三个 pack 到 state。
@@ -275,6 +302,7 @@ def build_flow_runner(
     settings: Settings,
     research_tools: list[Any] | None = None,
     stats: dict[str, int] | None = None,
+    recorder: PerformanceRecorder | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
@@ -292,4 +320,5 @@ def build_flow_runner(
         research_tools=research_tools,
         artifact_root=settings.artifact_root,
         stats=stats,
+        recorder=recorder,
     )

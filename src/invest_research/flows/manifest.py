@@ -40,12 +40,20 @@ def build_run_manifest(
     state: ResearchFlowState,
     config: LLMConfig,
     started_at: float | None = None,
+    performance: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """生成 RunManifest（仅在质量门禁通过时发布；否则返回 rejected 标记）。
 
     - ``config``：用于记录三个角色的模型名（供应商无关，仅存名称）；
-    - ``started_at``：任务开始时间戳（调用方传入；默认用当前时间）。
+    - ``started_at``：任务开始时间戳（调用方传入；默认用当前时间）；
+    - ``performance``：P05.5 性能记录（Agent/工具耗时、调用次数、token usage），
+      由调用方（flow_wiring）采集后传入，只含计数与耗时，不含密钥/Prompt 正文。
     """
+    ended_at = time.time()
+    started = started_at if started_at is not None else ended_at
+    duration_ms = int((ended_at - started) * 1000)
+    perf = performance or {}
+
     if state.quality_report is None or not state.quality_report.all_passed:
         return {
             "version": MANIFEST_VERSION,
@@ -53,6 +61,10 @@ def build_run_manifest(
             "reason": (
                 state.quality_report.recommendation if state.quality_report else "no_quality_report"
             ),
+            "duration_ms": duration_ms,
+            "started_at": started,
+            "ended_at": ended_at,
+            "performance": perf,
         }
 
     # 公司/CIK/as-of
@@ -86,10 +98,6 @@ def build_run_manifest(
         "quality_report_sha256": _pack_checksum(state.quality_report),
     }
 
-    ended_at = time.time()
-    started = started_at if started_at is not None else ended_at
-    duration_ms = int((ended_at - started) * 1000)
-
     return {
         "version": MANIFEST_VERSION,
         "status": "published",
@@ -101,4 +109,5 @@ def build_run_manifest(
         "duration_ms": duration_ms,
         "started_at": started,
         "ended_at": ended_at,
+        "performance": perf,
     }

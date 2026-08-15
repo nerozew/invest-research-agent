@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import base64
 import json
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date
 from typing import Any
 
 from crewai.tools import tool
 
+from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.tools.artifact_store import (
     ArtifactStore,
     ArtifactStoreRequest,
@@ -75,6 +77,15 @@ def _count(stats: dict[str, int] | None, key: str) -> None:
         stats[key] = stats.get(key, 0) + 1
 
 
+def _timed(
+    recorder: PerformanceRecorder | None, tool_name: str
+) -> AbstractContextManager[None]:
+    """返回工具计时上下文管理器；recorder 为 None 时用 nullcontext（零开销）。"""
+    if recorder is None:
+        return nullcontext()
+    return recorder.timed_tool(tool_name)
+
+
 # ---------------------------------------------------------------------------
 # Research 工具白名单（CompanyResolver + SEC + 下载 + 解析 + 搜索）
 # ---------------------------------------------------------------------------
@@ -85,6 +96,7 @@ def build_research_tools(
     client: Any,
     serper: Any,
     stats: dict[str, int] | None = None,
+    recorder: PerformanceRecorder | None = None,
 ) -> list[Any]:
     """构造 Research Agent 的真实工具白名单。
 
@@ -92,7 +104,8 @@ def build_research_tools(
     - ``client``：共享 httpx.Client（SEC 请求用）；
     - ``serper``：SerperAdapter（GoogleSearchTool 的 provider）；
     - ``stats``：可选调用统计 dict（P05-13 验收：外部调用证据写入 manifest；
-      None 时不记录，行为与之前完全一致）。
+      None 时不记录，行为与之前完全一致）；
+    - ``recorder``：可选 PerformanceRecorder（P05.5 工具耗时/次数统计；None 时不计时）。
 
     返回给 CrewAI 使用的工具函数列表（@tool 包装）。
     """
@@ -107,9 +120,10 @@ def build_research_tools(
         """按公司名/ticker 解析 10 位 CIK；歧义时返回候选列表（不猜测）。"""
         _count(stats, "company_resolver_calls")
         try:
-            return _unpack(
-                resolver_tool.execute(ResolveCompanyRequest(input_company=input_company))
-            )
+            with _timed(recorder, "company_resolver"):
+                return _unpack(
+                    resolver_tool.execute(ResolveCompanyRequest(input_company=input_company))
+                )
         except Exception as exc:  # 应用边界：统一记录，不抛给 CrewAI
             _count(stats, "company_resolver_failures")
             return _tool_failure_json("INTERNAL_BUG", f"CompanyResolver 异常: {type(exc).__name__}")
@@ -130,7 +144,8 @@ def build_research_tools(
                 as_of_date=date.fromisoformat(as_of_date),
                 requested_forms=forms or ("10-K", "10-Q"),
             )
-            return _unpack(submissions_tool.execute(req))
+            with _timed(recorder, "sec_submissions"):
+                return _unpack(submissions_tool.execute(req))
         except ValueError as exc:
             return _tool_failure_json("INPUT_INVALID", f"无效入参: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
@@ -148,7 +163,8 @@ def build_research_tools(
         _count(stats, "sec_company_facts_calls")
         try:
             req = FetchFactsRequest(cik=cik)
-            result = facts_tool.execute(req)
+            with _timed(recorder, "sec_company_facts"):
+                result = facts_tool.execute(req)
             if result.kind == "failure":
                 return _unpack(result)
             value = result.value
@@ -187,9 +203,10 @@ def build_research_tools(
         """
         _count(stats, "filing_downloader_calls")
         try:
-            return _unpack(
-                downloader_tool.execute(DownloadRequest(url=url, max_bytes=max_bytes))
-            )
+            with _timed(recorder, "filing_downloader"):
+                return _unpack(
+                    downloader_tool.execute(DownloadRequest(url=url, max_bytes=max_bytes))
+                )
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
             _count(stats, "filing_downloader_failures")
             return _tool_failure_json(
@@ -206,7 +223,8 @@ def build_research_tools(
         _count(stats, "document_parser_calls")
         try:
             raw = base64.b64decode(content_base64, validate=True)
-            outcome = parse_document(raw, media_type)
+            with _timed(recorder, "document_parser"):
+                outcome = parse_document(raw, media_type)
         except DocumentParseError as exc:
             return _tool_failure_json("DOCUMENT_UNSUPPORTED", str(exc))
         except (ValueError, TypeError) as exc:
@@ -237,7 +255,10 @@ def build_research_tools(
             return _tool_failure_json("INPUT_INVALID", f"无效 as_of: {exc}")
         _count(stats, "web_search_calls")
         try:
-            result = search_tool.execute(SearchQuery(query=query, as_of=as_of_date, page_size=10))
+            with _timed(recorder, "web_search"):
+                result = search_tool.execute(
+                    SearchQuery(query=query, as_of=as_of_date, page_size=10)
+                )
             if result.kind == "failure":
                 return _unpack(result)
             items = result.value.items[:_SEARCH_MAX_ITEMS]

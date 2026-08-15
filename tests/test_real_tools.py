@@ -4,8 +4,8 @@
 - real LLM builder 参数映射正确（model/base_url/temperature/timeout 透传），
   且 Key 不进入 repr/异常；
 - Research 工具白名单只含搜集工具（无分析/写作工具）；
-- live 模式缺 Serper API Key 时 fail-fast（由 worker._build_live_research_tools 体现，
-  此处验证 build_flow_runner + worker 端口语义）。
+- live 模式缺 Serper API Key 时 fail-fast（由 live_resources.build_live_client_and_serper
+  体现，不依赖 Celery/CrewAI）。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from invest_research.agents.llm_factory import (
     LLMConfig,
@@ -28,12 +29,21 @@ from invest_research.infrastructure.flow_wiring import (
 from invest_research.settings import Settings
 
 
-def _settings(*, flow_mode: str = "fake", api_key: str = "sk-test") -> Settings:
+def _settings(
+    *,
+    flow_mode: str = "fake",
+    api_key: str = "sk-test",
+    serper_api_key: SecretStr | None = None,
+) -> Settings:
+    # serper_api_key 显式固定为 None：crewai 导入时会 load_dotenv() 把 .env
+    # 灌进 os.environ，pydantic-settings 即使 _env_file=None 仍会读到它，
+    # 导致「缺 key fail-fast」测试依赖外部环境而时好时坏。显式传参优先于环境变量。
     return Settings(
         _env_file=None,
         llm_api_key=api_key,
         sec_user_agent_contact="test@example.com",
         flow_mode=flow_mode,
+        serper_api_key=serper_api_key,
     )
 
 
@@ -133,11 +143,11 @@ def test_live_runner_factory_keeps_key_out_of_artifacts(tmp_path: Path) -> None:
     assert "sk-top-secret" not in content
 
 
-def test_live_missing_serper_key_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """P05-12B：live 模式 HTTP client+Serper 缺 key 时 fail-fast（worker 端口语义）。"""
-    from invest_research.infrastructure.queue import worker
+def test_live_missing_serper_key_fails_fast() -> None:
+    """P05-12B：live 模式 HTTP client+Serper 缺 key 时 fail-fast（轻量 live_resources）。"""
+    from invest_research.infrastructure.live_resources import build_live_client_and_serper
 
     settings = _settings(flow_mode="live", api_key="sk-live")
-    # serper_api_key 缺省为 None → _build_live_research_tools 抛 FlowModeError
+    # serper_api_key 显式为 None → build_live_client_and_serper 抛 FlowModeError
     with pytest.raises(FlowModeError):
-        worker._build_live_research_tools(settings)
+        build_live_client_and_serper(settings)
