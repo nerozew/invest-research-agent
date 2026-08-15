@@ -2072,3 +2072,24 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+
+
+## P05-13 ✅：真实服务 E2E smoke（fast live run 通过）
+
+**产物**：真实运行产物在 `artifacts/AAPL_2025-10-31/`（07_manifest status=published，238s，token 62k，含 evidence.invocation_summary）。
+
+### 3 个知识点
+
+1. **验收 10 项是「管道连通性」检查，不是分析质量基准**：只验证 manifest published、报告非空、引用非空、SEC URL+locator、无未来数据、SEC/Serper/LLM 调用证据、工件齐全、无密钥泄漏——不验证财务数字正确。本次报告指标全是「不可计算」、营收是占位 0，依然通过——「链路通」与「数据好」是两件事。
+2. **Agent 不调工具 ≠ 没有外部调用**：预取（prefetch）的真实 SEC/Serper 调用必须计入 evidence；若只统计 Agent 工具调用，Agent 直接用预取结果时 evidence 为空，验收会误判「没有真实调用」（本次正是踩了这个坑：requirement7 缺失 evidence）。
+3. **快模式的时间构成**：238s ≈ 预取 4s + Research 37s + Analysis 155s + Writer 41s；Analysis 最慢是因为 LLM 往返轮数最多。工具结果体积 60→15 条后 token 从 30 万降到 6.2 万。
+
+### 检查问题（请用自己的话回答）
+为什么「报告里的财务指标全是 N/A、营收是占位 0」时验收还能通过？验收和「报告质量」的分界线在哪里？
+
+### 已知限制
+- Analysis Agent 仍拿不到真实 XBRL 事实（数据流缺口：ResearchPack 不带 facts、Analysis 白名单无 SEC 工具），报告如实标注「不可计算」——属分析质量限制，不影响 P05-13 验收。
+- manifest.company 为 null（runner 未回填 state.company_identity），属展示细节，不影响验收。
+
+---
+

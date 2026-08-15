@@ -195,14 +195,14 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-12 ✅ | 录制一家公司 SEC 契约 fixture | fixture + sanitizer | CI 离线可回放，无敏感字段 | record/replay |
 | P05-12A ✅ | FLOW_MODE=fake/live 与生产 Flow wiring | wiring + contract tests | fake/live 模式切换，普通测试用 fake | production wiring |
 | P05-12B ✅ | 真实 LLM、Agent 工具和 LiveResearchFlowRunner 生产组装 | live builder + wiring | Agent 接受统一 LLM 协议；真实工具注入；live 缺配置 fail-fast | production wiring |
-| P05-13 | 真实服务 E2E smoke（实现完成，等待受控 live run） | opt-in test（RUN_LIVE_E2E=1） | 固定公司生成带引用报告 | external integration |
+| P05-13 ✅ | 真实服务 E2E smoke（fast live run 通过：published，240s，含真实 SEC/Serper/LLM 证据） | opt-in test（RUN_LIVE_E2E=1） | 固定公司生成带引用报告 | external integration |
 | P05-14 ✅ | 建立 20 公司 × 5 场景基准定义 | `evals/dataset.*` | 场景、行业和截止日固定 | evaluation design |
 | P05-15 ✅ | 实现 benchmark runner 和汇总 | runner + report template | fake/fixture 跑 100 条；输出成功率、P50/P95、失败分布 | SLO measurement |
 
 ## Phase 5.5：性能优化（精简版，P05-13 之前的性能补齐）
 
-> 说明：只做四项性能优化，不改前端、不做优化前后 benchmark、不跑真实付费 LLM/SEC/Serper；
-> P05-13 仍保持未完成状态（不标 ✅，等待受控 live run）。
+> 说明：只做四项性能优化，不改前端、不做优化前后 benchmark；P05-13 已于 fast live run
+> 真实通过（published，约 240s），随后标 ✅。
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |
 |---|---|---|---|---|
