@@ -1,4 +1,4 @@
-# P04-09/10：GitHub Actions 构建镜像并推送 GHCR（Phase 4）
+# P04-09/10：GitHub Actions 构建镜像并推送 GHCR（Phase 5）
 # 由 GitHub-hosted runner 构建（出网快）。
 # 说明：除推送 GHCR 外，额外把镜像导出为 tar 上传 Actions artifact，
 #       供 Ubuntu 服务器在无法直连 GHCR 时下载后 `docker load` 使用。
@@ -41,7 +41,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=phase4
+            type=raw,value=phase5
             type=sha,format=long
 
       # 只构建 linux/amd64，本阶段不引入多架构复杂度。
@@ -64,15 +64,15 @@ jobs:
       - name: Export image tarball
         shell: bash
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}:phase4"
+          IMAGE="ghcr.io/${{ github.repository }}:phase5"
           docker pull "$IMAGE"
           mkdir -p /tmp/image-out
-          docker save "$IMAGE" | gzip > /tmp/image-out/invest-research-phase4.tar.gz
-          ls -lh /tmp/image-out/invest-research-phase4.tar.gz
+          docker save "$IMAGE" | gzip > /tmp/image-out/invest-research-phase5.tar.gz
+          ls -lh /tmp/image-out/invest-research-phase5.tar.gz
 
       - name: Upload image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: invest-research-phase4-image
-          path: /tmp/image-out/invest-research-phase4.tar.gz
+          name: invest-research-phase5-image
+          path: /tmp/image-out/invest-research-phase5.tar.gz
           retention-days: 7

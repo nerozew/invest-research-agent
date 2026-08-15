@@ -171,6 +171,8 @@ def main(argv: list[str] | None = None) -> NoReturn:
     except Exception as exc:  # 边界：兜底可读错误，不泄露内部路径
         print(f"error: 处理请求失败（{type(exc).__name__}）", file=sys.stderr)
         sys.exit(2)
+    # 成功路径也显式退出，保证 NoReturn 语义（不隐式 return）
+    sys.exit(0)
 
 
 if __name__ == "__main__":

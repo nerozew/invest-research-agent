@@ -30,7 +30,7 @@ from typing import Any, Callable
 from crewai.crew import Crew
 
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
-from invest_research.agents.llm_factory import AnyLLM, FakeLLM, LLMConfig
+from invest_research.agents.llm_factory import AnyLLM, LLMConfig
 from invest_research.domain.models import (
     FinancialAnalysisPack,
     ReportDraft,

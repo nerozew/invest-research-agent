@@ -12,9 +12,11 @@
 9. 缺少 API Key 时产生安全配置错误
 10. 不合法 Base URL 被拒绝
 11. factory 构建不发网络请求
-12. fake builder 可代替真实构造器
-13. 不读取 RAG/Embedding 配置
-14. 不调用真实阿里云接口
+12. 真实 builder 参数映射正确
+13. 真实 builder 不泄露密钥
+14. 不读取 RAG/Embedding 配置
+15. 不调用真实阿里云接口
+16. fake builder 可代替真实构造器
 
 安全：测试值用占位符 SECRET；所有 Settings 均 `_env_file=None`，
 避免读取用户机器上的真实 .env。
@@ -26,6 +28,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from invest_research.agents import FakeLLM, LLMConfig, LLMRole, OpenAICompatibleLLMFactory
+from invest_research.agents.llm_factory import AnyLLM, build_real_llm
 from invest_research.settings import Settings
 
 SECRET = "sk-test-secret-placeholder"
@@ -95,10 +98,10 @@ def test_base_url_passed_to_builder() -> None:
     factory = OpenAICompatibleLLMFactory()
     captured: dict[str, object] = {}
 
-    def builder(config: LLMConfig, role: LLMRole) -> object:
+    def builder(config: LLMConfig, role: LLMRole) -> AnyLLM:
         captured["base_url"] = config.base_url
         captured["role"] = role
-        return object()
+        return factory.create_fake(config, role)
 
     config = _config()
     factory.create(config, LLMRole.RESEARCH, builder=builder)
@@ -111,9 +114,9 @@ def test_api_key_passed_but_never_in_output() -> None:
     factory = OpenAICompatibleLLMFactory()
     captured: dict[str, object] = {}
 
-    def builder(config: LLMConfig, role: LLMRole) -> object:
+    def builder(config: LLMConfig, role: LLMRole) -> AnyLLM:
         captured["key"] = config.api_key.get_secret_value()
-        return object()
+        return factory.create_fake(config, role)
 
     config = _config()
     factory.create(config, LLMRole.RESEARCH, builder=builder)
@@ -186,21 +189,43 @@ def test_invalid_base_url_rejected() -> None:
 def test_factory_build_makes_no_network_requests() -> None:
     factory = OpenAICompatibleLLMFactory()
     config = _config()
-    sentinel = object()
+    sentinel = factory.create_fake(config, LLMRole.RESEARCH)
 
-    def builder(config: LLMConfig, role: LLMRole) -> object:
+    def builder(config: LLMConfig, role: LLMRole) -> AnyLLM:
         return sentinel
 
     # 注入 builder：立即返回，不发网络请求
     result = factory.create(config, LLMRole.RESEARCH, builder=builder)
     assert result is sentinel
-    # 真实 builder 是惰性占位：抛 NotImplementedError 而非联网异常，
-    # 证明"不悄悄发起网络请求"。
-    with pytest.raises(NotImplementedError):
-        factory.create(config, LLMRole.RESEARCH)
+    # 真实 builder（build_real_llm）只做客户端构造，不发任何网络请求
+    # （CrewAI 1.6.1 实测：LLM(...) 仅解析 model/provider，不发起请求）。
+    llm = build_real_llm(config, LLMRole.RESEARCH)
+    assert llm is not None
+    assert llm.model == config.model_for(LLMRole.RESEARCH)
 
 
-# ---- 12. fake builder 可代替真实构造器 ----
+# ---- 12. 真实 builder 参数映射正确 ----
+def test_real_builder_maps_parameters_correctly() -> None:
+    config = _config()
+    # 三个角色分别构造真实 LLM 客户端，验证参数透传
+    for role in (LLMRole.RESEARCH, LLMRole.ANALYSIS, LLMRole.WRITER):
+        llm = build_real_llm(config, role)
+        assert llm.model == config.model_for(role)
+
+
+# ---- 13. 真实 builder 不泄露密钥 ----
+def test_real_builder_does_not_leak_secret_key() -> None:
+    config = _config()
+    for role in (LLMRole.RESEARCH, LLMRole.ANALYSIS, LLMRole.WRITER):
+        llm = build_real_llm(config, role)
+        # CrewAI 1.6.1 实测：repr/str 只含内存地址，不逐出模型名/URL/Key
+        for out in (repr(llm), str(llm)):
+            assert SECRET not in out
+            assert BASE_URL not in out
+        assert config.api_key.get_secret_value() not in repr(llm)
+
+
+# ---- 16. fake builder 可代替真实构造器 ----
 def test_fake_builder_replaces_real_builder() -> None:
     factory = OpenAICompatibleLLMFactory()
     config = _config()
@@ -215,7 +240,7 @@ def test_fake_builder_replaces_real_builder() -> None:
     assert result.invoked_prompts == ["any prompt"]
 
 
-# ---- 13. 不读取 RAG/Embedding 配置 ----
+# ---- 14. 不读取 RAG/Embedding 配置 ----
 def test_does_not_read_rag_or_embedding_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -232,7 +257,7 @@ def test_does_not_read_rag_or_embedding_config(
     assert not any("rag" in str(k) or "embedding" in str(k) or "milvus" in str(k) for k in dumped)
 
 
-# ---- 14. 不调用真实阿里云接口 ----
+# ---- 15. 不调用真实阿里云接口 ----
 def test_no_real_provider_called() -> None:
     factory = OpenAICompatibleLLMFactory()
     config = _config()

@@ -56,12 +56,12 @@ tests/test_flow_wiring.py                # P05-12A（10 contract tests）
 - `docs/05-DEVELOPMENT-ROADMAP.md`：P05-01 ~ P05-11 全部 ✅；**P05-12 ✅（真实录制）**；**P05-12A ✅**；**P05-12B ✅**；**P05-13 实现完成（等待 live run，未标 ✅）**；**P05-14 ✅**；**P05-15 ✅**
 - `docs/09-LEARNING-LOG.md`：P05-01 ~ P05-12 + P05-12A + P05-12B + P05-13/14/15 学习条目已添加（含检查问题，未附答案）
 
-## 5. 下一任务 P05-12B 的准备工作
+## 5. P05-12B 之后的路线
 
 **P05-12B 已完成（离线验收）**：真实 LLM builder（CrewAI 1.6.1 实测 `LLM(model, base_url, api_key, temperature, timeout)`）；统一 `AnyLLM` 接口；真实工具注入（real_tools.py，Research=6 工具白名单）；`LiveResearchFlowRunner.run` 完整控制流（Crew→pack→质量门禁→受控反思→manifest→工件落盘，可注入 fake crew 离线验证）；worker/compose 传递 FLOW_MODE+Serper 配置；37 测试 + Ruff + mypy strict 全绿。
 
-**P05-13~P05-15 路线**：P05-13 真实 E2E smoke（默认 skip，需 live 授权 + `.env` 真实 key + `RUN_LIVE_E2E=1`）；
-P05-14 20公司×5场景 evals 数据集（可离线）；P05-15 benchmark runner（fake/fixture 验证）。
+**P05-13~P05-15 状态**：P05-14 ✅（20 公司×5 场景 evals 数据集）；P05-15 ✅（benchmark runner，fake/fixture/live）；
+**P05-13 仍待 live（未标 ✅）**：真实 E2E smoke（默认 skip，需 live 授权 + `.env` 真实 key + `RUN_LIVE_E2E=1`）。
 
 ## 6. 已知风险与注意事项
 
@@ -69,25 +69,29 @@ P05-14 20公司×5场景 evals 数据集（可离线）；P05-15 benchmark runne
 2. **Ruff W292/E501**：新文件末尾需换行、行超 100 列；提交前 `uv run ruff check --fix <files>`。
 3. **P05-12 ✅ 完成**：真实录制 AAPL（as_of=2025-10-31）已提交；普通测试/CI 仍用离线 fixture 回放，不联网。
 4. **P05-12A live wiring**：只做 fake/mock 离线 wiring 测试；live 需要真实 API Key 配置，缺失时 fail-fast。
-5. **P05-12B 是下一任务**：真实 LLM builder + Agent 统一协议 + 工具注入 + LiveRunner.run，规模跨 6+ 文件，超单任务学习粒度，需按拆分建议逐步实现并与测试对齐。
-6. **P05-13 真实 E2E**：需 live 授权 + 本机/Ubuntu `.env` 真实 key（不写入代码/日志/fixture/manifest/Git/镜像）；本窗口未执行（root .env 不存在）。最多 2 次付费尝试。
-7. **不 push / 不部署 / 不触发 Docker 构建 / 不进入 P06**。
+5. **P05-13 真实 E2E（待 live）**：需 live 授权 + 本机/Ubuntu `.env` 真实 key（不写入代码/日志/fixture/manifest/Git/镜像）；未执行（root .env 不存在）。最多 2 次付费尝试。
+6. **Phase 5 收口审计已修复**：test_llm_factory.py 过期 NotImplementedError 断言已替换为真实 builder 验证（不联网/参数映射/密钥不泄露）；`mypy src` 已全绿；Ruff 全绿；pytest 634 passed。
+7. **部署状态**：docker-image.yml/compose.yml 已切到 `phase5`（artifact 名为 `invest-research-phase5-image`）；新增 `scripts/deploy_phase5.sh`；**尚未触发 GitHub Actions phase5 构建、未部署、未进入 P06**。
 
 ## 7. Git 状态（本快照）
 
-P05-12B/13/14/15 全部提交后工作区已清空。最新 commit：`eb3b743`。
-Phase 5 相关本地 commit：`78cb90f`（P05-12B）、`1f93fc9`（P05-13 代码 + P05-14）、`eb3b743`（P05-15）。
-分支 `agent/m2-deterministic-tools` 领先 origin 30 commits（未 push）。
+最新 commit：`6fc28d8`（docs(p05): finalize phase5 handoff - P05-12B/14/15 done, P05-13 impl done awaiting live run）。
+分支 `agent/m2-deterministic-tools` 已 push 至 GitHub（远端 HEAD 为 `6fc28d8`）。
+GitHub Actions #15 已成功，但构建的是 **phase4 标签**（phase5 镜像尚未构建）。
+P05-13 尚未执行真实 live E2E。
 
 ## 8. 新窗口继续短提示词
 
 > 【Phase 5 继续（安全交接）】请读取 `docs/11-PHASE5-HANDOFF.md` 和
 > `docs/05-DEVELOPMENT-ROADMAP.md`。
-> 当前分支 `agent/m2-deterministic-tools`，已完成 P05-01 ~ P05-12 + P05-12A/B ✅，
-> P05-14/15 ✅，P05-13 实现完成（离线契约通过，无真实 .env，**未标 ✅**，等待受控 live run）。
-> 最新 commit：`eb3b743`。Phase 5 本地 commit：`78cb90f`（P05-12B）、`1f93fc9`（P05-13+P05-14）、`eb3b743`（P05-15）。
+> 当前分支 `agent/m2-deterministic-tools`（已 push，远端 HEAD=`6fc28d8`），
+> 已完成 P05-01 ~ P05-12 + P05-12A/B ✅，P05-14/15 ✅，
+> P05-13 实现完成（离线契约通过，无真实 .env，**未标 ✅**，等待受控 live run）。
+> 最近一次收口审计：pytest 634 passed / 19 skipped；ruff check 全绿；`mypy src` 全绿。
+> 部署文件已切 phase5（docker-image.yml / compose.yml / `scripts/deploy_phase5.sh`），
+> 但**尚未触发 GitHub Actions phase5 构建、未部署**（Actions #15 构建的是 phase4 标签）。
 > P05-13 真实 E2E 需：项目根目录创建 `.env`（LLM_API_KEY + SERPER_API_KEY + FLOW_MODE=live），
 > 然后 `export RUN_LIVE_E2E=1 FLOW_MODE=live && uv run pytest tests/test_live_e2e.py -v`
 > （最多 2 次付费尝试）；P05-13 通过后才可进入 P06。
 > 每任务完成 → 测试 → ruff/mypy → 标✅ → 学习日志 → commit；
-> 不 push / 不部署 / 不进入 P06。上下文接近上限时更新本文件并停止。
+> 不部署 / 不进入 P06。上下文接近上限时更新本文件并停止。

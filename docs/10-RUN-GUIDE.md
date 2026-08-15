@@ -1,4 +1,4 @@
-# 本地一键启动指南（Phase 4）
+# 本地一键启动指南（Phase 5）
 
 > 目标：一条命令启动 **API + Worker + Streamlit + PostgreSQL + Redis + migrate**，
 > 然后浏览器打开前端做前后端联调。本指南适合你自己在本地验证。
@@ -17,20 +17,20 @@
 > `docker pull` + `docker compose up`**。仓库提供一体化脚本：
 
 ```bash
-# 在项目根目录执行（自动 pull GHCR 最新 phase4 镜像 + compose up + 健康检查）
-bash scripts/deploy_phase4.sh
+# 在项目根目录执行（自动 pull GHCR 最新 phase5 镜像 + compose up + 健康检查）
+bash scripts/deploy_phase5.sh
 ```
 
 等价的手工命令：
 
 ```bash
 # 在项目根目录（含 compose.yml）
-export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase4
+export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase5
 docker pull "$INVEST_RESEARCH_IMAGE"
 docker compose up -d --force-recreate --remove-orphans
 ```
 
-> 若未设置 `INVEST_RESEARCH_IMAGE`，compose 会回退到 `invest-research:phase4`
+> 若未设置 `INVEST_RESEARCH_IMAGE`，compose 会回退到 `invest-research:phase5`
 > （即 `docker compose build` 产出的同名镜像，用于本地开发调试）。
 
 启动后 compose 会自动：
@@ -41,15 +41,15 @@ docker compose up -d --force-recreate --remove-orphans
 ## 2b. 备用：断网 / GHCR 不可达时（artifact + docker load）
 
 > 仅当 `docker pull ghcr.io/...` 不可用时才需要。通常不需要，也尽量避免：
-> GitHub Actions 每个 run 的 `invest-research-phase4-image` artifact 是当时构建的镜像快照。
+> GitHub Actions 每个 run 的 `invest-research-phase5-image` artifact 是当时构建的镜像快照。
 
 ```bash
-# 1) 在 GitHub Actions 页面下载最新 run 的 invest-research-phase4-image artifact
-#    （zip 内含 invest-research-phase4.tar.gz）
+# 1) 在 GitHub Actions 页面下载最新 run 的 invest-research-phase5-image artifact
+#    （zip 内含 invest-research-phase5.tar.gz）
 # 2) 解压后上传到部署机，然后：
-gzip -d -c invest-research-phase4.tar.gz > invest-research-phase4.tar
-docker load -i invest-research-phase4.tar
-docker tag ghcr.io/nerozew/invest-research-agent:phase4 invest-research:phase4
+gzip -d -c invest-research-phase5.tar.gz > invest-research-phase5.tar
+docker load -i invest-research-phase5.tar
+docker tag ghcr.io/nerozew/invest-research-agent:phase5 invest-research:phase5
 # 3) 启动（非 GHCR 镜像，INVEST_RESEARCH_IMAGE 可不设，用回退名）
 docker compose up -d
 ```
@@ -92,10 +92,12 @@ curl http://localhost:8000/v1/research-jobs?limit=5
 - 看日志：`docker compose logs -f api`（或 worker/migrate/streamlit）
 - 单独重跑迁移：`docker compose run --rm migrate`
 
-## 6. 已知限制（Phase 4）
+## 6. 已知限制（Phase 5）
 
 - 数据库提交成功但 Celery 投递失败之间存在窗口（无 transactional outbox，计划 P05-03 处理）。
-- Worker 当前用 fake Flow（`ResearchFlowRunner`，P03 全链离线演练），不调用真实付费模型。
+- Worker 默认用 fake Flow（`FLOW_MODE=fake`，`ResearchFlowRunner`，P03 全链离线演练），不调用真实付费模型；
+  配置 `FLOW_MODE=live` + 真实 `LLM_API_KEY`/`SERPER_API_KEY` 后，Worker 走真实 Crew（P05-12B 生产组装），
+  但 live 运行需要在部署机 `.env` 提供密钥，且不写入镜像/日志/Git。
 - CLI 演示：`python -m invest_research.cli --api-base http://localhost:8000 status <job_id>`
 
 ### 6.1 单用户边界（P04-UI-06~10 起）

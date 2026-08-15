@@ -72,7 +72,14 @@ def _render_job_table(client: ResearchApiClient) -> None:
     st.subheader("最近任务")
 
     # 状态筛选（稳定 widget key）
-    status_options = ["全部"] + [s for s in ("pending", "running", "succeeded", "partial", "failed", "cancelled")]
+    status_options = ["全部"] + [
+        "pending",
+        "running",
+        "succeeded",
+        "partial",
+        "failed",
+        "cancelled",
+    ]
     selected_status = st.selectbox(
         "按状态筛选",
         options=status_options,
@@ -124,7 +131,11 @@ def _render_job_table(client: ResearchApiClient) -> None:
     selected = st.selectbox(
         "选择一个任务",
         options=page.items,
-        format_func=lambda e: f"{e.input_company} · {STATUS_LABELS.get(e.status.value, e.status.value)} · {e.created_at:%Y-%m-%d %H:%M}",
+        format_func=lambda e: (
+            f"{e.input_company} · "
+            f"{STATUS_LABELS.get(e.status.value, e.status.value)} · "
+            f"{e.created_at:%Y-%m-%d %H:%M}"
+        ),
         key="recent_jobs_select",
     )
     if st.button("查看详情", type="primary", key="recent_jobs_view"):
