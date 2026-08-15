@@ -144,6 +144,14 @@ class Settings(BaseSettings):
     serper_api_key: SecretStr | None = None
     serper_endpoint: str = "https://google.serper.dev/search"
 
+    # ---- OpenTelemetry（P05-07 起；P06-05 本地链路导出配置）----
+    # OTLP HTTP 导出端点（如 http://localhost:4318，对应 deploy/otel-collector.yaml）；
+    # 缺省 None = 控制台导出（本地开发直接看 stdout）。
+    otel_service_name: str = "invest-research"
+    otel_exporter_otlp_endpoint: str | None = None
+    # 批量导出间隔（毫秒，仅 OTLP 导出时生效）
+    otel_batch_export_interval_ms: int = 5000
+
     # P06-04：production 环境禁止占位符密钥/联系邮箱（fail-fast，见 .env.example 说明）。
     @model_validator(mode="after")
     def _production_secrets_guard(self) -> "Settings":

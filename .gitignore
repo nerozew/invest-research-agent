@@ -32,6 +32,7 @@
 !/alembic.ini
 !/frontend/
 !/scripts/
+!/deploy/
 
 # ---------- 密钥与敏感信息（任何层级防御）----------
 .env

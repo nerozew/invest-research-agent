@@ -25,10 +25,10 @@ import base64
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from crewai.tools import tool
 
@@ -134,13 +134,23 @@ def _count(stats: dict[str, int] | None, key: str) -> None:
         stats[key] = stats.get(key, 0) + 1
 
 
+@contextmanager
 def _timed(
     recorder: PerformanceRecorder | None, tool_name: str
-) -> AbstractContextManager[None]:
-    """返回工具计时上下文管理器；recorder 为 None 时用 nullcontext（零开销）。"""
-    if recorder is None:
-        return nullcontext()
-    return recorder.timed_tool(tool_name)
+) -> Iterator[None]:
+    """工具执行上下文：性能计时（可选）+ OTel span（P06-05）。
+
+    - recorder 为 None 时跳过计时（零额外开销）；
+    - OTel span 始终开启（未 setup_tracing 时是 no-op provider，零开销）；
+    - span 属性只放工具名（低基数），不放参数/结果/密钥。
+    """
+    from invest_research.infrastructure.observability.tracing import span as _otel_span
+
+    with ExitStack() as stack:
+        if recorder is not None:
+            stack.enter_context(recorder.timed_tool(tool_name))
+        stack.enter_context(_otel_span(f"tool.{tool_name}", {"tool.name": tool_name}))
+        yield
 
 
 def _budget_exhausted(budget: ToolBudget | None, tool_name: str) -> str | None:

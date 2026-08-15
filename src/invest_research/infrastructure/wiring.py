@@ -95,6 +95,15 @@ def create_production_app(
     """创建生产 FastAPI 应用与依赖容器（P04-10A 入口）。"""
     resolved = settings or get_settings()
 
+    # P06-05：进程启动时初始化 OpenTelemetry（OTLP 端点或控制台导出）。
+    from invest_research.infrastructure.observability.tracing import setup_tracing
+
+    setup_tracing(
+        service_name=resolved.otel_service_name,
+        endpoint=resolved.otel_exporter_otlp_endpoint,
+        batch_interval_ms=resolved.otel_batch_export_interval_ms,
+    )
+
     engine = create_db_engine(resolved.database_url)
     session_factory = create_session_factory(engine)
     checker = build_health_checker(resolved)

@@ -197,9 +197,25 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
     return ResearchJobExecutionHandler(service)
 
 
+def _setup_otel_from_env() -> None:
+    """worker 进程启动时初始化 OpenTelemetry（P06-05）。
+
+    直接读环境变量（不依赖 Settings 导入），保持 worker 模块"零 Settings 依赖"：
+    - OTEL_EXPORTER_OTLP_ENDPOINT 配置时走 OTLP 批量导出（配合本地 collector）；
+    - 缺省控制台导出（本地直接看 stdout）。
+    """
+    from invest_research.infrastructure.observability.tracing import setup_tracing
+
+    setup_tracing(
+        service_name=os.environ.get("OTEL_SERVICE_NAME", "invest-research"),
+        endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    )
+
+
 def _build_celery_app() -> Celery:
     """构建 Celery app：broker 取环境变量 BROKER_URL，缺省 memory://。"""
     broker = os.environ.get("BROKER_URL", "memory://")
+    _setup_otel_from_env()
     app = create_celery_app(broker_url=broker)
     register_tasks(app, _build_handler())
     return app

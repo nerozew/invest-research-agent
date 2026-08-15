@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -173,6 +173,31 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def _trace_api_request(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """P06-05：每个 HTTP 请求开一个 ``api.request`` span（链路起点）。
+
+        属性只放低基数/非敏感字段（method/route/path）；不记录查询参数与请求体。
+        未 setup_tracing 时 OTel no-op，零开销。
+        """
+        from invest_research.infrastructure.observability.tracing import span
+
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", request.url.path)
+        with span(
+            "api.request",
+            {
+                "http.method": request.method,
+                "http.route": route_path,
+                "http.target": request.url.path,
+            },
+        ):
+            return await call_next(request)
+
     app.state.health_checker = checker
     app.state.job_service = job_service
     app.state.job_query_service = job_query_service

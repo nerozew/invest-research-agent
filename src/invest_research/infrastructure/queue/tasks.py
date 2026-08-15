@@ -40,8 +40,11 @@ def register_tasks(app: Celery, handler: JobTaskHandler) -> Celery:
         name=TASK_PROCESS_JOB, bind=True
     )
     def _process_research_job(self: object, job_id: str) -> str:
-        """消费队列中的 job_id（worker 侧）。"""
-        handler.process(uuid.UUID(job_id))
+        """消费队列中的 job_id（worker 侧，P06-05 包在 worker.process span 内）。"""
+        from invest_research.infrastructure.observability.tracing import span
+
+        with span("worker.process", {"job_id": job_id}):
+            handler.process(uuid.UUID(job_id))
         return job_id
 
     return app

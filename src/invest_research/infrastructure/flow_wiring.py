@@ -212,6 +212,20 @@ class LiveResearchFlowRunner:
         self.run_manifest = state.run_manifest
 
     def _run_live(self, request: ResearchRequest) -> ResearchFlowState:
+        """P06-05：真实执行包在 ``flow.run`` OTel span 内（属性只含低基数字段）。"""
+        from invest_research.infrastructure.observability.tracing import span
+
+        with span(
+            "flow.run",
+            {
+                "input_company": request.input_company,
+                "as_of_date": request.as_of_date.isoformat(),
+                "language": request.language,
+            },
+        ):
+            return self._run_live_impl(request)
+
+    def _run_live_impl(self, request: ResearchRequest) -> ResearchFlowState:
         """真实执行：Crew → 解析 → 质量门禁 → 受控反思 → manifest。
 
         严格保持顺序；任一不可恢复失败抛 ``LiveFlowExecutionError``
