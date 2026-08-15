@@ -2112,3 +2112,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-02 ⏳：Markdown→PDF 渲染（实现完成，视觉检查待人工确认）
+
+**产物**：`src/invest_research/reporting/pdf.py`（MarkdownPdfRenderer + render_page_png）、`tests/test_pdf_renderer.py`（10 测试）、`scripts/render_report_pdf.py`、示例文件 `docs/p06-02-samples/`（sample_report.md / sample_report.pdf 3 页 / 首页+次页 PNG 截图，用真实 AAPL live 工件渲染，42 个可点击链接）。
+
+### 3 个知识点
+
+1. **PyMuPDF 内置 CJK 字体免外部依赖**：`fontname="china-s"` 是 PyMuPDF 内置简体中文字体，无需下载/打包任何字体文件；`pymupdf.get_text_length(text, fontname="china-s", fontsize=12)` 可精确测量 CJK 宽度（每全角字符 = fontsize pt），据此做手动换行与链接矩形定位。
+2. **Markdown 链接 → PDF link annotation 的两种实现**：① 模板把来源清单渲染成 `[title](url)`（Markdown 链接语法），PDF 渲染器解析行内链接段（`_split_segments` 正则）后逐段绘制并在对应矩形 `page.insert_link(kind=LINK_URI, ...)`——**注意 `get_links()` 在保存前为空、保存重开后才有**，测试要 reopen 后再断言。② 若来源是纯文本 URL 则不会生成链接（本次正是为此把模板改成链接语法）。
+3. **手动换行与自动分页**：`insert_textbox` 自动换行但无法定位链接；改用 `insert_text` + `get_text_length` 逐段贪心换行（优先空格断行、CJK 无空格按字符断行），每行绘制前检查 `y + line_height > 页高 - 页脚区` 就 `doc.new_page()`——分页是"画之前判断"，保证不出现半行跨页。
+
+### 检查问题（请用自己的话回答）
+为什么 `page.get_links()` 在 `doc.save()` 之前是空的？这提醒测试断言链接时要按什么顺序操作？
+
+### 已知限制
+- 仅支持基础 Markdown 子集（标题/列表/引用/分隔线/表格/行内链接）；`**` 粗体、代码块按普通文本输出；
+- **视觉检查未完成（当前模型不能看图）**：中文渲染观感、链接点击区域、分页断行是否美观需人工打开 `docs/p06-02-samples/sample_report.pdf` 与 PNG 截图确认——**未标 ✅**；
+- 渲染出的 Markdown 中正文若自带 `# 标题` 会与模板封面标题重复（LLM 初稿内容，非模板缺陷）。
+
+---
+
