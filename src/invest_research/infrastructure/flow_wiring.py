@@ -80,6 +80,7 @@ class LiveResearchFlowRunner:
         research_tools: list[Any] | None = None,
         artifact_root: str = "artifacts",
         crew_factory: Callable[..., Crew] | None = None,
+        stats: dict[str, int] | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -94,6 +95,9 @@ class LiveResearchFlowRunner:
             if crew_factory is not None
             else lambda cfg, rt: build_live_research_crew(cfg, rt)
         )
+        # 外部调用统计（P05-13）：真实工具经 build_research_tools 写入该 dict，
+        # runner 在生成 manifest 时并入 evidence（不泄露任何密钥）。
+        self._stats = stats if stats is not None else {}
 
     @property
     def config(self) -> LLMConfig:
@@ -140,6 +144,9 @@ class LiveResearchFlowRunner:
         state.run_manifest = build_run_manifest(state, self._config, started_at=started_at)
         # 合并反思审计记录（不丢失受控反思决策）
         state.run_manifest["reflection"] = reflection
+        # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）
+        if self._stats:
+            state.run_manifest["evidence"] = {"invocation_summary": dict(self._stats)}
 
         # 6. 保存中间产物（确定性落盘）
         self._persist_intermediates(request, state)
@@ -265,13 +272,15 @@ def _ensure_live_api_key(settings: Settings) -> str:
 
 
 def build_flow_runner(
-    settings: Settings, research_tools: list[Any] | None = None
+    settings: Settings,
+    research_tools: list[Any] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
     - fake：返回 ``ResearchFlowRunner``（默认，离线确定性，普通测试/CI 用）；
     - live：校验 API Key 后返回 ``LiveResearchFlowRunner``（真实 Crew + 门禁 + 反思，
-      可注入 ``research_tools`` 生产工具白名单）。
+      可注入 ``research_tools`` 生产工具白名单与 ``stats`` 调用统计）。
     """
     if settings.flow_mode == "fake":
         return ResearchFlowRunner()
@@ -282,4 +291,5 @@ def build_flow_runner(
         config=config,
         research_tools=research_tools,
         artifact_root=settings.artifact_root,
+        stats=stats,
     )

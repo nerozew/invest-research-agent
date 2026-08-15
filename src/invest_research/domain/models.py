@@ -144,6 +144,8 @@ class Source(BaseModel):
     """外部来源的规范化目录（sources 表）。
 
     关键约束：canonical_url 唯一（去重）、accessed_at 必填。
+    ``locator``：来源内定位（章节/页码/锚点），P05-13 要求每条引用可定位到
+    URL + locator；可选，允许缺省（如整站来源）。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -155,6 +157,7 @@ class Source(BaseModel):
     published_at: date | None = None
     accessed_at: date
     content_checksum: str | None = None
+    locator: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @field_validator("canonical_url")

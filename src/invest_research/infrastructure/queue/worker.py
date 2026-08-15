@@ -60,11 +60,14 @@ def _build_session_factory() -> SessionFactory:
     return factory
 
 
-def _build_live_research_tools(settings: Any) -> list[Any]:
+def _build_live_research_tools(
+    settings: Any, stats: dict[str, int] | None = None
+) -> list[Any]:
     """构造 live 模式的 Research 真实工具白名单（SEC/搜索/下载）。
 
     - 构建共享 httpx client（SEC 请求 + User-Agent 合规）；
     - Serper API Key 缺失/为空时 fail-fast（禁止缺配置启动真实搜索）；
+    - ``stats``：可选调用统计 dict（P05-13 验收：外部调用证据写入 manifest）；
     - 返回 from real_tools.build_research_tools 的 CrewAI 工具列表。
     """
     from invest_research.infrastructure.flow_wiring import FlowModeError
@@ -92,7 +95,7 @@ def _build_live_research_tools(settings: Any) -> list[Any]:
         client=client,
         config=SerperConfig(api_key=serper_key, endpoint=settings.serper_endpoint),
     )
-    return build_research_tools(client=client, serper=serper)
+    return build_research_tools(client=client, serper=serper, stats=stats)
 
 
 def _default_flow_runner() -> ResearchFlowRunner:
@@ -110,8 +113,9 @@ def _default_flow_runner() -> ResearchFlowRunner:
     from invest_research.settings import get_settings
 
     settings = get_settings()
-    research_tools = _build_live_research_tools(settings)
-    runner = build_flow_runner(settings, research_tools=research_tools)
+    stats: dict[str, int] = {}
+    research_tools = _build_live_research_tools(settings, stats=stats)
+    runner = build_flow_runner(settings, research_tools=research_tools, stats=stats)
     return runner  # type: ignore[return-value]
 
 

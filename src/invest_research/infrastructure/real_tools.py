@@ -69,17 +69,30 @@ def _unpack(result: Any) -> str:
     return _tool_result_json({"ok": True, **value.model_dump(mode="json")})
 
 
+def _count(stats: dict[str, int] | None, key: str) -> None:
+    """累加调用/失败统计（P05-13 验收：manifest 需含外部调用证据）。"""
+    if stats is not None:
+        stats[key] = stats.get(key, 0) + 1
+
+
 # ---------------------------------------------------------------------------
 # Research 工具白名单（CompanyResolver + SEC + 下载 + 解析 + 搜索）
 # ---------------------------------------------------------------------------
 
 
-def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
+def build_research_tools(
+    *,
+    client: Any,
+    serper: Any,
+    stats: dict[str, int] | None = None,
+) -> list[Any]:
     """构造 Research Agent 的真实工具白名单。
 
     参数：
     - ``client``：共享 httpx.Client（SEC 请求用）；
-    - ``serper``：SerperAdapter（GoogleSearchTool 的 provider）。
+    - ``serper``：SerperAdapter（GoogleSearchTool 的 provider）；
+    - ``stats``：可选调用统计 dict（P05-13 验收：外部调用证据写入 manifest；
+      None 时不记录，行为与之前完全一致）。
 
     返回给 CrewAI 使用的工具函数列表（@tool 包装）。
     """
@@ -92,11 +105,13 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
     @tool("CompanyResolver")
     def company_resolver(input_company: str) -> str:
         """按公司名/ticker 解析 10 位 CIK；歧义时返回候选列表（不猜测）。"""
+        _count(stats, "company_resolver_calls")
         try:
             return _unpack(
                 resolver_tool.execute(ResolveCompanyRequest(input_company=input_company))
             )
         except Exception as exc:  # 应用边界：统一记录，不抛给 CrewAI
+            _count(stats, "company_resolver_failures")
             return _tool_failure_json("INTERNAL_BUG", f"CompanyResolver 异常: {type(exc).__name__}")
 
     @tool("SECSubmissions")
@@ -107,6 +122,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         - ``as_of_date``：ISO 日期（YYYY-MM-DD），只返回 filing_date <= as_of 的申报；
         - ``requested_forms``：逗号分隔的表单（默认 "10-K,10-Q"）。
         """
+        _count(stats, "sec_submissions_calls")
         try:
             forms = tuple(f.strip() for f in requested_forms.split(",") if f.strip())
             req = FetchSubmissionsRequest(
@@ -118,6 +134,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         except ValueError as exc:
             return _tool_failure_json("INPUT_INVALID", f"无效入参: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _count(stats, "sec_submissions_failures")
             return _tool_failure_json("INTERNAL_BUG", f"SECSubmissions 异常: {type(exc).__name__}")
 
     @tool("SECCompanyFacts")
@@ -128,6 +145,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         - as_of_date 过滤在工具内部执行（不存在未来数据）；
         - 供 Analysis Agent 后续经 FinancialFactQuery 精确取数。
         """
+        _count(stats, "sec_company_facts_calls")
         try:
             req = FetchFactsRequest(cik=cik)
             result = facts_tool.execute(req)
@@ -158,6 +176,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         except ValueError as exc:
             return _tool_failure_json("INPUT_INVALID", f"无效入参: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _count(stats, "sec_company_facts_failures")
             return _tool_failure_json("INTERNAL_BUG", f"SECCompanyFacts 异常: {type(exc).__name__}")
 
     @tool("FilingDownloader")
@@ -166,11 +185,13 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
 
         返回媒体类型、字节大小和 sha256 checksum（不直接返回文件内容）。
         """
+        _count(stats, "filing_downloader_calls")
         try:
             return _unpack(
                 downloader_tool.execute(DownloadRequest(url=url, max_bytes=max_bytes))
             )
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _count(stats, "filing_downloader_failures")
             return _tool_failure_json(
                 "INTERNAL_BUG", f"FilingDownloader 异常: {type(exc).__name__}"
             )
@@ -182,6 +203,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         - ``content_base64``：文档内容的 base64 编码；
         - ``media_type``：如 text/html 或 application/pdf（可选，缺失自动探测）。
         """
+        _count(stats, "document_parser_calls")
         try:
             raw = base64.b64decode(content_base64, validate=True)
             outcome = parse_document(raw, media_type)
@@ -190,6 +212,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
         except (ValueError, TypeError) as exc:
             return _tool_failure_json("INPUT_INVALID", f"无效 base64: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _count(stats, "document_parser_failures")
             return _tool_failure_json("INTERNAL_BUG", f"DocumentParser 异常: {type(exc).__name__}")
         doc = outcome.document
         blocks = getattr(doc, "blocks", None) or getattr(doc, "pages", None) or []
@@ -212,6 +235,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
             as_of_date = date.fromisoformat(as_of) if as_of else date.today()
         except ValueError as exc:
             return _tool_failure_json("INPUT_INVALID", f"无效 as_of: {exc}")
+        _count(stats, "web_search_calls")
         try:
             result = search_tool.execute(SearchQuery(query=query, as_of=as_of_date, page_size=10))
             if result.kind == "failure":
@@ -228,6 +252,7 @@ def build_research_tools(*, client: Any, serper: Any) -> list[Any]:
                 }
             )
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _count(stats, "web_search_failures")
             return _tool_failure_json("INTERNAL_BUG", f"WebSearch 异常: {type(exc).__name__}")
 
     return [
