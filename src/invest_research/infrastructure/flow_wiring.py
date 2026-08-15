@@ -45,7 +45,7 @@ from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.live_resources import FlowModeError
 from invest_research.infrastructure.performance import PerformanceRecorder, extract_token_usage
 from invest_research.infrastructure.queue.flow_adapter import ResearchFlowRunner
-from invest_research.settings import Settings
+from invest_research.settings import ResearchProfile, Settings
 
 __all__ = [
     "FlowModeError",
@@ -83,6 +83,7 @@ class LiveResearchFlowRunner:
         crew_factory: Callable[..., Crew] | None = None,
         stats: dict[str, int] | None = None,
         recorder: PerformanceRecorder | None = None,
+        profile: ResearchProfile | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -90,12 +91,14 @@ class LiveResearchFlowRunner:
         self.last_state: ResearchFlowState | None = None
         self.run_manifest: dict[str, object] = {}
         self._reflection = ReflectionController()
+        # 研究档位（P05.5）：fast/deep 预算，默认 deep（向后兼容）
+        self._profile = profile if profile is not None else ResearchProfile.for_mode("deep")
         # 可注入 crew_factory：测试传 fake crew（返回预置 pack），离线验证完整控制流；
         # 默认 None 时用真实 ``build_live_research_crew``（生产真实模型调用）。
         self._crew_factory: Callable[..., Crew] = (
             crew_factory
             if crew_factory is not None
-            else lambda cfg, rt: build_live_research_crew(cfg, rt)
+            else lambda cfg, rt: build_live_research_crew(cfg, rt, profile=self._profile)
         )
         # 外部调用统计（P05-13）：真实工具经 build_research_tools 写入该 dict，
         # runner 在生成 manifest 时并入 evidence（不泄露任何密钥）。
@@ -303,6 +306,7 @@ def build_flow_runner(
     research_tools: list[Any] | None = None,
     stats: dict[str, int] | None = None,
     recorder: PerformanceRecorder | None = None,
+    profile: ResearchProfile | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
@@ -315,10 +319,12 @@ def build_flow_runner(
 
     _ensure_live_api_key(settings)
     config = LLMConfig.from_settings(settings)
+    resolved_profile = profile if profile is not None else settings.build_research_profile()
     return LiveResearchFlowRunner(
         config=config,
         research_tools=research_tools,
         artifact_root=settings.artifact_root,
         stats=stats,
         recorder=recorder,
+        profile=resolved_profile,
     )

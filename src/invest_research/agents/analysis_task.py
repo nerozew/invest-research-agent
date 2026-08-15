@@ -43,6 +43,7 @@ from invest_research.financial.metrics_balance import (
     compute_roa,
 )
 from invest_research.prompts.loader import PromptName, load_prompt
+from invest_research.settings import ResearchProfile
 
 _CONCEPTS_V1_PATH = (
     Path(__file__).resolve().parents[1] / "financial" / "mappings" / "concepts_v1.json"
@@ -167,7 +168,11 @@ def financial_calculator(
 _ANALYSIS_TOOLS = [financial_fact_query, financial_calculator]
 
 
-def build_analysis_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
+def build_analysis_agent(
+    config: LLMConfig,
+    fake: AnyLLM | None = None,
+    profile: ResearchProfile | None = None,
+) -> Agent:
     """构建财报分析 Agent（统一 LLM 接口）。
 
     - 只注入 FinancialFactQuery + FinancialCalculator（不给搜索/下载工具）；
@@ -176,6 +181,7 @@ def build_analysis_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent
     """
     prompt = load_prompt(PromptName.ANALYSIS)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.ANALYSIS)
+    resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
     return Agent(
         role="财报分析 Agent",
         goal=(
@@ -187,6 +193,10 @@ def build_analysis_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent
         tools=_ANALYSIS_TOOLS,
         allow_delegation=False,
         verbose=False,
+        max_iter=resolved.analysis_max_iter,
+        max_retry_limit=resolved.max_retry_limit,
+        max_execution_time=resolved.max_execution_time,
+        max_rpm=resolved.max_rpm,
     )
 
 
@@ -194,9 +204,14 @@ def build_analysis_task(
     config: LLMConfig,
     fake: AnyLLM | None = None,
     agent: Agent | None = None,
+    profile: ResearchProfile | None = None,
 ) -> Task:
     """构建 Analysis Task：用 fake LLM + 分析工具白名单，输出绑定 FinancialAnalysisPack。"""
-    task_agent = agent if agent is not None else build_analysis_agent(config, fake=fake)
+    task_agent = (
+        agent
+        if agent is not None
+        else build_analysis_agent(config, fake=fake, profile=profile)
+    )
     return Task(
         description=(
             "基于上游 ResearchPack、FinancialFact 与 ParsedDocument，选择可比期间与 concept，"
@@ -209,8 +224,12 @@ def build_analysis_task(
     )
 
 
-def build_analysis_pair(config: LLMConfig, fake: AnyLLM) -> tuple[Agent, Task]:
+def build_analysis_pair(
+    config: LLMConfig,
+    fake: AnyLLM,
+    profile: ResearchProfile | None = None,
+) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
-    agent = build_analysis_agent(config, fake=fake)
-    task = build_analysis_task(config, fake=fake, agent=agent)
+    agent = build_analysis_agent(config, fake=fake, profile=profile)
+    task = build_analysis_task(config, fake=fake, agent=agent, profile=profile)
     return agent, task

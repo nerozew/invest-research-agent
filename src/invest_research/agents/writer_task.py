@@ -19,6 +19,7 @@ from crewai.tools import tool
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.domain.models import ReportDraft
 from invest_research.prompts.loader import PromptName, load_prompt
+from invest_research.settings import ResearchProfile
 from invest_research.tools.citation_verifier import (
     CitationCheckResult,
     CitationSourceRef,
@@ -92,7 +93,11 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
 _WRITER_TOOLS = [artifact_reader, citation_verifier, template_guide]
 
 
-def build_writer_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
+def build_writer_agent(
+    config: LLMConfig,
+    fake: AnyLLM | None = None,
+    profile: ResearchProfile | None = None,
+) -> Agent:
     """构建报告撰写 Agent（统一 LLM 接口）。
 
     - 只注入 ArtifactReader + CitationVerifier + TemplateGuide；
@@ -101,6 +106,7 @@ def build_writer_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
     """
     prompt = load_prompt(PromptName.WRITER)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
+    resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
     return Agent(
         role="报告撰写 Agent",
         goal=(
@@ -112,6 +118,10 @@ def build_writer_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:
         tools=_WRITER_TOOLS,
         allow_delegation=False,
         verbose=False,
+        max_iter=resolved.writer_max_iter,
+        max_retry_limit=resolved.max_retry_limit,
+        max_execution_time=resolved.max_execution_time,
+        max_rpm=resolved.max_rpm,
     )
 
 
@@ -119,9 +129,14 @@ def build_writer_task(
     config: LLMConfig,
     fake: AnyLLM | None = None,
     agent: Agent | None = None,
+    profile: ResearchProfile | None = None,
 ) -> Task:
     """构建 Writer Task：fake LLM + 写作工具白名单，输出绑定 ReportDraft。"""
-    task_agent = agent if agent is not None else build_writer_agent(config, fake=fake)
+    task_agent = (
+        agent
+        if agent is not None
+        else build_writer_agent(config, fake=fake, profile=profile)
+    )
     return Task(
         description=(
             "基于上游 research_pack 与 analysis_pack，按 writer_prompt_v1 规则撰写"
@@ -134,8 +149,12 @@ def build_writer_task(
     )
 
 
-def build_writer_pair(config: LLMConfig, fake: AnyLLM) -> tuple[Agent, Task]:
+def build_writer_pair(
+    config: LLMConfig,
+    fake: AnyLLM,
+    profile: ResearchProfile | None = None,
+) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
-    agent = build_writer_agent(config, fake=fake)
-    task = build_writer_task(config, fake=fake, agent=agent)
+    agent = build_writer_agent(config, fake=fake, profile=profile)
+    task = build_writer_task(config, fake=fake, agent=agent, profile=profile)
     return agent, task

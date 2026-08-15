@@ -20,12 +20,14 @@ from crewai import Agent, Task
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.domain.models import ResearchPack
 from invest_research.prompts.loader import PromptName, load_prompt
+from invest_research.settings import ResearchProfile
 
 
 def build_research_agent(
     config: LLMConfig,
     fake: AnyLLM | None = None,
     tools: list[Any] | None = None,
+    profile: ResearchProfile | None = None,
 ) -> Agent:
     """构建信息搜集 Agent（统一 LLM 接口）。
 
@@ -37,6 +39,7 @@ def build_research_agent(
     """
     prompt = load_prompt(PromptName.RESEARCH)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.RESEARCH)
+    resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
     return Agent(
         role="信息搜集 Agent",
         goal=(
@@ -48,6 +51,10 @@ def build_research_agent(
         tools=tools or [],
         allow_delegation=False,
         verbose=False,
+        max_iter=resolved.research_max_iter,
+        max_retry_limit=resolved.max_retry_limit,
+        max_execution_time=resolved.max_execution_time,
+        max_rpm=resolved.max_rpm,
     )
 
 
@@ -56,6 +63,7 @@ def build_research_task(
     fake: AnyLLM | None = None,
     agent: Agent | None = None,
     tools: list[Any] | None = None,
+    profile: ResearchProfile | None = None,
 ) -> Task:
     """构建 Research Task：统一 LLM 接口，输出绑定 ResearchPack。
 
@@ -63,7 +71,9 @@ def build_research_task(
     - 默认内部构建一个新 Agent（可传 ``tools`` 注入生产工具白名单）。
     """
     task_agent = (
-        agent if agent is not None else build_research_agent(config, fake=fake, tools=tools)
+        agent
+        if agent is not None
+        else build_research_agent(config, fake=fake, tools=tools, profile=profile)
     )
     return Task(
         description=(
@@ -80,8 +90,9 @@ def build_research_pair(
     config: LLMConfig,
     fake: AnyLLM,
     tools: list[Any] | None = None,
+    profile: ResearchProfile | None = None,
 ) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供组合 Crew 直接使用。"""
-    agent = build_research_agent(config, fake=fake, tools=tools)
-    task = build_research_task(config, fake=fake, agent=agent, tools=tools)
+    agent = build_research_agent(config, fake=fake, tools=tools, profile=profile)
+    task = build_research_task(config, fake=fake, agent=agent, tools=tools, profile=profile)
     return agent, task

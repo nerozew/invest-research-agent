@@ -23,12 +23,14 @@ from invest_research.agents.analysis_task import build_analysis_task
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
 from invest_research.agents.research_task import build_research_task
 from invest_research.agents.writer_task import build_writer_task
+from invest_research.settings import ResearchProfile
 
 
 def _assemble_tasks(
     config: LLMConfig,
     llms: dict[str, AnyLLM],
     tools_by_role: dict[str, list[Any]] | None = None,
+    profile: ResearchProfile | None = None,
 ) -> list[Any]:
     """用三个角色的 LLM 构建 Task，并设置 context 接力（research→analysis→writer）。
 
@@ -41,9 +43,11 @@ def _assemble_tasks(
     research_tools = tools_by_role.get("research")
     # Analysis/Writer 默认白名单在各自 task 模块内部（least-privilege）；
     # 为保持最小改动，这里只允许 research 注入外部工具（其它角色用默认）。
-    research_task = build_research_task(config, fake=llms["research"], tools=research_tools)
-    analysis_task = build_analysis_task(config, fake=llms["analysis"])
-    writer_task = build_writer_task(config, fake=llms["writer"])
+    research_task = build_research_task(
+        config, fake=llms["research"], tools=research_tools, profile=profile
+    )
+    analysis_task = build_analysis_task(config, fake=llms["analysis"], profile=profile)
+    writer_task = build_writer_task(config, fake=llms["writer"], profile=profile)
 
     # context 接力（官方 sequential 模式：上游输出作为下游 context）
     analysis_task.context = [research_task]  # analysis 消费 research 的 ResearchPack
@@ -56,6 +60,7 @@ def build_research_crew(
     config: LLMConfig,
     fakes: dict[str, AnyLLM],
     research_tools: list[Any] | None = None,
+    profile: ResearchProfile | None = None,
 ) -> Crew:
     """构建三 Agent 顺序 Crew（统一 LLM 接口）。
 
@@ -68,6 +73,7 @@ def build_research_crew(
         config,
         fakes,
         tools_by_role={"research": research_tools} if research_tools else None,
+        profile=profile,
     )
     return Crew(
         agents=[t.agent for t in tasks],
@@ -77,7 +83,11 @@ def build_research_crew(
     )
 
 
-def build_live_research_crew(config: LLMConfig, research_tools: list[Any] | None = None) -> Crew:
+def build_live_research_crew(
+    config: LLMConfig,
+    research_tools: list[Any] | None = None,
+    profile: ResearchProfile | None = None,
+) -> Crew:
     """构建真实三 Agent 顺序 Crew（P05-12B：真实 LLM 生产组装）。
 
     - 三个角色分别用 ``build_real_llm`` 构造真实 OpenAI-compatible LLM；
@@ -91,4 +101,4 @@ def build_live_research_crew(config: LLMConfig, research_tools: list[Any] | None
         "analysis": build_real_llm(config, LLMRole.ANALYSIS),
         "writer": build_real_llm(config, LLMRole.WRITER),
     }
-    return build_research_crew(config, llms, research_tools=research_tools)
+    return build_research_crew(config, llms, research_tools=research_tools, profile=profile)

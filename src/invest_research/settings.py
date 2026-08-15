@@ -11,8 +11,49 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ResearchProfile(BaseModel):
+    """fast/deep 研究档位（P05.5）：集中管理三 Agent 的迭代/超时/重试/工具预算。
+
+    参数集中在单一配置对象中（不散落在 Agent 文件）；Agent 构建时按角色取对应
+    预算字段。fast 用于快速低预算运行，deep（默认）保留完整投研能力。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: Literal["fast", "deep"]
+    research_max_iter: int = Field(ge=1)
+    analysis_max_iter: int = Field(ge=1)
+    writer_max_iter: int = Field(ge=1)
+    max_retry_limit: int = Field(ge=0)
+    max_execution_time: int = Field(gt=0)  # 每 Agent 总执行超时（秒）
+    max_rpm: int | None = Field(default=None, gt=0)  # 工具调用预算（请求/分钟）
+
+    @classmethod
+    def for_mode(cls, mode: Literal["fast", "deep"]) -> "ResearchProfile":
+        """按档位返回预算（fast=低预算，deep=完整能力，默认）。"""
+        if mode == "fast":
+            return cls(
+                mode="fast",
+                research_max_iter=3,
+                analysis_max_iter=2,
+                writer_max_iter=1,
+                max_retry_limit=1,
+                max_execution_time=180,
+                max_rpm=60,
+            )
+        return cls(
+            mode="deep",
+            research_max_iter=15,
+            analysis_max_iter=10,
+            writer_max_iter=5,
+            max_retry_limit=2,
+            max_execution_time=600,
+            max_rpm=None,
+        )
 
 
 class Settings(BaseSettings):
@@ -36,6 +77,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # Flow 运行模式（P05-12A）：fake=离线确定性（默认，不调用模型）；live=真实模型（需 API Key）
     flow_mode: Literal["fake", "live"] = "fake"
+    # 研究档位（P05.5）：fast=低预算快速运行；deep=完整投研能力（默认，向后兼容）
+    research_profile: Literal["fast", "deep"] = "deep"
 
     # ---- LLM（OpenAI-compatible，供应商无关；默认阿里云百炼 qwen-max，见架构 §8）----
     # provider 当前仅支持 openai_compatible；未来切换供应商只改 env，不改业务代码。
@@ -78,6 +121,10 @@ class Settings(BaseSettings):
     # Serper API Key 用 SecretStr：str()/repr() 不泄露明文；.env.example 只放占位符。
     serper_api_key: SecretStr | None = None
     serper_endpoint: str = "https://google.serper.dev/search"
+
+    def build_research_profile(self) -> ResearchProfile:
+        """按 research_profile 档位返回集中预算配置（P05.5）。"""
+        return ResearchProfile.for_mode(self.research_profile)
 
 
 @lru_cache
