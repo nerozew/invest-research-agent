@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -65,6 +66,9 @@ __all__ = [
 # 三 Agent 的执行顺序（与 crew_factory._assemble_tasks 保持一致）
 _AGENT_ROLE_ORDER = ("research", "analysis", "writer")
 
+# 从 LLM 原始文本中提取 JSON 对象（贪婪匹配第一个 { 到最后一个 }，兼容围栏/前后缀）
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
 
 class LiveFlowExecutionError(RuntimeError):
     """live 模式执行失败（上游/质量门禁不可恢复）。
@@ -79,7 +83,8 @@ _PackModel = TypeVar("_PackModel", bound=BaseModel)
 def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
     """从 Crew 输出对象解析为对应 pack（成功对象 / 字典 / JSON 文本）。
 
-    Pydantic 校验失败（如 Action Input 被当成输出）统一转为 LiveFlowExecutionError。
+    Pydantic 校验失败（如 Action Input 被当成输出）统一转为 LiveFlowExecutionError；
+    LLM 原始文本带围栏/前后缀时尝试提取 JSON 对象（research 任务已不绑 output_pydantic）。
     """
     if isinstance(obj, model):
         return obj
@@ -89,7 +94,7 @@ def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
             return model.model_validate(json_dict)
         raw = getattr(obj, "raw", None)
         if isinstance(raw, str):
-            return model.model_validate_json(raw)
+            return _validate_json_text(raw, model)
         if isinstance(obj, dict):
             return model.model_validate(obj)
     except ValidationError as exc:
@@ -98,6 +103,17 @@ def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
             "（Action/Action Input 是工具调用过程，不是最终答案）"
         ) from exc
     raise LiveFlowExecutionError(f"无法解析 {model.__name__} 输出：无法识别的输出类型")
+
+
+def _validate_json_text(raw: str, model: type[_PackModel]) -> _PackModel:
+    """解析 LLM 原始文本为模型；失败时尝试从文本中提取 JSON 对象。"""
+    try:
+        return model.model_validate_json(raw)
+    except ValidationError:
+        match = _JSON_OBJECT_RE.search(raw)
+        if match is not None:
+            return model.model_validate_json(match.group())
+        raise
 
 
 class LiveResearchFlowRunner:

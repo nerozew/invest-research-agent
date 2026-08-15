@@ -59,10 +59,11 @@ __all__ = [
     "build_research_tools",
 ]
 
-# SEC Company Facts 摘要条数上限（防止把整份 XBRL 塞进 LLM context）
-_FACTS_MAX_ITEMS = 60
-# 搜索结果条数上限（Serper 分页已限 page_size ≤ 50，这里再收紧）
-_SEARCH_MAX_ITEMS = 20
+# SEC Company Facts 摘要条数上限（防止把整份 XBRL 塞进 LLM context；
+# P05.5-fix：15 条已足够分析选数，过大导致工具循环上下文复利爆炸）
+_FACTS_MAX_ITEMS = 15
+# 搜索结果条数上限（Serper 分页已限 page_size ≤ 50；P05.5-fix 收紧到 10）
+_SEARCH_MAX_ITEMS = 10
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -396,7 +397,7 @@ def build_research_tools(
             return _tool_failure_json("INTERNAL_BUG", f"DocumentParser 异常: {type(exc).__name__}")
         doc = outcome.document
         blocks = getattr(doc, "blocks", None) or getattr(doc, "pages", None) or []
-        snippet = blocks[:200]
+        snippet = blocks[:60]
         text = _tool_result_json(
             {
                 "ok": True,

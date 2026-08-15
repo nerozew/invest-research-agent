@@ -96,7 +96,7 @@ def test_crew_agents_and_tasks_in_sequential_order() -> None:
     assert crew.agents[0].role == "信息搜集 Agent"
     assert crew.agents[1].role == "财报分析 Agent"
     assert crew.agents[2].role == "报告撰写 Agent"
-    assert crew.tasks[0].output_pydantic is ResearchPack
+    assert crew.tasks[0].output_pydantic is None  # P05.5-fix：research 由 runner 解析+收尾
     assert crew.tasks[1].output_pydantic is FinancialAnalysisPack
     assert crew.tasks[2].output_pydantic is ReportDraft
 

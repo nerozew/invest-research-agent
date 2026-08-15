@@ -38,7 +38,7 @@ class ResearchProfile(BaseModel):
         if mode == "fast":
             return cls(
                 mode="fast",
-                research_max_iter=5,
+                research_max_iter=8,
                 analysis_max_iter=2,
                 writer_max_iter=1,
                 max_retry_limit=1,

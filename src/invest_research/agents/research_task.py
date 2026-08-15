@@ -18,7 +18,6 @@ from typing import Any
 from crewai import Agent, Task
 
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
-from invest_research.domain.models import ResearchPack
 from invest_research.prompts.loader import PromptName, load_prompt
 from invest_research.settings import ResearchProfile
 
@@ -96,7 +95,8 @@ def build_research_task(
         ),
         expected_output="一个可被 ResearchPack 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,
-        output_pydantic=ResearchPack,
+        # P05.5-fix：不绑 output_pydantic——CrewAI 在 kickoff 内校验失败会直接抛错，
+        # 使 runner 的结构化收尾兜底无法生效；改由 runner 解析 + JSON 提取 + 有界收尾。
     )
 
 

@@ -81,13 +81,14 @@ def test_build_research_agent_with_fake() -> None:
     assert agent.llm is not None
 
 
-def test_build_research_task_binds_output_pydantic() -> None:
-    """Task 绑定 output_pydantic=ResearchPack（类而非实例）。"""
+def test_build_research_task_does_not_bind_output_pydantic() -> None:
+    """P05.5-fix：research 任务不绑 output_pydantic，由 runner 解析+收尾兜底。"""
     fake = FakeLLM(config=_config(), role=LLMRole.RESEARCH)
     task = build_research_task(_config(), fake=fake)
 
-    # output_pydantic 是 ResearchPack 类（CrewAI 期望类，不是实例）
-    assert task.output_pydantic is ResearchPack
+    # 不绑 output_pydantic：CrewAI 不再在 kickoff 内校验抛错，
+    # 保证 runner 的结构化收尾（_finalize_research_pack）能兜底。
+    assert task.output_pydantic is None
 
 
 def test_build_research_pair_returns_agent_and_task() -> None:
@@ -96,7 +97,7 @@ def test_build_research_pair_returns_agent_and_task() -> None:
     agent, task = build_research_pair(_config(), fake=fake)
 
     assert agent.role == "信息搜集 Agent"
-    assert task.output_pydantic is ResearchPack
+    assert task.output_pydantic is None
     # agent 与 task 内 agent 一致
     assert task.agent == agent
 
