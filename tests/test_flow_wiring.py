@@ -645,3 +645,32 @@ def test_research_sec_sources_get_deterministic_locator(
     assert state.quality_report.all_passed is True
     assert state.run_manifest.get("status") == "published"
 
+
+def test_manifest_evidence_written_when_stats_wired(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """工具调用计入 stats 后，manifest 必须含 evidence.invocation_summary（P05-13 验收7）。"""
+    as_of = date(2025, 10, 31)
+    stats: dict[str, int] = {"sec_submissions_calls": 1, "web_search_calls": 1}
+
+    class _FakeCrew:
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            return _fake_outputs(as_of)
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("evidence")),
+        crew_factory=lambda cfg, rt: _FakeCrew(),  # type: ignore[no-any-return]
+        stats=stats,
+    )
+    runner.run(ResearchRequest(input_company="AAPL", as_of_date=as_of))
+
+    manifest = runner.last_state.run_manifest
+    assert isinstance(manifest, dict)
+    evidence = manifest.get("evidence")
+    assert isinstance(evidence, dict)
+    inv = evidence.get("invocation_summary")
+    assert isinstance(inv, dict)
+    assert inv.get("sec_submissions_calls", 0) > 0
+    assert inv.get("web_search_calls", 0) > 0
+

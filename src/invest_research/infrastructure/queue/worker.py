@@ -116,7 +116,7 @@ def _build_live_components(
         toolkit=toolkit, stats=stats, recorder=recorder, cache=cache, budget=budget
     )
     prefetch = build_research_prefetcher(
-        toolkit=toolkit, cache=cache, recorder=recorder, budget=budget
+        toolkit=toolkit, cache=cache, recorder=recorder, budget=budget, stats=stats
     )
     return LiveResearchComponents(
         research_tools=research_tools,

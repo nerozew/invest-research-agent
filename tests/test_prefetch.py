@@ -201,3 +201,22 @@ def test_build_research_tools_cache_executes_once() -> None:
     sec_tool.run(**kwargs)
 
     assert submissions.calls == 1
+
+def test_prefetch_counts_into_invocation_stats() -> None:
+    """预取的真实 SEC/Serper 调用必须计入 evidence stats（P05-13 验收 requirement7）。"""
+    resolver = _CountingTool(
+        ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
+    )
+    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
+    cache = ToolCallCache()
+    stats: dict[str, int] = {}
+
+    result = resolve_and_prefetch(
+        _request(), _toolkit(resolver, submissions, search), cache, stats=stats
+    )
+
+    assert result.company_identity is not None
+    assert stats.get("sec_submissions_calls") == 1
+    assert stats.get("web_search_calls") == 1
+

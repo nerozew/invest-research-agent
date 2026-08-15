@@ -472,6 +472,7 @@ def resolve_and_prefetch(
     cache: ToolCallCache,
     recorder: PerformanceRecorder | None = None,
     budget: ToolBudget | None = None,
+    stats: dict[str, int] | None = None,
 ) -> PrefetchResult:
     """公司身份确认后并行预取 SEC submissions + Serper 搜索，返回 PrefetchResult。
 
@@ -505,6 +506,7 @@ def resolve_and_prefetch(
             return
         if budget is not None and not budget.try_acquire("sec_submissions"):
             return
+        _count(stats, "sec_submissions_calls")
         with _timed(recorder, "sec_submissions"):
             result = toolkit.submissions.execute(
                 FetchSubmissionsRequest(
@@ -522,6 +524,7 @@ def resolve_and_prefetch(
             ) or "（无 10-K/10-Q 申报记录）"
         else:
             _LOGGER.warning("prefetch sec_submissions 失败: %s", result.error.message)
+            _count(stats, "sec_submissions_failures")
 
     def fetch_search() -> None:
         nonlocal search_summary
@@ -530,6 +533,7 @@ def resolve_and_prefetch(
             return
         if budget is not None and not budget.try_acquire("web_search"):
             return
+        _count(stats, "web_search_calls")
         with _timed(recorder, "web_search"):
             result = toolkit.search.execute(
                 SearchQuery(query=request.input_company, as_of=request.as_of_date, page_size=10)
@@ -542,6 +546,7 @@ def resolve_and_prefetch(
             ) or "（无搜索结果）"
         else:
             _LOGGER.warning("prefetch web_search 失败: %s", result.error.message)
+            _count(stats, "web_search_failures")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(fetch_submissions), executor.submit(fetch_search)]
@@ -568,11 +573,14 @@ def build_research_prefetcher(
     cache: ToolCallCache,
     recorder: PerformanceRecorder | None = None,
     budget: ToolBudget | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Callable[[ResearchRequest], PrefetchResult]:
     """返回 prefetch 可调用对象（公司解析 + 并行 SEC/Serper + 缓存预热）。"""
 
     def prefetch(request: ResearchRequest) -> PrefetchResult:
-        return resolve_and_prefetch(request, toolkit, cache, recorder, budget=budget)
+        return resolve_and_prefetch(
+            request, toolkit, cache, recorder, budget=budget, stats=stats
+        )
 
     return prefetch
 

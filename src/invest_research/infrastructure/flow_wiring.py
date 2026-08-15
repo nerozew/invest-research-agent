@@ -258,9 +258,14 @@ class LiveResearchFlowRunner:
         )
         # 合并反思审计记录（不丢失受控反思决策）
         state.run_manifest["reflection"] = reflection
-        # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）
-        if self._stats:
-            state.run_manifest["evidence"] = {"invocation_summary": dict(self._stats)}
+        # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）。
+        # stats 为空时（Agent 直接用预取结果、未调工具）从性能记录器补全真实调用。
+        invocation: dict[str, int] = dict(self._stats)
+        if not invocation:
+            for tool_name, metrics in self._recorder.snapshot()["tools"].items():
+                invocation[f"{tool_name}_calls"] = int(metrics["calls"])
+        if invocation:
+            state.run_manifest["evidence"] = {"invocation_summary": invocation}
 
         # 6. 保存中间产物（确定性落盘）
         self._persist_intermediates(request, state)
@@ -508,10 +513,8 @@ class LiveResearchFlowRunner:
             "07_manifest.json": json.dumps(state.run_manifest, ensure_ascii=False, default=str),
         }
         for key, content in payloads.items():
-            try:
-                store.write(key, content.encode("utf-8"))
-            except FileExistsError:
-                continue  # 重复运行不覆盖已有工件（幂等）
+            # P05.5-fix：live 单次运行覆盖旧工件，保证工件反映本次运行（诊断不误导）
+            store.write(key, content.encode("utf-8"), overwrite=True)
 
 
 def _ensure_live_api_key(settings: Settings) -> str:
