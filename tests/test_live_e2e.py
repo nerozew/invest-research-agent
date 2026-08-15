@@ -364,9 +364,18 @@ def test_live_e2e_aapl_report() -> None:
     settings = get_settings()
 
     # 真实环境须配置 Serper（缺 key 直接 fail-fast，禁止无凭据跑真实搜索）
+    # P05.5：用 _build_live_components 组装 cache/recorder/prefetch，使
+    # fast/deep 档位 + 并行预取 + 工具缓存 + 性能记录全部在 live 生效。
     stats: dict[str, int] = {}
-    research_tools = worker_module._build_live_research_tools(settings, stats=stats)
-    runner = build_flow_runner(settings, research_tools=research_tools, stats=stats)
+    components = worker_module._build_live_components(settings, stats=stats)
+    runner = build_flow_runner(
+        settings,
+        research_tools=components.research_tools,
+        stats=stats,
+        recorder=components.recorder,
+        cache=components.cache,
+        prefetch=components.prefetch,
+    )
     request = _e2e_request()
 
     runner.run(request)
