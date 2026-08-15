@@ -2132,3 +2132,22 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-03 ✅：本地工件生命周期清理（retention policy）
+
+**产物**：`src/invest_research/infrastructure/artifact_lifecycle.py`（CleanupPolicy / CleanupStats / ArtifactCleanupService）、`tests/test_artifact_lifecycle.py`（13 测试，全部只使用临时目录）。
+
+### 3 个知识点
+
+1. **清理策略按"类别 × 年龄/数量"分解**：① 临时文件（`.tmp-*.part` 孤儿，ArtifactStore 原子写失败遗留）按年龄（超过 `temp_file_max_age_seconds` 才删，新鲜文件可能是进行中的写入）；② 任务工件目录按保留天数（mtime ≤ now - 30 天即过期），`.keep` 标记文件可人工保护；③ 基准运行目录按数量（只保留最近 N 个）。三种类别各自独立、可单独测试。
+2. **dry_run 是清理服务的默认安全模式**：默认只统计不删除（`CleanupStats` 计数 + `bytes_freed`），真正删除要显式 `dry_run=False`——把"破坏性操作"变成"先看后删"，且测试可以在 dry_run 下断言统计、在删除模式下断言文件消失。
+3. **mtime 是"最近修改时间"而非"创建时间"**：测试用 `os.utime` 把 mtime 改成任意过去时间来控制"年龄"，配合注入 `now`（服务构造参数）实现完全确定性——不依赖真实时钟，删除逻辑可在毫秒级测试里验证 30 天保留期。边界条件（恰好等于阈值）也纳入测试。
+
+### 检查问题（请用自己的话回答）
+为什么"新鲜临时文件不删"？如果删除了正在写入的 `.tmp-*.part`，ArtifactStore 的原子写会发生什么？
+
+### 已知限制
+- 清理服务目前是独立基础设施模块（含测试），**尚未接入 CLI/API/定时任务**——接入方式建议在 P06-06/07 本地部署时一并考虑（worker 启动或独立 cron/调度）；
+- 基准运行目录的"保留最近 N 个"按目录 mtime 排序，同一 run 内部分完成（无 report.json）的运行也会计入保留名额，属可接受的简化。
+
+---
+
