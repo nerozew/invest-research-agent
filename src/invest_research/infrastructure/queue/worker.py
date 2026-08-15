@@ -32,6 +32,7 @@ from invest_research.infrastructure.queue.flow_adapter import (
     ResearchJobExecutionHandler,
 )
 from invest_research.infrastructure.queue.tasks import register_tasks
+from invest_research.infrastructure.tool_budget import ToolBudget
 from invest_research.infrastructure.tool_cache import ToolCallCache
 
 __all__ = ["celery_app"]
@@ -86,11 +87,12 @@ def _build_live_research_tools(
 
 @dataclass
 class LiveResearchComponents:
-    """live 模式组装的完整研究组件（工具 + 缓存 + 计时 + 并行预取）。"""
+    """live 模式组装的完整研究组件（工具 + 缓存 + 计时 + 预算 + 并行预取）。"""
 
     research_tools: list[Any]
     cache: ToolCallCache
     recorder: PerformanceRecorder
+    budget: ToolBudget
     prefetch: Callable[[ResearchRequest], Any]
 
 
@@ -109,14 +111,18 @@ def _build_live_components(
     toolkit = build_research_toolkit(client=client, serper=serper)
     cache = ToolCallCache()
     recorder = PerformanceRecorder()
+    budget = ToolBudget()
     research_tools = build_research_tools(
-        toolkit=toolkit, stats=stats, recorder=recorder, cache=cache
+        toolkit=toolkit, stats=stats, recorder=recorder, cache=cache, budget=budget
     )
-    prefetch = build_research_prefetcher(toolkit=toolkit, cache=cache, recorder=recorder)
+    prefetch = build_research_prefetcher(
+        toolkit=toolkit, cache=cache, recorder=recorder, budget=budget
+    )
     return LiveResearchComponents(
         research_tools=research_tools,
         cache=cache,
         recorder=recorder,
+        budget=budget,
         prefetch=prefetch,
     )
 
@@ -145,6 +151,7 @@ def _default_flow_runner() -> ResearchFlowRunner:
         recorder=components.recorder,
         cache=components.cache,
         prefetch=components.prefetch,
+        budget=components.budget,
     )
     return runner  # type: ignore[return-value]
 

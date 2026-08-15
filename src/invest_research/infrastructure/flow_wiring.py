@@ -24,18 +24,23 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from crewai.crew import Crew
+from pydantic import BaseModel, ValidationError
 
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
 from invest_research.domain.models import (
+    CompanyIdentity,
     FinancialAnalysisPack,
     ReportDraft,
     ResearchPack,
     ResearchRequest,
+    Source,
+    SourceType,
 )
 from invest_research.domain.quality import QualityAction, QualityRecommendation
 from invest_research.flows.manifest import build_run_manifest
@@ -44,7 +49,9 @@ from invest_research.flows.reflection import ReflectionController
 from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.live_resources import FlowModeError
 from invest_research.infrastructure.performance import PerformanceRecorder, extract_token_usage
+from invest_research.infrastructure.prefetch import PrefetchResult, prefetch_summary_text
 from invest_research.infrastructure.queue.flow_adapter import ResearchFlowRunner
+from invest_research.infrastructure.tool_budget import ToolBudget
 from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.settings import ResearchProfile, Settings
 
@@ -64,6 +71,33 @@ class LiveFlowExecutionError(RuntimeError):
 
     语义：live 失败后不得降级为 fake——抛此异常向 Worker/调用方表示真实失败。
     """
+
+
+_PackModel = TypeVar("_PackModel", bound=BaseModel)
+
+
+def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
+    """从 Crew 输出对象解析为对应 pack（成功对象 / 字典 / JSON 文本）。
+
+    Pydantic 校验失败（如 Action Input 被当成输出）统一转为 LiveFlowExecutionError。
+    """
+    if isinstance(obj, model):
+        return obj
+    json_dict = getattr(obj, "json_dict", None) or getattr(obj, "exported_output", None)
+    try:
+        if isinstance(json_dict, dict):
+            return model.model_validate(json_dict)
+        raw = getattr(obj, "raw", None)
+        if isinstance(raw, str):
+            return model.model_validate_json(raw)
+        if isinstance(obj, dict):
+            return model.model_validate(obj)
+    except ValidationError as exc:
+        raise LiveFlowExecutionError(
+            f"无法解析 {model.__name__} 输出：输出不是合法结构化对象"
+            "（Action/Action Input 是工具调用过程，不是最终答案）"
+        ) from exc
+    raise LiveFlowExecutionError(f"无法解析 {model.__name__} 输出：无法识别的输出类型")
 
 
 class LiveResearchFlowRunner:
@@ -86,7 +120,8 @@ class LiveResearchFlowRunner:
         recorder: PerformanceRecorder | None = None,
         profile: ResearchProfile | None = None,
         cache: ToolCallCache | None = None,
-        prefetch: Callable[[ResearchRequest], Any] | None = None,
+        prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
+        budget: ToolBudget | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -112,6 +147,12 @@ class LiveResearchFlowRunner:
         self._cache = cache
         # 公司解析后并行预取（P05.5 best-effort；可选）
         self._prefetch = prefetch
+        # 工具硬预算（P05.5-fix：每 Job 独立上限，prefetch 与 Agent 调用共用）
+        self._budget = budget
+        # 本次运行的预取结果（供任务注入与结构化收尾复用）
+        self._prefetch_result: PrefetchResult | None = None
+        # 结构化收尾只允许一次
+        self._finalize_used = False
 
     @property
     def config(self) -> LLMConfig:
@@ -137,17 +178,22 @@ class LiveResearchFlowRunner:
         started_at = time.time()
 
         # 0. 公司身份确认后并行预取（best-effort，失败不影响 Agent 兜底）
+        prefetch_result: PrefetchResult | None = None
         if self._prefetch is not None:
             try:
-                self._prefetch(request)
+                prefetch_result = self._prefetch(request)
             except Exception:
                 # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
-                pass
+                prefetch_result = None
+        self._prefetch_result = prefetch_result
+
+        # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
+        inputs = self._build_crew_inputs(request, prefetch_result)
 
         # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）
         crew = self._crew_factory(self._config, self._research_tools)
         try:
-            result = crew.kickoff()
+            result = crew.kickoff(inputs=inputs)
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
             raise LiveFlowExecutionError(
                 f"真实 Crew 执行失败: {type(exc).__name__}: {exc}"
@@ -178,6 +224,33 @@ class LiveResearchFlowRunner:
         self._persist_intermediates(request, state)
 
         return state
+
+    def _build_crew_inputs(
+        self, request: ResearchRequest, prefetch_result: PrefetchResult | None
+    ) -> dict[str, str]:
+        """把 ResearchRequest 与预取结果组装为 Crew 输入（替换 Task 描述占位符）。
+
+        所有值必须是 str/int/float/bool（CrewAI interpolate_only 的限制）：
+        as_of_date 用 ISO 字符串、company_identity 用格式化文本。
+        """
+        forms = (
+            ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
+        )
+        inputs: dict[str, str] = {
+            "input_company": request.input_company,
+            "as_of_date": request.as_of_date.isoformat(),
+            "requested_forms": forms,
+            "language": request.language,
+            "company_identity": "未预解析（需先用 CompanyResolver 解析）",
+            "prefetch_summary": prefetch_summary_text(prefetch_result),
+        }
+        if prefetch_result is not None and prefetch_result.company_identity is not None:
+            identity = prefetch_result.company_identity
+            inputs["company_identity"] = (
+                f"ticker={identity.ticker}, CIK={identity.cik}, "
+                f"legal_name={identity.legal_name}, exchange={identity.exchange}"
+            )
+        return inputs
 
     def _record_performance(self, crew: Any, result: Any) -> None:
         """采集三 Agent 耗时与 LLM token usage 到 recorder。
@@ -212,25 +285,9 @@ class LiveResearchFlowRunner:
         if tasks_output:
             outputs = list(tasks_output)
 
-        def _to_packed(
-            obj: Any,
-            model: type[ResearchPack] | type[FinancialAnalysisPack] | type[ReportDraft],
-        ) -> Any:
-            if isinstance(obj, model):
-                return obj
-            json_dict = getattr(obj, "json_dict", None) or getattr(obj, "exported_output", None)
-            if isinstance(json_dict, dict):
-                return model.model_validate(json_dict)
-            raw = getattr(obj, "raw", None)
-            if isinstance(raw, str):
-                return model.model_validate_json(raw)
-            if isinstance(obj, dict):
-                return model.model_validate(obj)
-            raise LiveFlowExecutionError(f"无法解析 {model.__name__} 输出")
-
         # 按顺序：research, analysis, writer
         if len(outputs) >= 1:
-            state.research_pack = _to_packed(outputs[0], ResearchPack)
+            state.research_pack = self._extract_research_pack(outputs[0], request)
         if len(outputs) >= 2:
             state.analysis_pack = _to_packed(outputs[1], FinancialAnalysisPack)
         if len(outputs) >= 3:
@@ -241,6 +298,113 @@ class LiveResearchFlowRunner:
                 "Crew 输出不完整：需要 research/analysis/writer 三个 pack"
             )
         return state
+
+    def _extract_research_pack(self, obj: Any, request: ResearchRequest) -> ResearchPack:
+        """解析 Research 输出；失败时尝试一次有界结构化收尾（不伪造来源）。"""
+        try:
+            return _to_packed(obj, ResearchPack)
+        except LiveFlowExecutionError as exc:
+            return self._finalize_research_pack(request, exc)
+
+    def _finalize_research_pack(self, request: ResearchRequest, cause: Exception) -> ResearchPack:
+        """有界结构化收尾：从缓存中的 SEC 申报结果构建 ResearchPack（只允许一次）。
+
+        - 只允许一次；使用 Agent 已经取得的工具结果（缓存），不重新执行整套 Research；
+        - 不伪造来源：无有效 SEC 来源时明确抛 LiveFlowExecutionError。
+        """
+        if self._finalize_used:
+            raise LiveFlowExecutionError(
+                "结构化收尾已使用过一次，禁止重复收尾"
+            ) from cause
+        self._finalize_used = True
+
+        identity = self._resolved_identity(request)
+        if identity is None:
+            raise LiveFlowExecutionError(
+                "Research 输出不可解析且无法确定公司身份，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack"
+            ) from cause
+        if self._cache is None:
+            raise LiveFlowExecutionError(
+                "Research 输出不可解析且无工具缓存，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack"
+            ) from cause
+
+        forms = ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
+        key = self._cache.key(
+            "sec_submissions",
+            {
+                "cik": identity.cik,
+                "as_of_date": request.as_of_date.isoformat(),
+                "requested_forms": forms,
+            },
+        )
+        cached = self._cache.get(key)
+        if cached is None:
+            raise LiveFlowExecutionError(
+                "Research 输出不可解析且缓存无 SEC 申报结果，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack"
+            ) from cause
+        try:
+            payload = json.loads(cached)
+        except (TypeError, ValueError) as parse_exc:
+            raise LiveFlowExecutionError(
+                "Research 输出不可解析且缓存 SEC 结果损坏，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack"
+            ) from parse_exc
+        raw_filings = payload.get("filings", []) if payload.get("ok") else []
+        sources: list[Source] = []
+        for f in raw_filings:
+            url = (f or {}).get("primary_document_url")
+            if not url:
+                continue
+            form_type = f.get("form_type") or "SEC"
+            filing_date = f.get("filing_date")
+            sources.append(
+                Source(
+                    source_type=SourceType.SEC_FILING,
+                    canonical_url=url,
+                    title=f"{form_type} filed {filing_date}",
+                    published_at=(
+                        date.fromisoformat(filing_date) if filing_date else request.as_of_date
+                    ),
+                    accessed_at=request.as_of_date,
+                )
+            )
+        if not sources:
+            raise LiveFlowExecutionError(
+                "Research 输出不可解析且无有效 SEC 来源，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack"
+            ) from cause
+        return ResearchPack(
+            version="research_pack_v1",
+            company_identity=identity,
+            as_of_date=request.as_of_date,
+            sources=sources,
+            coverage_notes=(
+                "Research Agent 未产出合法 ResearchPack，"
+                "由有界结构化收尾基于已取得的 SEC 申报结果构建"
+            ),
+        )
+
+    def _resolved_identity(self, request: ResearchRequest) -> CompanyIdentity | None:
+        """优先取预取结果中的公司身份；否则确定性本地解析（不联网）。"""
+        if (
+            self._prefetch_result is not None
+            and self._prefetch_result.company_identity is not None
+        ):
+            return self._prefetch_result.company_identity
+        from invest_research.tools.company_resolver import (
+            CompanyResolverTool,
+            ResolveCompanyRequest,
+        )
+
+        result = CompanyResolverTool().execute(
+            ResolveCompanyRequest(input_company=request.input_company)
+        )
+        if result.kind == "success" and result.value.resolved:
+            return result.value.candidates[0]
+        return None
 
     def _run_reflection(self, state: ResearchFlowState) -> dict[str, object]:
         """受控反思：按质量建议路由，修订/补证各有 ≤1 次上限。
@@ -323,7 +487,8 @@ def build_flow_runner(
     recorder: PerformanceRecorder | None = None,
     profile: ResearchProfile | None = None,
     cache: ToolCallCache | None = None,
-    prefetch: Callable[[ResearchRequest], Any] | None = None,
+    prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
+    budget: ToolBudget | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
@@ -346,4 +511,5 @@ def build_flow_runner(
         profile=resolved_profile,
         cache=cache,
         prefetch=prefetch,
+        budget=budget,
     )

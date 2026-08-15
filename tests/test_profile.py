@@ -41,7 +41,7 @@ def _stop_rpm_controller(agent: object) -> None:
 def test_fast_profile_budgets() -> None:
     p = ResearchProfile.for_mode("fast")
     assert p.mode == "fast"
-    assert p.research_max_iter == 3
+    assert p.research_max_iter == 5
     assert p.analysis_max_iter == 2
     assert p.writer_max_iter == 1
     assert p.max_retry_limit == 1
@@ -77,7 +77,7 @@ def test_settings_fast_profile() -> None:
         sec_user_agent_contact="test@example.com",
         research_profile="fast",
     )
-    assert settings.build_research_profile().research_max_iter == 3
+    assert settings.build_research_profile().research_max_iter == 5
 
 
 def test_invalid_research_profile_rejected() -> None:
@@ -95,7 +95,7 @@ def test_research_agent_applies_fast_budget() -> None:
         _config(), fake=_fake(LLMRole.RESEARCH), profile=ResearchProfile.for_mode("fast")
     )
     try:
-        assert agent.max_iter == 3
+        assert agent.max_iter == 5
         assert agent.max_retry_limit == 1
         assert agent.max_execution_time == 180
         assert agent.max_rpm == 60

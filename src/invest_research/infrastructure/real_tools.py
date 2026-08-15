@@ -32,8 +32,10 @@ from typing import Any, Callable
 from crewai.tools import tool
 
 from invest_research.domain.errors import ErrorCode
-from invest_research.domain.models import CompanyIdentity, ResearchRequest
+from invest_research.domain.models import ResearchRequest
 from invest_research.infrastructure.performance import PerformanceRecorder
+from invest_research.infrastructure.prefetch import PrefetchResult, PrefetchStatus
+from invest_research.infrastructure.tool_budget import ToolBudget
 from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.tools.artifact_store import (
     ArtifactStore,
@@ -137,6 +139,18 @@ def _timed(
     return recorder.timed_tool(tool_name)
 
 
+def _budget_exhausted(budget: ToolBudget | None, tool_name: str) -> str | None:
+    """尝试占用一次工具执行额度；超限返回 BUDGET_EXHAUSTED 失败 JSON（typed）。"""
+    if budget is None:
+        return None
+    if budget.try_acquire(tool_name):
+        return None
+    cap = budget.cap(tool_name)
+    return _tool_failure_json(
+        "BUDGET_EXHAUSTED", f"{tool_name} 调用预算已耗尽（每 Job 上限 {cap} 次）"
+    )
+
+
 def _cached_lookup(
     cache: ToolCallCache | None,
     recorder: PerformanceRecorder | None,
@@ -161,11 +175,15 @@ def _cached_execute(
     params: dict[str, Any],
     serialize_fn: Callable[[Any], str],
     execute_fn: Callable[[], Any],
+    budget: ToolBudget | None = None,
 ) -> str:
-    """带缓存执行：命中直接返回缓存串；否则执行→序列化→（成功）写缓存并返回。"""
+    """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 BUDGET_EXHAUSTED。"""
     cached, key = _cached_lookup(cache, recorder, tool_name, params)
     if cached is not None:
         return cached
+    exhausted = _budget_exhausted(budget, tool_name)
+    if exhausted is not None:
+        return exhausted
     with _timed(recorder, tool_name):
         result = execute_fn()
     text = serialize_fn(result)
@@ -207,6 +225,7 @@ def build_research_tools(
     stats: dict[str, int] | None = None,
     recorder: PerformanceRecorder | None = None,
     cache: ToolCallCache | None = None,
+    budget: ToolBudget | None = None,
 ) -> list[Any]:
     """构造 Research Agent 的真实工具白名单。
 
@@ -249,6 +268,7 @@ def build_research_tools(
             params={"input_company": input_company},
             serialize_fn=_unpack,
             execute_fn=_run,
+            budget=budget,
         )
 
     @tool("SECSubmissions")
@@ -289,6 +309,7 @@ def build_research_tools(
             params={"cik": cik, "as_of_date": as_of_date, "requested_forms": requested_forms},
             serialize_fn=_unpack,
             execute_fn=_run,
+            budget=budget,
         )
 
     @tool("SECCompanyFacts")
@@ -300,6 +321,9 @@ def build_research_tools(
         )
         if cached is not None:
             return cached
+        exhausted = _budget_exhausted(budget, "sec_company_facts")
+        if exhausted is not None:
+            return exhausted
         try:
             req = FetchFactsRequest(cik=cik)
             with _timed(recorder, "sec_company_facts"):
@@ -338,6 +362,7 @@ def build_research_tools(
             params={"url": url, "max_bytes": max_bytes},
             serialize_fn=_unpack,
             execute_fn=_run,
+            budget=budget,
         )
 
     @tool("DocumentParser")
@@ -352,6 +377,9 @@ def build_research_tools(
         )
         if cached is not None:
             return cached
+        exhausted = _budget_exhausted(budget, "document_parser")
+        if exhausted is not None:
+            return exhausted
         try:
             raw = base64.b64decode(content_base64, validate=True)
             with _timed(recorder, "document_parser"):
@@ -410,6 +438,7 @@ def build_research_tools(
             params={"query": query, "as_of": as_of},
             serialize_fn=_serialize_search_result,
             execute_fn=_run,
+            budget=budget,
         )
 
     return [
@@ -438,30 +467,39 @@ def resolve_and_prefetch(
     toolkit: ResearchToolkit,
     cache: ToolCallCache,
     recorder: PerformanceRecorder | None = None,
-) -> CompanyIdentity | None:
-    """公司身份确认后并行预取 SEC submissions + Serper 搜索并预热缓存。
+    budget: ToolBudget | None = None,
+) -> PrefetchResult:
+    """公司身份确认后并行预取 SEC submissions + Serper 搜索，返回 PrefetchResult。
 
-    - 解析公司（确定性）；歧义/失败返回 None（不猜测，交给 Agent 兜底）；
+    - 解析公司（确定性）；歧义/失败返回 status=failed 的 PrefetchResult（不猜测）；
     - 并行执行两个独立 I/O（SEC submissions + Serper 搜索），各自先查缓存，
-      命中跳过，未命中执行并按成功结果写缓存（键与 build_research_tools 一致）；
+      未命中按预算执行并按成功结果写缓存（键与 build_research_tools 一致）；
+    - 摘要随 PrefetchResult 返回，供 runner 注入 Research Task（不只预热缓存）；
     - 仅并行独立 I/O；Analysis 仍依赖 Research、Writer 仍依赖 Research+Analysis。
     """
     resolve_result = toolkit.resolver.execute(
         ResolveCompanyRequest(input_company=request.input_company)
     )
     if resolve_result.kind == "failure" or not resolve_result.value.resolved:
-        return None
+        return PrefetchResult(
+            company_identity=None, submissions_summary=None, search_summary=None, status="failed"
+        )
     identity = resolve_result.value.candidates[0]
     cik = identity.cik
     as_of = request.as_of_date.isoformat()
     forms_str = _forms_key(request)
+    submissions_summary: str | None = None
+    search_summary: str | None = None
 
     def fetch_submissions() -> None:
+        nonlocal submissions_summary
         key = cache.key(
             "sec_submissions",
             {"cik": cik, "as_of_date": as_of, "requested_forms": forms_str},
         )
         if cache.get(key) is not None:
+            return
+        if budget is not None and not budget.try_acquire("sec_submissions"):
             return
         with _timed(recorder, "sec_submissions"):
             result = toolkit.submissions.execute(
@@ -473,10 +511,18 @@ def resolve_and_prefetch(
             )
         if result.kind == "success":
             cache.put(key, _unpack(result))
+            filings = result.value.filings
+            submissions_summary = "\n".join(
+                f"- {f.form_type} | filed {f.filing_date.isoformat()} | {f.primary_document_url}"
+                for f in filings[:_SEARCH_MAX_ITEMS]
+            ) or "（无 10-K/10-Q 申报记录）"
 
     def fetch_search() -> None:
+        nonlocal search_summary
         key = cache.key("web_search", {"query": request.input_company, "as_of": as_of})
         if cache.get(key) is not None:
+            return
+        if budget is not None and not budget.try_acquire("web_search"):
             return
         with _timed(recorder, "web_search"):
             result = toolkit.search.execute(
@@ -484,6 +530,10 @@ def resolve_and_prefetch(
             )
         if result.kind == "success":
             cache.put(key, _serialize_search_result(result))
+            items = result.value.items[:_SEARCH_MAX_ITEMS]
+            search_summary = "\n".join(
+                f"- {r.title} | {r.url} | {r.publisher or ''}" for r in items
+            ) or "（无搜索结果）"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(fetch_submissions), executor.submit(fetch_search)]
@@ -493,7 +543,15 @@ def resolve_and_prefetch(
             except Exception:  # noqa: BLE001 - prefetch 是优化，失败不影响 Agent 兜底
                 continue
 
-    return identity
+    status: PrefetchStatus = (
+        "ok" if (submissions_summary is not None and search_summary is not None) else "partial"
+    )
+    return PrefetchResult(
+        company_identity=identity,
+        submissions_summary=submissions_summary,
+        search_summary=search_summary,
+        status=status,
+    )
 
 
 def build_research_prefetcher(
@@ -501,11 +559,12 @@ def build_research_prefetcher(
     toolkit: ResearchToolkit,
     cache: ToolCallCache,
     recorder: PerformanceRecorder | None = None,
-) -> Callable[[ResearchRequest], CompanyIdentity | None]:
+    budget: ToolBudget | None = None,
+) -> Callable[[ResearchRequest], PrefetchResult]:
     """返回 prefetch 可调用对象（公司解析 + 并行 SEC/Serper + 缓存预热）。"""
 
-    def prefetch(request: ResearchRequest) -> CompanyIdentity | None:
-        return resolve_and_prefetch(request, toolkit, cache, recorder)
+    def prefetch(request: ResearchRequest) -> PrefetchResult:
+        return resolve_and_prefetch(request, toolkit, cache, recorder, budget=budget)
 
     return prefetch
 

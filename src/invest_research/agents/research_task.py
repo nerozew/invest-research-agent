@@ -77,8 +77,22 @@ def build_research_task(
     )
     return Task(
         description=(
-            "基于输入的公司身份与 as_of_date，调用信息搜集工具的职责范围内工具，"
-            "产出符合 ResearchPack 契约的结构化来源包。"
+            "研究任务输入：\n"
+            "- input_company: {input_company}\n"
+            "- as_of_date: {as_of_date}\n"
+            "- requested_forms: {requested_forms}\n"
+            "- language: {language}\n"
+            "- company_identity: {company_identity}\n"
+            "- prefetch_summary: {prefetch_summary}\n"
+            "要求：\n"
+            "1. as_of_date 是唯一允许的数据截止日，必须使用输入中的 {as_of_date}，\n"
+            "   禁止自行更换其他日期；\n"
+            "2. 优先使用 company_identity 与 prefetch_summary 中已有的结果，\n"
+            "   足够时不得重复调用相同工具/参数；\n"
+            "3. 在工具白名单内调用信息搜集工具收集来源后，产出符合 ResearchPack\n"
+            "   契约的完整结构化来源包；\n"
+            "4. Action/Action Input 只是工具调用过程记录，绝不是最终答案；\n"
+            "   最终输出必须是可被 ResearchPack 校验的对象。"
         ),
         expected_output="一个可被 ResearchPack 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,

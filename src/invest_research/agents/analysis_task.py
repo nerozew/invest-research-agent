@@ -214,6 +214,7 @@ def build_analysis_task(
     )
     return Task(
         description=(
+            "分析任务输入：input_company={input_company}，as_of_date={as_of_date}，requested_forms={requested_forms}。\n"
             "基于上游 ResearchPack、FinancialFact 与 ParsedDocument，选择可比期间与 concept，"
             "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
             "产出符合 FinancialAnalysisPack 契约的结构化分析包。"

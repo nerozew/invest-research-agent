@@ -228,7 +228,7 @@ def test_live_runner_writes_performance_to_manifest(tmp_path_factory) -> None:
     )
 
     class _FakeCrew:
-        def kickoff(self):
+        def kickoff(self, inputs=None):
             return SimpleNamespace(tasks_output=[research, analysis, draft])
 
     recorder = PerformanceRecorder()

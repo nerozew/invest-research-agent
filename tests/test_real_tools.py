@@ -123,7 +123,7 @@ def test_live_runner_factory_keeps_key_out_of_artifacts(tmp_path: Path) -> None:
     )
 
     class _FakeCrew:
-        def kickoff(self):  # type: ignore[no-untyped-def]
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
             return SimpleNamespace(tasks_output=[research, analysis, draft])
 
     artifact_root = tmp_path / "artifacts"

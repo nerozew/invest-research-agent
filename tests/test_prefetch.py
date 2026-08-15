@@ -1,4 +1,8 @@
-"""P05.5-3 并行预取与工具缓存测试（fake 工具，不联网）。"""
+"""P05.5-3 并行预取与工具缓存测试（fake 工具，不联网）。
+
+P05.5-fix：resolve_and_prefetch 返回 PrefetchResult（公司身份 + SEC/Serper 摘要
++ 状态），供 runner 注入 Research Task。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ from invest_research.infrastructure.real_tools import (
     build_research_tools,
     resolve_and_prefetch,
 )
+from invest_research.infrastructure.tool_budget import ToolBudget
 from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.tools.base import ToolError, ToolFailure, ToolSuccess
 from invest_research.tools.company_resolver import ResolveCompanyResponse
@@ -62,7 +67,7 @@ def _toolkit(resolver: object, submissions: object, search: object) -> ResearchT
     )
 
 
-def test_resolve_and_prefetch_primes_cache_and_returns_identity() -> None:
+def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     resolver = _CountingTool(
         ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
     )
@@ -70,10 +75,14 @@ def test_resolve_and_prefetch_primes_cache_and_returns_identity() -> None:
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
-    identity = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
+    result = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
 
-    assert identity is not None
-    assert identity.cik == _CIK
+    assert result.company_identity is not None
+    assert result.company_identity.cik == _CIK
+    assert result.status == "ok"
+    # 摘要必须随 PrefetchResult 返回（不只预热缓存）
+    assert result.submissions_summary is not None
+    assert result.search_summary is not None
     assert resolver.calls == 1
     assert submissions.calls == 1
     assert search.calls == 1
@@ -95,7 +104,6 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     search = _RaisingTool()
     cache = ToolCallCache()
     as_of = _AS_OF.isoformat()
-    # 预热缓存：与 resolve_and_prefetch 使用相同键
     sub_key = cache.key(
         "sec_submissions",
         {"cik": _CIK, "as_of_date": as_of, "requested_forms": "10-K,10-Q"},
@@ -103,15 +111,15 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     cache.put(sub_key, "cached-submissions")
     cache.put(cache.key("web_search", {"query": "MSFT", "as_of": as_of}), "cached-search")
 
-    identity = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
+    result = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
 
-    assert identity is not None
-    assert identity.cik == _CIK
+    assert result.company_identity is not None
+    assert result.company_identity.cik == _CIK
     assert submissions.calls == 0  # 命中缓存，未执行真实获取
     assert search.calls == 0
 
 
-def test_prefetch_returns_none_on_ambiguous_resolution() -> None:
+def test_prefetch_failed_status_on_ambiguous_resolution() -> None:
     resolver = _CountingTool(
         ToolSuccess(value=ResolveCompanyResponse(resolved=False, candidates=[_identity()]))
     )
@@ -119,14 +127,15 @@ def test_prefetch_returns_none_on_ambiguous_resolution() -> None:
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
-    identity = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
+    result = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
 
-    assert identity is None
+    assert result.company_identity is None
+    assert result.status == "failed"
     assert submissions.calls == 0  # 未解析则不预取
     assert search.calls == 0
 
 
-def test_prefetch_returns_none_on_resolve_failure() -> None:
+def test_prefetch_failed_status_on_resolve_failure() -> None:
     resolver = _CountingTool(
         ToolFailure(
             error=ToolError(error_code=ErrorCode.INPUT_INVALID, message="未找到公司: MSFT")
@@ -136,11 +145,41 @@ def test_prefetch_returns_none_on_resolve_failure() -> None:
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
-    identity = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
+    result = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
 
-    assert identity is None
+    assert result.company_identity is None
+    assert result.status == "failed"
     assert submissions.calls == 0
     assert search.calls == 0
+
+
+def test_prefetch_respects_tool_budget() -> None:
+    """预取执行计入每 Job 工具硬预算（与 Agent 调用共用同一 ToolBudget）。"""
+    resolver = _CountingTool(
+        ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
+    )
+    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
+    cache = ToolCallCache()
+    budget = ToolBudget(caps={"sec_submissions": 1, "web_search": 1})
+
+    # 第一次预取：消耗 1 次 sec_submissions + 1 次 web_search
+    result1 = resolve_and_prefetch(
+        _request(), _toolkit(resolver, submissions, search), cache, budget=budget
+    )
+    assert result1.company_identity is not None
+    assert result1.status == "ok"
+
+    # 第二次预取：预算耗尽（缓存已有结果会命中；但用不同缓存验证预算）
+    cache2 = ToolCallCache()
+    result2 = resolve_and_prefetch(
+        _request(), _toolkit(resolver, submissions, search), cache2, budget=budget
+    )
+    assert result2.company_identity is not None
+    # 预算耗尽：不再执行真实获取（摘要为空 → partial）
+    assert submissions.calls == 1
+    assert search.calls == 1
+    assert result2.status == "partial"
 
 
 def test_build_research_tools_cache_executes_once() -> None:

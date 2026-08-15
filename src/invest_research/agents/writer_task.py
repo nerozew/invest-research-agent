@@ -139,6 +139,7 @@ def build_writer_task(
     )
     return Task(
         description=(
+            "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
             "基于上游 research_pack 与 analysis_pack，按 writer_prompt_v1 规则撰写"
             "符合 ReportDraft 契约的中文投资研究初稿：每个事实带 citation key，"
             "区分事实/分析/风险/数据限制，包含非投资建议声明与数据截止日。"

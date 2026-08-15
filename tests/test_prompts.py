@@ -41,10 +41,14 @@ _REQUIRED_PHRASES: tuple[str, ...] = (
     "ResearchPack",
     "research_pack_v1",
     "CompanyResolver",
-    "GoogleSearch",
+    "WebSearch",
     "SECSubmissions",
     "SECCompanyFacts",
     "FilingDownloader",
+    # P05.5-fix 新增硬规则
+    "禁止自行选择其他截止日期",
+    "Action/Action Input",
+    "prefetch_summary",
     # 禁止项
     "禁止计算任何财务比率",
     "禁止撰写投资结论",
