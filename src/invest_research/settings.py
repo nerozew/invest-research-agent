@@ -42,7 +42,7 @@ class ResearchProfile(BaseModel):
                 analysis_max_iter=2,
                 writer_max_iter=1,
                 max_retry_limit=1,
-                max_execution_time=180,
+                max_execution_time=300,
                 max_rpm=60,
             )
         return cls(
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     llm_model_analysis: str = "qwen-max"
     llm_model_writer: str = "qwen-max"
     llm_temperature: float = 0.2
-    llm_timeout: float = 60.0
+    llm_timeout: float = 120.0
 
     # ---- SEC EDGAR 合规（见可靠性 §5.2：User-Agent 必须含联系邮箱）----
     sec_user_agent_contact: str

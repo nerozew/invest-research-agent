@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -62,6 +63,8 @@ __all__ = [
 _FACTS_MAX_ITEMS = 60
 # 搜索结果条数上限（Serper 分页已限 page_size ≤ 50，这里再收紧）
 _SEARCH_MAX_ITEMS = 20
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _tool_result_json(value: dict[str, Any]) -> str:
@@ -516,6 +519,8 @@ def resolve_and_prefetch(
                 f"- {f.form_type} | filed {f.filing_date.isoformat()} | {f.primary_document_url}"
                 for f in filings[:_SEARCH_MAX_ITEMS]
             ) or "（无 10-K/10-Q 申报记录）"
+        else:
+            _LOGGER.warning("prefetch sec_submissions 失败: %s", result.error.message)
 
     def fetch_search() -> None:
         nonlocal search_summary
@@ -534,6 +539,8 @@ def resolve_and_prefetch(
             search_summary = "\n".join(
                 f"- {r.title} | {r.url} | {r.publisher or ''}" for r in items
             ) or "（无搜索结果）"
+        else:
+            _LOGGER.warning("prefetch web_search 失败: %s", result.error.message)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(fetch_submissions), executor.submit(fetch_search)]
