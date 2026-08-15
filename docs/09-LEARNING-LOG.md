@@ -2151,3 +2151,22 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-04 ✅：生产配置与密钥管理（settings profiles + 密钥卫生）
+
+**产物**：`src/invest_research/settings.py`（`is_placeholder_secret` + `_production_secrets_guard` model_validator）、`tests/test_secrets_config.py`（11 测试）、`.env.example` 生产档位说明、`docs/10-RUN-GUIDE.md §7 生产配置与密钥管理`。
+
+### 3 个知识点
+
+1. **占位符检测是"生产 fail-fast"的关键**：`is_placeholder_secret()` 用特征标记（`your-` / `placeholder` / `change-me` / `xxx` / 空串 / 恰好 `secret`）识别"仍是占位符"的密钥。`environment=production` 时在 `Settings` 的 `model_validator(mode="after")` 里逐个校验 LLM_API_KEY / SERPER_API_KEY / SEC_USER_AGENT_CONTACT——**配置错误在进程启动瞬间暴露**，而不是跑到一半才发现带占位符跑生产。
+2. **profile 是"同一套字段、两套行为"**：`ENVIRONMENT=development` 允许占位符（本地演示/测试便利），`production` 严格拒绝——同一个 Settings 模型，用环境变量切换校验强度，不改代码。这是 12-factor 配置"环境决定行为"的实践。
+3. **密钥卫生可以写成自动化测试**：扫描 `.env.example` 不含真实密钥样式（`sk-*`、32+ 位长串、AWS/GitHub PAT 正则）、`.gitignore` 忽略 `.env` 且放行 `.env.example`、`compose.yml` 用 `${VAR:-占位符}` 注入且无真实密钥——把"密钥不进镜像/Git/日志/manifest"从口头约定变成机器可断言的回归。
+
+### 检查问题（请用自己的话回答）
+为什么占位符校验放在 `model_validator(mode="after")` 而不是把 `llm_api_key` 的 validator 直接设为必真值？development/production 两种档位下，同一字段的校验规则为什么可以不同？
+
+### 已知限制
+- 占位符检测基于特征标记，理论上真实的短密钥若恰好含 `your-` 等字样会被误判（概率极低，且只影响启动报错、不泄露）；
+- manifest/日志脱敏沿用 P05-05/P05.5 的既有实现，本任务只新增了配置层防线与仓库级测试，未改动运行时脱敏逻辑。
+
+---
+
