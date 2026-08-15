@@ -2011,3 +2011,64 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - 正式 100 次 live benchmark 禁止在本任务执行（明确属 P06-10）。
 
 ---
+
+## P05.5-1 ✅：性能记录（PerformanceRecorder + manifest.performance）
+
+**产物**：`src/invest_research/infrastructure/performance.py`、`flows/manifest.py`（performance 字段）、`infrastructure/real_tools.py`（工具计时）、`tests/test_performance.py`。
+
+### 3 个知识点
+
+1. **可观测性只记录「计数与耗时」，绝不记录「内容」**：`PerformanceRecorder` 只累计 Agent 耗时、工具调用次数/耗时、token 计数（prompt/completion/total tokens）；密钥、Authorization 头、完整 Prompt、模型输入输出正文一律不落盘。token usage 取 `CrewOutput.token_usage`，不可得时写 `null` 而不是造假。
+2. **Agent 耗时来自 CrewAI Task 的 start_time/end_time**：三 Agent 跑在同一个 `crew.kickoff()` 里，靠每个 `Task.start_time/end_time` 计算各自耗时；工具耗时在 real_tools 包装层用 context manager 计时——职责分离：Flow 采集 Agent 耗时、工具层自报工具耗时。
+3. **性能数据并入 manifest 但保持可复现**：`build_run_manifest` 增加 `performance` 参数，只有计数/耗时，不含任何敏感内容，因此 `test_live_e2e` 的「工件不含密钥」断言依然成立。
+
+### 检查问题（请用自己的话回答）
+为什么 token usage「能安全获取时记录、否则写 null」，而不是在拿不到时写 0？
+
+---
+
+## P05.5-2 ✅：fast/deep 研究档位（RESEARCH_PROFILE + ResearchProfile）
+
+**产物**：`settings.py`（`ResearchProfile` + `research_profile`）、三个 `*_task.py` 与 `crew_factory.py`（预算注入）、`tests/test_profile.py`。
+
+### 3 个知识点
+
+1. **预算集中到单一配置对象**：`ResearchProfile` 集中管理 research/analysis/writer 的 `max_iter`、`max_retry_limit`、`max_execution_time`（秒）、`max_rpm`，Agent 文件只读不写默认值——避免「每个 Agent 各写一份默认迭代」的散落。
+2. **fast/deep 只是同一配置对象的两种预算**：fast=3/2/1 iter、retry=1、180s、rpm=60；deep=15/10/5、retry=2、600s、rpm=None（完整能力），默认 deep 保证向后兼容。切换只改 `RESEARCH_PROFILE` 一个环境变量。
+3. **CrewAI RPMController 的非守护 Timer 泄漏**：`max_rpm` 非 None 时 CrewAI 1.6.1 启动 `threading.Timer(60.0, _reset_request_count)`（daemon=False 且循环自重建），测试里构造 fast Agent 后必须调 `agent._rpm_controller.stop_rpm_counter()`，否则 Python 卡在 `threading._shutdown` 不退出——这是「测试不退出」而非「测试失败」的经典陷阱。
+
+### 检查问题（请用自己的话回答）
+`max_execution_time` 用秒、`max_rpm` 用「请求/分钟」，两者分别限制的是「时间」和「频率」哪个维度的预算？
+
+---
+
+## P05.5-3 ✅：并行预取 + 每 Job 工具缓存
+
+**产物**：`infrastructure/tool_cache.py`（ToolCallCache）、`real_tools.py`（ResearchToolkit + prefetch + 缓存包装）、`infrastructure/flow_wiring.py`、`queue/worker.py`、`tests/test_tool_cache.py`、`tests/test_prefetch.py`。
+
+### 3 个知识点
+
+1. **缓存键 = 工具名 + 规范化参数**：`json.dumps(params, sort_keys=True, default=str)` 让「参数顺序不同但值相同」命中同一键；日期经 `default=str` 与 ISO 字符串对齐。缓存只存成功结果（失败不缓存，允许底层重试/兜底）。
+2. **并行只并「独立 I/O」**：公司解析（确定性）后用 `ThreadPoolExecutor(max_workers=2)` 并行 SEC submissions + Serper 搜索，各自先查缓存再决定是否取数；Analysis/Writer 依赖关系不变，不新增 Agent。prefetch 是 best-effort——失败由 Agent 工具兜底。
+3. **Toolkit 共享避免重复构造**：`ResearchToolkit` 把 5 个 P02 工具集中为一份，CrewAI 包装层与 prefetch 复用同一实例；缓存存「最终 JSON 串」，命中直接返回，序列化逻辑（`_unpack`/`_serialize_search_result`）抽成共享 helper。
+
+### 检查问题（请用自己的话回答）
+为什么缓存要「只存成功结果、不存失败结果」？如果把失败也缓存，会对重试机制造成什么破坏？
+
+---
+
+## P05.5-4 ✅：三角色模型配置 fail-fast
+
+**产物**：`agents/llm_factory.py`（模型名空白校验）、`tests/test_llm_factory.py`。
+
+### 3 个知识点
+
+1. **供应商/模型名绝不写死在逻辑里**：业务只表达 `LLMRole.RESEARCH/ANALYSIS/WRITER`，模型名从 `LLM_MODEL_*` 环境变量读，`LLMConfig.model_for(role)` 按角色返回——切供应商/模型只改 env，不改代码。
+2. **fail-fast 在构造期而非运行期**：`field_validator` 对三个模型名 strip 后判空，空/纯空白抛 `ValidationError`——配置错误在 `LLMConfig` 构造瞬间暴露，而不是跑到一半「模型名空」才炸；live 缺 key 同样 fail-fast，绝不降级 fake。
+3. **`extra="ignore"` 的静默陷阱**：`Settings` 的字段是 `llm_model_research`，测试里传 `model_research=` 会被 `extra="ignore"` 静默吞掉（不报错、用默认值）——断言「用错字段名」的测试必须用真实字段名，否则测了个寂寞。
+
+### 检查问题（请用自己的话回答）
+`Settings` 的 `extra="ignore"` 在你传错字段名（如 `model_research` 而非 `llm_model_research`）时会发生什么？这为什么让「配置错误 fail-fast」反而更危险？
+
+---
+

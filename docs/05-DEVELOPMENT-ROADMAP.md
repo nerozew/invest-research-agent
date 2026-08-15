@@ -199,6 +199,18 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P05-14 ✅ | 建立 20 公司 × 5 场景基准定义 | `evals/dataset.*` | 场景、行业和截止日固定 | evaluation design |
 | P05-15 ✅ | 实现 benchmark runner 和汇总 | runner + report template | fake/fixture 跑 100 条；输出成功率、P50/P95、失败分布 | SLO measurement |
 
+## Phase 5.5：性能优化（精简版，P05-13 之前的性能补齐）
+
+> 说明：只做四项性能优化，不改前端、不做优化前后 benchmark、不跑真实付费 LLM/SEC/Serper；
+> P05-13 仍保持未完成状态（不标 ✅，等待受控 live run）。
+
+| ID | 小任务 | 产物 | 验收 | 学习点 |
+|---|---|---|---|---|
+| P05.5-1 ✅ | 记录 Research/Analysis/Writer 耗时、工具耗时/调用次数、LLM token usage，写入 manifest.performance | `infrastructure/performance.py` + `flows/manifest.py` performance 字段 | 三 Agent 耗时、工具耗时/次数、token usage（不可得为 null）汇总进 07_manifest；不记录密钥/Authorization/完整 Prompt | performance telemetry |
+| P05.5-2 ✅ | 新增 RESEARCH_PROFILE=fast/deep（默认 deep），预算集中到 ResearchProfile | `settings.py` ResearchProfile + Agent 预算注入 | fast=3/2/1 iter、max_retry_limit=1、timeout=180s、max_rpm=60；deep 完整能力；参数集中在统一配置对象 | centralized budget |
+| P05.5-3 ✅ | 公司身份确认后并行 SEC/Serper/缓存查询 + 相同工具名+规范化参数单 Job 只执行一次 | `tool_cache.py` + prefetch + real_tools 缓存包装 | 解析后 ThreadPoolExecutor 并行预取并预热缓存；同参数只执行一次；保留限流/Retry-After/as_of_date | parallel I/O + memoization |
+| P05.5-4 ✅ | 三角色模型配置完善：LLM_MODEL_RESEARCH/ANALYSIS/WRITER 空名 fail-fast | llm_factory 校验 + tests | 空/空白模型名抛 ValidationError；不硬编码供应商/模型名；不降级 fake | fail-fast config |
+
 ## Phase 6：报告、本地部署与作品集收尾
 
 | ID | 小任务 | 产物 | 验收 | 学习点 |
