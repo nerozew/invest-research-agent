@@ -2093,3 +2093,22 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-01 ✅：用 Jinja2 固化 Markdown 报告模板
+
+**产物**：`src/invest_research/reporting/`（`renderer.py`：ReportRenderInput / ReportRenderer / build_render_input + `templates/report.md.j2`）、`tests/test_report_renderer.py`（15 测试）、`tests/fixtures/golden_report.md`（golden 基准）、`flow_wiring.py` 增加 `08_report.md` 落盘、`pyproject.toml` 增加 `jinja2>=3.1.0`（uv.lock 同步）。
+
+### 3 个知识点
+
+1. **golden test 的本质是把「渲染输出」变成版本化契约**：固定输入（含固定 `generated_at`）→ 渲染结果逐字节等于已入库的 `golden_report.md`。任何模板/转义/字段变更都会让 golden 失败，从而强制人工确认「是否真的要改变报告外观」——报告结构从此可回归。
+2. **模板骨架与 LLM 正文分离**：封面信息（公司/Ticker/CIK/截止日/生成时间）、来源清单与引用、结构化数据限制、固定免责声明由 Jinja2 确定性生成；Writer 初稿的 `ReportDraft.markdown` 原样嵌入（不篡改 grounded content）。即使 LLM 输出漂移，骨架章节与引用格式保持稳定。
+3. **Jinja2 空白控制的两个坑**：`lstrip_blocks=True` 会吞掉列表项之间的换行（`{% endfor %}` 前的空白被剥离）；行尾内联 `{% endif %}` 后的换行会被 `trim_blocks` 吃掉。解决办法是把「来源行」的拼装移到 Python 侧（模板全局函数 `source_line`），模板里每行只输出纯文本——这是「模板只管结构、格式逻辑放代码」的实践。
+
+### 检查问题（请用自己的话回答）
+为什么「把来源列表项拼成一行文本」的逻辑放在 Python 侧（模板全局函数）而不是用模板内联 `{% if %}` 拼？`trim_blocks` / `lstrip_blocks` 对行尾换行的影响分别是什么？
+
+### 已知限制
+- 模板正文透传 LLM 初稿，未对初稿做章节拆分/重排（章节级确定性依赖质量门禁与 Writer 提示词）；
+- 渲染输入不含引用键→来源的映射（citation_keys 只输出键名列表，来源清单来自 ResearchPack.sources），映射关系属后续任务。
+
+---
+
