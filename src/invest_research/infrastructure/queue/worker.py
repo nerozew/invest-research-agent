@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
@@ -24,12 +25,14 @@ from sqlalchemy.orm import Session
 from invest_research.application.execution import ExecuteResearchJobService
 from invest_research.domain.models import ResearchRequest
 from invest_research.infrastructure.db.repositories import JobRepository
+from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.queue.celery_app import create_celery_app
 from invest_research.infrastructure.queue.flow_adapter import (
     ResearchFlowRunner,
     ResearchJobExecutionHandler,
 )
 from invest_research.infrastructure.queue.tasks import register_tasks
+from invest_research.infrastructure.tool_cache import ToolCallCache
 
 __all__ = ["celery_app"]
 
@@ -71,10 +74,51 @@ def _build_live_research_tools(
     - 返回 from real_tools.build_research_tools 的 CrewAI 工具列表。
     """
     from invest_research.infrastructure.live_resources import build_live_client_and_serper
-    from invest_research.infrastructure.real_tools import build_research_tools
+    from invest_research.infrastructure.real_tools import (
+        build_research_toolkit,
+        build_research_tools,
+    )
 
     client, serper = build_live_client_and_serper(settings)
-    return build_research_tools(client=client, serper=serper, stats=stats)
+    toolkit = build_research_toolkit(client=client, serper=serper)
+    return build_research_tools(toolkit=toolkit, stats=stats)
+
+
+@dataclass
+class LiveResearchComponents:
+    """live 模式组装的完整研究组件（工具 + 缓存 + 计时 + 并行预取）。"""
+
+    research_tools: list[Any]
+    cache: ToolCallCache
+    recorder: PerformanceRecorder
+    prefetch: Callable[[ResearchRequest], Any]
+
+
+def _build_live_components(
+    settings: Any, stats: dict[str, int] | None = None
+) -> LiveResearchComponents:
+    """构建 live 模式的工具、缓存、性能记录器与并行预取（P05.5）。"""
+    from invest_research.infrastructure.live_resources import build_live_client_and_serper
+    from invest_research.infrastructure.real_tools import (
+        build_research_prefetcher,
+        build_research_toolkit,
+        build_research_tools,
+    )
+
+    client, serper = build_live_client_and_serper(settings)
+    toolkit = build_research_toolkit(client=client, serper=serper)
+    cache = ToolCallCache()
+    recorder = PerformanceRecorder()
+    research_tools = build_research_tools(
+        toolkit=toolkit, stats=stats, recorder=recorder, cache=cache
+    )
+    prefetch = build_research_prefetcher(toolkit=toolkit, cache=cache, recorder=recorder)
+    return LiveResearchComponents(
+        research_tools=research_tools,
+        cache=cache,
+        recorder=recorder,
+        prefetch=prefetch,
+    )
 
 
 def _default_flow_runner() -> ResearchFlowRunner:
@@ -93,8 +137,15 @@ def _default_flow_runner() -> ResearchFlowRunner:
 
     settings = get_settings()
     stats: dict[str, int] = {}
-    research_tools = _build_live_research_tools(settings, stats=stats)
-    runner = build_flow_runner(settings, research_tools=research_tools, stats=stats)
+    components = _build_live_components(settings, stats=stats)
+    runner = build_flow_runner(
+        settings,
+        research_tools=components.research_tools,
+        stats=stats,
+        recorder=components.recorder,
+        cache=components.cache,
+        prefetch=components.prefetch,
+    )
     return runner  # type: ignore[return-value]
 
 

@@ -45,6 +45,7 @@ from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.live_resources import FlowModeError
 from invest_research.infrastructure.performance import PerformanceRecorder, extract_token_usage
 from invest_research.infrastructure.queue.flow_adapter import ResearchFlowRunner
+from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.settings import ResearchProfile, Settings
 
 __all__ = [
@@ -84,6 +85,8 @@ class LiveResearchFlowRunner:
         stats: dict[str, int] | None = None,
         recorder: PerformanceRecorder | None = None,
         profile: ResearchProfile | None = None,
+        cache: ToolCallCache | None = None,
+        prefetch: Callable[[ResearchRequest], Any] | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -105,6 +108,10 @@ class LiveResearchFlowRunner:
         self._stats = stats if stats is not None else {}
         # 性能记录（P05.5）：工具耗时/Agent 耗时/token usage 汇总到 manifest.performance
         self._recorder = recorder if recorder is not None else PerformanceRecorder()
+        # 工具缓存（P05.5：相同工具名+规范化参数单 Job 只执行一次；可选）
+        self._cache = cache
+        # 公司解析后并行预取（P05.5 best-effort；可选）
+        self._prefetch = prefetch
 
     @property
     def config(self) -> LLMConfig:
@@ -128,6 +135,14 @@ class LiveResearchFlowRunner:
         （绝不偷偷调用 fake）。
         """
         started_at = time.time()
+
+        # 0. 公司身份确认后并行预取（best-effort，失败不影响 Agent 兜底）
+        if self._prefetch is not None:
+            try:
+                self._prefetch(request)
+            except Exception:
+                # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
+                pass
 
         # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）
         crew = self._crew_factory(self._config, self._research_tools)
@@ -307,6 +322,8 @@ def build_flow_runner(
     stats: dict[str, int] | None = None,
     recorder: PerformanceRecorder | None = None,
     profile: ResearchProfile | None = None,
+    cache: ToolCallCache | None = None,
+    prefetch: Callable[[ResearchRequest], Any] | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
@@ -327,4 +344,6 @@ def build_flow_runner(
         stats=stats,
         recorder=recorder,
         profile=resolved_profile,
+        cache=cache,
+        prefetch=prefetch,
     )
