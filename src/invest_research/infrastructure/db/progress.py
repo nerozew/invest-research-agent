@@ -3,6 +3,11 @@
 - 每个操作独立短事务（每次新建 session），进度写入失败不影响任务本身；
 - 幂等创建 00-07 步骤（重复 Celery 投递复用 ``uq_workflow_steps_job_step`` 唯一约束）；
 - 合法状态转换防护：只更新允许的来源状态；
+- P06-06B 正确性收口不变量：
+  - 同一 Job 最多一个 running 步骤（``mark_step_running`` 带"无其它 running"条件）；
+  - ``current_step`` 只指向 running 步骤；步骤进入终态（succeeded/failed）时清空；
+  - ``mark_step_running`` 成功时 ``attempt_count`` 原子 +1；
+  - 取消收口（``cancel_pending_steps``）：running→skipped、pending→skipped、清空 current_step；
 - 错误摘要脱敏：只保存错误码与脱敏错误消息（不含 key/token/内部路径/完整 prompt）；
 - 写失败抛 ``StepRecordError``，由调用方记录脱敏日志后继续任务（不误报失败）。
 
@@ -14,19 +19,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+# SQLAlchemy 2.0 的 session.execute(update(...)) 返回 CursorResult（mypy 类型收窄）。
+# mypy 只看到 Result[Any] 时没有 rowcount；这里显式收窄到 CursorResult。
+from typing import Any, cast
+
+from sqlalchemy import exists, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
 
 from invest_research.application.progress import STEP_NAMES, STEP_SEQUENCE, StepRecordError
 from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
 from invest_research.infrastructure.db.models import WorkflowStep as WorkflowStepORM
 from invest_research.infrastructure.db.repositories import SessionFactory
-
-# SQLAlchemy 2.0 的 session.execute(update(...)) 返回 CursorResult（mypy 类型收窄）。
-# mypy 只看到 Result[Any] 时没有 rowcount；这里显式收窄到 CursorResult。
-from typing import Any, cast
-
-from sqlalchemy.engine import CursorResult
 
 # 步骤开始/结束的合法来源状态（对齐 domain.status.StepTransitions 的应用子集）。
 _STARTABLE_SOURCES = ("pending", "failed_retryable")
@@ -41,12 +45,25 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class SqlProgressSink:
-    """ProgressSink 的 SQLAlchemy 实现（独立短事务、幂等创建、合法状态转换）。
+def _other_running_exists(job_id: uuid.UUID, step_name: str) -> Any:
+    """同 Job 是否存在其它 running 步骤（排除当前步骤）。
 
-    构造参数：``session_factory``（与 JobRepository 相同的 SessionFactory 类型）。
-    本类不共享 session；每个方法独立 ``with self._sf() as session``。
+    用于 ``mark_step_running`` 的唯一 running 不变量：
+    只有"当前 Job 没有其它 running 步骤"时才允许新步骤进入 running。
     """
+    return (
+        exists(
+            select(WorkflowStepORM.id).where(
+                WorkflowStepORM.job_id == job_id,
+                WorkflowStepORM.step_name != step_name,
+                WorkflowStepORM.status == "running",
+            )
+        )
+    )
+
+
+class SqlProgressSink:
+    """ProgressSink 的 SQLAlchemy 实现（独立短事务、幂等创建、合法状态转换）。"""
 
     def __init__(self, session_factory: SessionFactory) -> None:
         self._sf = session_factory
@@ -88,7 +105,13 @@ class SqlProgressSink:
                 raise StepRecordError(f"初始化步骤失败 job={job_id}: {exc}") from exc
 
     def mark_step_running(self, job_id: uuid.UUID, step_name: str) -> None:
-        """步骤开始：pending/failed_retryable → running，写 started_at + current_step。"""
+        """步骤开始：pending/failed_retryable → running，写 started_at + current_step。
+
+        不变量（P06-06B 收口）：
+        - 同一 Job 最多一个 running：存在其它 running 步骤时本更新不生效（安全无操作）；
+        - 成功时 attempt_count 原子 +1；
+        - 只有更新成功才设置 current_step（保证 current_step 只指向 running 步骤）。
+        """
         with self._sf() as session:
             try:
                 result = cast(
@@ -99,11 +122,16 @@ class SqlProgressSink:
                             WorkflowStepORM.job_id == job_id,
                             WorkflowStepORM.step_name == step_name,
                             WorkflowStepORM.status.in_(_STARTABLE_SOURCES),
+                            ~_other_running_exists(job_id, step_name),
                         )
-                        .values(status="running", started_at=_now())
+                        .values(
+                            status="running",
+                            started_at=_now(),
+                            attempt_count=WorkflowStepORM.attempt_count + 1,
+                        )
                     ),
                 )
-                # 只有步骤存在且来源合法才更新 current_step（避免旧步骤误设）
+                # 只有步骤真正进入 running 才设置 current_step（避免旧步骤误设）
                 if result.rowcount > 0:
                     session.execute(
                         update(ResearchJobORM)
@@ -118,18 +146,26 @@ class SqlProgressSink:
                 ) from exc
 
     def mark_step_succeeded(self, job_id: uuid.UUID, step_name: str) -> None:
-        """步骤成功：running → succeeded，写 completed_at（保留 attempt_count）。"""
+        """步骤成功：running → succeeded，写 completed_at（保留 attempt_count）。
+
+        成功后若 current_step 仍指向该步骤则清空（current_step 只指向 running 步骤）。
+        """
         with self._sf() as session:
             try:
-                session.execute(
-                    update(WorkflowStepORM)
-                    .where(
-                        WorkflowStepORM.job_id == job_id,
-                        WorkflowStepORM.step_name == step_name,
-                        WorkflowStepORM.status.in_(_SUCCEEDABLE_SOURCES),
-                    )
-                    .values(status="succeeded", completed_at=_now())
+                result = cast(
+                    CursorResult[Any],
+                    session.execute(
+                        update(WorkflowStepORM)
+                        .where(
+                            WorkflowStepORM.job_id == job_id,
+                            WorkflowStepORM.step_name == step_name,
+                            WorkflowStepORM.status.in_(_SUCCEEDABLE_SOURCES),
+                        )
+                        .values(status="succeeded", completed_at=_now())
+                    ),
                 )
+                if result.rowcount > 0:
+                    self._clear_current_step_if_matches(session, job_id, step_name)
                 session.commit()
             except SQLAlchemyError as exc:
                 session.rollback()
@@ -146,26 +182,34 @@ class SqlProgressSink:
         error_message: str,
         terminal: bool,
     ) -> None:
-        """步骤失败：running → failed_retryable/failed_terminal，保存脱敏错误摘要。"""
+        """步骤失败：running → failed_retryable/failed_terminal，保存脱敏错误摘要。
+
+        失败后若 current_step 仍指向该步骤则清空（current_step 只指向 running 步骤）。
+        """
         sanitized = (error_message or "")[:_MAX_ERROR_MESSAGE]
         with self._sf() as session:
             try:
-                session.execute(
-                    update(WorkflowStepORM)
-                    .where(
-                        WorkflowStepORM.job_id == job_id,
-                        WorkflowStepORM.step_name == step_name,
-                        WorkflowStepORM.status.in_(_FAILABLE_SOURCES),
-                    )
-                    .values(
-                        status="failed_terminal" if terminal else "failed_retryable",
-                        completed_at=_now(),
-                        error_json={
-                            "error_code": error_code,
-                            "error_message": sanitized,
-                        },
-                    )
+                result = cast(
+                    CursorResult[Any],
+                    session.execute(
+                        update(WorkflowStepORM)
+                        .where(
+                            WorkflowStepORM.job_id == job_id,
+                            WorkflowStepORM.step_name == step_name,
+                            WorkflowStepORM.status.in_(_FAILABLE_SOURCES),
+                        )
+                        .values(
+                            status="failed_terminal" if terminal else "failed_retryable",
+                            completed_at=_now(),
+                            error_json={
+                                "error_code": error_code,
+                                "error_message": sanitized,
+                            },
+                        )
+                    ),
                 )
+                if result.rowcount > 0:
+                    self._clear_current_step_if_matches(session, job_id, step_name)
                 session.commit()
             except SQLAlchemyError as exc:
                 session.rollback()
@@ -214,6 +258,54 @@ class SqlProgressSink:
                     f"收口 running 步骤失败 job={job_id}: {exc}"
                 ) from exc
 
+    def cancel_pending_steps(self, job_id: uuid.UUID) -> None:
+        """Job 取消时收口步骤（P06-06B 收口）。
+
+        - running → skipped（当前执行中的步骤）；
+        - pending → skipped（后续未开始步骤）；
+        - succeeded/failed_retryable/failed_terminal 保留（不删除历史）；
+        - 清空 research_jobs.current_step；
+        - 幂等：重复调用不改变任何状态。
+        """
+        with self._sf() as session:
+            try:
+                # running → skipped（只更新 running 来源）
+                session.execute(
+                    update(WorkflowStepORM)
+                    .where(
+                        WorkflowStepORM.job_id == job_id,
+                        WorkflowStepORM.status == "running",
+                    )
+                    .values(status="skipped", completed_at=_now())
+                )
+                # pending → skipped（只更新 pending 来源；已成功/已失败不受影响）
+                session.execute(
+                    update(WorkflowStepORM)
+                    .where(
+                        WorkflowStepORM.job_id == job_id,
+                        WorkflowStepORM.status == "pending",
+                    )
+                    .values(status="skipped")
+                )
+                # 清空 current_step（取消后无任何 running 步骤）
+                session.execute(
+                    update(ResearchJobORM)
+                    .where(ResearchJobORM.id == job_id)
+                    .values(current_step=None)
+                )
+                session.commit()
+            except SQLAlchemyError as exc:
+                session.rollback()
+                raise StepRecordError(f"取消收口步骤失败 job={job_id}: {exc}") from exc
+
+    def cleanup_steps(self, job_id: uuid.UUID) -> None:
+        """CancelStepCleanup 端口适配：委托给 ``cancel_pending_steps``。
+
+        取消服务在任务真正取消成功后调用本方法收口步骤（不做任何自己的逻辑，
+        保证二处收口语义完全一致）。
+        """
+        self.cancel_pending_steps(job_id)
+
     def clear_current_step(self, job_id: uuid.UUID) -> None:
         """Job 进入终态时清空 research_jobs.current_step。"""
         with self._sf() as session:
@@ -227,3 +319,25 @@ class SqlProgressSink:
             except SQLAlchemyError as exc:
                 session.rollback()
                 raise StepRecordError(f"清空 current_step 失败 job={job_id}: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # 内部辅助
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clear_current_step_if_matches(
+        session: Any, job_id: uuid.UUID, step_name: str
+    ) -> None:
+        """仅当 current_step 仍指向该步骤时清空（条件更新，防误清其它 running 步骤）。
+
+        场景：某步骤进入终态，但另一个代码路径可能已经把 current_step 指向了
+        下一步；此时绝不能把下一步的 current_step 清掉。用 WHERE 条件精确限定。
+        """
+        session.execute(
+            update(ResearchJobORM)
+            .where(
+                ResearchJobORM.id == job_id,
+                ResearchJobORM.current_step == step_name,
+            )
+            .values(current_step=None)
+        )

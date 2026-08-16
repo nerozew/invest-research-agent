@@ -6,7 +6,7 @@ import uuid
 from datetime import date
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -217,12 +217,29 @@ def test_mark_step_failed_retryable(session_factory) -> None:
 
 
 def test_fail_all_running_steps_collects_and_clears_current_step(session_factory) -> None:
+    """fail_all_running_steps 收口所有 running 步骤（即使多个 running 的历史脏数据）。
+
+    P06-06B 收口后正常流程不会再出现多个 running（mark_step_running 强制唯一
+    running）；这里用 SQL 直接构造"历史脏数据/异常并发"产生的多个 running 场景，
+    验证收口逻辑仍然全部处理、不留任何 running。
+    """
     sink = SqlProgressSink(session_factory)
     job_id = uuid.uuid4()
     _create_job(session_factory, job_id)
     sink.initialize_steps(job_id)
+    # 正常流程：04_analysis 进入 running
     sink.mark_step_running(job_id, "04_analysis")
-    sink.mark_step_running(job_id, "05_writer")
+    # 模拟历史脏数据：直接 SQL 把 05_writer 也置为 running（绕过唯一 running 防线）
+    with session_factory() as session:
+        session.execute(
+            update(WorkflowStep)
+            .where(
+                WorkflowStep.job_id == job_id,
+                WorkflowStep.step_name == "05_writer",
+            )
+            .values(status="running")
+        )
+        session.commit()
     # 已成功的步骤不应被改
     with session_factory() as session:
         row = session.execute(

@@ -37,6 +37,7 @@ from invest_research.infrastructure.db.base import (
     create_db_engine,
     create_session_factory,
 )
+from invest_research.infrastructure.db.progress import SqlProgressSink
 from invest_research.infrastructure.db.repositories import SessionFactory
 from invest_research.infrastructure.queue.celery_app import create_celery_app
 from invest_research.infrastructure.queue.job_dispatcher import CeleryJobDispatcher
@@ -65,6 +66,7 @@ class ProductionContainer:
         job_list_store: SqlJobListStore,
         idempotency_store: SqlIdempotencyStore,
         cancel_status_writer: SqlCancelStatusWriter,
+        progress_sink: SqlProgressSink,
         artifact_catalog_store: SqlArtifactCatalogStore,
         artifact_content_store: SqlArtifactContentStore,
         dispatcher: CeleryJobDispatcher,
@@ -81,6 +83,7 @@ class ProductionContainer:
         self.job_list_store = job_list_store
         self.idempotency_store = idempotency_store
         self.cancel_status_writer = cancel_status_writer
+        self.progress_sink = progress_sink
         self.artifact_catalog_store = artifact_catalog_store
         self.artifact_content_store = artifact_content_store
         self.dispatcher = dispatcher
@@ -113,6 +116,8 @@ def create_production_app(
     job_list_store = SqlJobListStore(session_factory)
     idempotency_store = SqlIdempotencyStore(session_factory)
     cancel_status_writer = SqlCancelStatusWriter(session_factory)
+    # P06-06B 收口：取消服务收口步骤（running→skipped、pending→skipped、清空 current_step）
+    progress_sink = SqlProgressSink(session_factory)
     artifact_catalog_store = SqlArtifactCatalogStore(session_factory)
     artifact_content_store = SqlArtifactContentStore(session_factory, resolved.artifact_root)
 
@@ -134,6 +139,7 @@ def create_production_app(
         job_list_store=job_list_store,
         idempotency_store=idempotency_store,
         cancel_status_writer=cancel_status_writer,
+        progress_sink=progress_sink,
         artifact_catalog_store=artifact_catalog_store,
         artifact_content_store=artifact_content_store,
         dispatcher=dispatcher,
@@ -150,6 +156,7 @@ def create_production_app(
         job_list_store=job_list_store,
         idempotency_store=idempotency_store,
         cancel_status_writer=cancel_status_writer,
+        cancel_step_cleanup=progress_sink,
         artifact_catalog_store=artifact_catalog_store,
         artifact_content_store=artifact_content_store,
         job_dispatcher=dispatcher,

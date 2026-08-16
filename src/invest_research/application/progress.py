@@ -87,6 +87,15 @@ class ProgressSink(Protocol):
         """Job 失败时把所有仍为 running 的步骤收口为 failed_terminal 并清空 current_step。"""
         ...
 
+    def cancel_pending_steps(self, job_id: uuid.UUID) -> None:
+        """Job 取消时收口步骤：当前 running → skipped；后续 pending → skipped。
+
+        - 已成功/已失败的步骤保留（不删除历史）；
+        - 清空 research_jobs.current_step；
+        - 幂等：重复调用不改变任何状态。
+        """
+        ...
+
     def clear_current_step(self, job_id: uuid.UUID) -> None:
         """Job 进入终态时清空 research_jobs.current_step。"""
         ...

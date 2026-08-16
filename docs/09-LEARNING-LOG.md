@@ -2263,4 +2263,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-06B 收口：步骤状态不变量 + 取消清理 + 前端中国时区 ✅
+
+**产物**：`tests/test_progress_invariants.py`（10 条不变量）、`SqlProgressSink` 唯一 running 条件 + attempt_count 原子 +1 + 终态清空 current_step、`CancelStepCleanup` 端口 + `cancel_pending_steps`（running/pending→skipped）、`_RepoLoader` 请求加载后立即标记 00 成功、`tests/test_cancellation_cleanup.py`、前端中国时区 `format_cn_time`（Asia/Shanghai，简化格式 `26-08-16 18:21`）+ 列表/详情开始/结束/耗时 + `tests/test_frontend_cn_time.py`。
+
+### 3 个知识点
+
+1. **"唯一 running"不变量放在 SQL 条件里，而非应用层先查后改**；`current_step` 只在行更新成功后才设置。
+2. **current_step 是"派生视图"而非独立状态**：步骤进入终态时用 `WHERE current_step = step_name` 条件更新，只清仍指向该步骤的指针。
+3. **后端统一存 UTC，前端只做展示层时区转换**：`format_cn_time` 转 Asia/Shanghai 并简化格式，不改后端存储。
+
+### 检查问题（请用自己的话回答）
+为什么"唯一 running"必须放进 SQL 的 WHERE 条件而不是用"先 SELECT 再 UPDATE"实现？`format_cn_time` 为什么只做展示层转换而不改后端存储？
+
+### 已知限制
+- 已收口 2 个误触发孤儿任务（e38d85f0/73ec29cf → cancelled、current_step=null、无 running、pending 已 skipped）；未删除数据库行/工件；
+- fake smoke（fast+deep）验证最多一个 running、current_step 与 running 一致、8 步终态合理、attempt_count≥1、无 SEC/Serper/模型调用；
+- 模型配置仅复核：.env 精确模型名 Research/Analysis=qwen3.6-flash、Writer=qwen3.5-plus、thinking=false；容器已读取新配置；未硬编码/未改 .env/未做逐角色 thinking 与真实连接测试。
+
+---
 

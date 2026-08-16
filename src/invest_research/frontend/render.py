@@ -1,18 +1,16 @@
-"""前端共享展示函数（P04-UI-07/09/10 + P06-06A/B）。
+"""前端共享展示函数（P04-UI-07/09/10 + P06-06A/B + 时区/耗时增强）。
 
-把所有页面都要用的业务状态判断收口在这里，避免把状态判断逻辑复制到多个页面：
-- 状态中文标签（含 emoji）
-- 终态判断
-- failed/partial 的可读建议
-- job 快照的页面渲染（任务总览 + 步骤表）
-- 任务列表表格行构建
-- P06-06A：研究档位徽章（⚡ 快速 / 🔬 深度）
-- P06-06B：当前阶段中文文案、步骤状态紧凑图标、旧任务兼容文案
-
-纯展示函数不发起任何网络请求；页面只负责编排 st.* 组件。
+- 状态中文标签（含 emoji）、终态判断、错误建议
+- job 快照渲染（任务总览 + 步骤表）、任务列表行构建
+- P06-06A：档位徽章；P06-06B：当前阶段中文、步骤图标、旧任务兼容
+- P06-06B 收口：中国时区（Asia/Shanghai）简化时间格式（26-08-16 18:21），
+  列表/详情展示开始、结束、耗时（后端已提供 started_at/completed_at/duration_seconds）。
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -26,12 +24,16 @@ __all__ = [
     "STEP_STATUS_ICONS",
     "current_stage_label",
     "error_suggestion",
+    "format_cn_time",
     "is_terminal_status",
     "job_list_row",
     "profile_badge",
     "render_job_snapshot",
     "status_label",
 ]
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+_CN_TIME_FMT = "%y-%m-%d %H:%M"
 
 STATUS_LABELS: dict[str, str] = {
     "pending": "⏳ 等待中",
@@ -57,8 +59,7 @@ ERROR_SUGGESTIONS: dict[str, str] = {
     "UNKNOWN": "发生未知错误，请查看错误信息并重试。",
 }
 
-# P06-06B：current_step 名称 → 当前阶段中文文案（前端只显示真实业务阶段，
-# 不显示虚假百分比、ETA 或模型思维过程）。
+# P06-06B：current_step 名称 → 当前阶段中文文案。
 CURRENT_STAGE_LABELS: dict[str, str] = {
     "00_request": "正在初始化任务",
     "01_company_resolve": "正在解析公司",
@@ -70,7 +71,7 @@ CURRENT_STAGE_LABELS: dict[str, str] = {
     "07_manifest": "正在生成最终工件",
 }
 
-# P06-06B：步骤状态 → 紧凑图标（⏳ 等待 / 🔄 进行中 / ✅ 完成 / ❌ 失败 / ⏭ 跳过）。
+# P06-06B：步骤状态 → 紧凑图标。
 STEP_STATUS_ICONS: dict[str, str] = {
     "pending": "⏳ 等待",
     "running": "🔄 进行中",
@@ -85,6 +86,29 @@ PROFILE_BADGES: dict[str, str] = {
     "fast": "⚡ 快速",
     "deep": "🔬 深度",
 }
+
+
+def format_cn_time(value: datetime | None) -> str:
+    """把后端时间转为中国时区并简化展示（``26-08-16 18:21``）。
+
+    后端存 UTC（timezone-aware）；前端统一转 Asia/Shanghai。
+    缺失/未开始返回 "—"。
+    """
+    if value is None:
+        return "—"
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(_CN_TZ).strftime(_CN_TIME_FMT)
+
+
+def _format_duration(seconds: float | None) -> str:
+    """把耗时秒数转成可读文本（如 12.3s / 2分05秒）；缺失返回 "—"。"""
+    if seconds is None:
+        return "—"
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}分{secs:02d}秒"
 
 
 def status_label(status: JobStatus | str) -> str:
@@ -107,7 +131,7 @@ def error_suggestion(error_code: str | None) -> str | None:
 
 
 def profile_badge(research_profile: str | None) -> str:
-    """把档位名转成徽章文本；旧响应缺字段时回退 deep（兼容旧客户端/旧任务）。"""
+    """把档位名转成徽章文本；旧响应缺字段时回退 deep。"""
     if not research_profile:
         return PROFILE_BADGES["deep"]
     return PROFILE_BADGES.get(research_profile, research_profile)
@@ -128,18 +152,19 @@ def _step_status_icon(step_status: StepStatus | str) -> str:
 
 def job_list_row(entry: JobListEntry) -> dict[str, str]:
     """把列表条目转成表格行（不含内部路径/密钥）。"""
-    created = entry.created_at.strftime("%Y-%m-%d %H:%M") if entry.created_at else "—"
     return {
         "公司": entry.input_company,
         "档位": profile_badge(entry.research_profile),
         "状态": status_label(entry.status),
-        "创建时间": created,
+        "创建时间": format_cn_time(entry.created_at),
+        "开始时间": format_cn_time(entry.started_at),
+        "结束时间": format_cn_time(entry.completed_at),
         "当前阶段": current_stage_label(entry.current_step) or "—",
     }
 
 
 def render_job_snapshot(snapshot: JobSnapshot) -> None:
-    """渲染任务总览 + 步骤表（P04-UI-03/09/10 共用，避免复制判断逻辑）。"""
+    """渲染任务总览 + 步骤表（任务/详情共用）。"""
     st.subheader("任务总览")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -149,6 +174,14 @@ def render_job_snapshot(snapshot: JobSnapshot) -> None:
     with col3:
         stage = current_stage_label(snapshot.current_step)
         st.metric("当前阶段", stage or "—")
+
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        st.metric("开始时间", format_cn_time(snapshot.started_at))
+    with col5:
+        st.metric("结束时间", format_cn_time(snapshot.completed_at))
+    with col6:
+        st.metric("总耗时", _format_duration(snapshot.duration_seconds))
 
     # P06-06B：当前阶段醒目文字（只显示真实业务阶段，不显示虚假百分比/ETA）
     if stage is not None and snapshot.status == JobStatus.RUNNING:
@@ -175,9 +208,7 @@ def render_job_snapshot(snapshot: JobSnapshot) -> None:
                 "名称": step.step_name,
                 "状态": _step_status_icon(step.status),
                 "尝试次数": str(step.attempt_count),
-                "耗时 (秒)": (
-                    f"{step.duration_seconds:.3f}" if step.duration_seconds is not None else "—"
-                ),
+                "耗时": _format_duration(step.duration_seconds),
                 "错误码": step.error_code or "—",
             }
         )

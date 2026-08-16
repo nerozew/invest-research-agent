@@ -75,6 +75,16 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 
 - `21b3133` feat(p06-06a): add per-job research profile to frontend（前端档位单选 + 徽章）
 - `f7034e6` feat(p06-06b): real-time step progress with SqlProgressSink and minimal frontend stage display（ProgressSink + 步骤标记 + 前端阶段映射 + 测试 + 文档）
+- P06-06B 收口新增本地 commit（未 push）：`fix(p06-06b): enforce real-time progress invariants and cancellation cleanup`
+
+### P06-06B 收口要点（2026-08-16）
+
+- **状态不变量**：唯一 running（SQL NOT EXISTS）、current_step 只指向 running、终态清空、attempt_count 原子 +1、00 在 01 前 succeeded；
+- **取消收口**：DELETE 经 CancelStepCleanup 端口（SqlProgressSink.cancel_pending_steps）把 running/pending→skipped、清空 current_step、不删历史；
+- **孤儿任务已收口（未删行/工件）**：e38d85f0/73ec29cf → cancelled、current_step=null、无 running、pending 已 skipped；
+- **fake smoke（fast+deep）**：唯一 running、current_step 与 running 一致、8 步顺序正确、attempt≥1、终态 null、fast/deep 正确、日志无 SEC/Serper/真实模型调用；
+- **模型配置（仅复核）**：容器已读取 .env：Research/Analysis=qwen3.6-flash、Writer=qwen3.5-plus、thinking=false；建议 Research 快速模型（thinking=false）、Analysis 更强非思考模型（额度不足用 Flash）、Writer 写作质量模型（thinking=false）；Analysis 是否开 thinking 需后续固定评测决定；
+- **前端增强**：中国时区（Asia/Shanghai）简化格式 + 列表/详情创建/开始/结束时间与总耗时。
 
 最终验证：相关测试 87 passed；Ruff `All checks passed`；`mypy src` 110 个源文件全绿；
 0007 迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过；fast/deep fake smoke 通过

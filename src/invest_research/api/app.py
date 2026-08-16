@@ -46,6 +46,7 @@ from invest_research.application.artifacts import (
 from invest_research.application.cancellation import (
     CancelResearchJobService,
     CancelStatusWriter,
+    CancelStepCleanup,
 )
 from invest_research.application.idempotency import (
     CreateResearchJobIdempotentService,
@@ -114,6 +115,7 @@ def create_app(
     artifact_content_store: ArtifactContentStore | None = None,
     idempotency_store: IdempotencyStore | None = None,
     cancel_status_writer: CancelStatusWriter | None = None,
+    cancel_step_cleanup: CancelStepCleanup | None = None,
     job_dispatcher: JobDispatcher | None = None,
     outbox_relay_service: OutboxRelayService | None = None,
 ) -> FastAPI:
@@ -148,7 +150,10 @@ def create_app(
         else None
     )
     cancel_job_service = (
-        CancelResearchJobService(writer=cancel_status_writer)
+        CancelResearchJobService(
+            writer=cancel_status_writer,
+            cleanup=cancel_step_cleanup,
+        )
         if cancel_status_writer is not None
         else None
     )

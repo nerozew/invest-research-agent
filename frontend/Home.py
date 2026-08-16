@@ -1,12 +1,11 @@
-"""Streamlit 多页面应用 —— 首页：任务中心（P04-UI-07）。
+"""Streamlit 多页面应用 —— 首页：任务中心（P04-UI-07 + 时区/耗时增强）。
 
 功能：
 - 只调用 FastAPI 的 GET /v1/research-jobs 获取最近任务（架构 §11）；
-- 展示公司、状态（中文标签）、创建时间、当前步骤；
+- 展示公司、状态（中文标签）、创建/开始/结束时间（中国时区简化格式）、耗时、当前步骤；
 - 支持按状态筛选与下一页/上一页（cursor 分页）；
 - 空列表显示明确空状态；API 错误显示可读错误 + 重试按钮；
 - 每一行提供"查看详情"导航；
-- 刷新后重新向后端读取（不把完整列表只保存在 session_state）；
 - 另附系统健康状态（/health 与 /readiness）。
 
 前端只通过 HTTP 访问业务能力。
@@ -20,7 +19,7 @@ from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
 from invest_research.frontend.models import JobListEntry, JobListPage
-from invest_research.frontend.render import STATUS_LABELS, job_list_row
+from invest_research.frontend.render import STATUS_LABELS, format_cn_time, job_list_row
 
 st.set_page_config(page_title="自动化投研系统", page_icon="📊", layout="wide")
 
@@ -71,7 +70,6 @@ def _render_job_table(client: ResearchApiClient) -> None:
     """最近任务：筛选 + 分页 + 查看详情。"""
     st.subheader("最近任务")
 
-    # 状态筛选（稳定 widget key）
     status_options = ["全部"] + [
         "pending",
         "running",
@@ -88,7 +86,6 @@ def _render_job_table(client: ResearchApiClient) -> None:
     )
     status_filter = None if selected_status == "全部" else selected_status
 
-    # session 只保存"当前页游标"，完整列表每次从后端重新读取（刷新可恢复）
     cursor_key = "recent_jobs_cursor"
     cursor = st.session_state.get(cursor_key)
 
@@ -108,7 +105,6 @@ def _render_job_table(client: ResearchApiClient) -> None:
 
     st.table([job_list_row(e) for e in page.items])
 
-    # 分页按钮：下一页 / 上一页
     col_prev, col_next, col_pos = st.columns([1, 1, 2])
     has_prev = cursor is not None
     with col_prev:
@@ -126,7 +122,6 @@ def _render_job_table(client: ResearchApiClient) -> None:
         elif has_prev and not has_next:
             st.caption("已是最后一页")
 
-    # 每一行提供"查看详情"
     st.markdown("#### 查看任务详情")
     selected = st.selectbox(
         "选择一个任务",
@@ -134,7 +129,7 @@ def _render_job_table(client: ResearchApiClient) -> None:
         format_func=lambda e: (
             f"{e.input_company} · "
             f"{STATUS_LABELS.get(e.status.value, e.status.value)} · "
-            f"{e.created_at:%Y-%m-%d %H:%M}"
+            f"{format_cn_time(e.created_at)}"
         ),
         key="recent_jobs_select",
     )

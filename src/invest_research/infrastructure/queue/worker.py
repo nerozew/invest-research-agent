@@ -192,6 +192,13 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             #  先调用 loader，再调用 flow_runner.run(request)——顺序保证注入生效）。
             runner.progress = progress
             runner.job_id = job_id
+            # P06-06B 收口：请求加载成功后立即把 00_request 标记 succeeded，
+            # 再开始 01_company_resolve（保证"00 在 01 前 succeeded"的不变量；
+            # 重复标记对已成功步骤是安全无操作）。
+            try:
+                progress.mark_step_succeeded(job_id, "00_request")
+            except StepRecordError as exc:
+                _progress_logger().warning("标记 00_request 成功失败 job=%s: %s", job_id, exc)
             return ResearchRequest(
                 input_company=job.input_company,
                 as_of_date=job.as_of_date,
