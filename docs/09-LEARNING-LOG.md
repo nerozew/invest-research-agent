@@ -2304,3 +2304,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - Worker 独立 endpoints 与 API 分别被 Prometheus 采集，同名指标自动合并求和；但跨 target 的求和无法区分来源进程，需依赖 job label 区分。
 - 当前工具失败已分类为可重试（`ToolError.is_retryable`）即计入 tool_retries_total，未来接入 tenacity 重试循环后应在 before_sleep 回调处计数，避免双重计数。
 - 验证时宿主机 .env 含 FLOW_MODE=live 导致意外真实调用；Docker compose 验收必须用 `--env-file` 显式覆盖为 fake。
+
+---
+
+## P06-08：PostgreSQL 与工件备份恢复演练 ✅
+
+**产物**：`scripts/backup_snapshot.py`、`scripts/restore_snapshot.py`、`docs/15-P06-08-BACKUP-RUNBOOK.md`、离线单测 ×10
+
+### 3 个知识点
+
+1. **逻辑备份（pg_dump custom）与工件快照必须"同一时间点"对齐**：数据库表通过 `job_id` 外键关联，全库 `pg_dump -Fc` 天然保证跨表一致性；工件目录按 `<job_id>/` 组织，与 `artifacts.storage_uri` 一一对应。备份时先导出 DB 再复制工件卷，manifest 记录每个文件的 sha256，恢复前先 `--verify` 校验 checksum 再写入。
+2. **恢复演练的验证闭环必须以"外部可观察状态"为准**：DROP 该 job 行（级联删 steps/artifacts 元数据）+ 删容器工件后，API 必须返回 404（证明破坏真实生效）；恢复后用 API 查询 steps 数量/状态、artifacts 清单、下载 MD/PDF 并比对 sha256 与恢复前基线一致——而不是只看"表里有数据"。
+3. **`docker compose exec/cp` 使用服务名而非容器名**：compose v2 中直接 `docker compose exec worker ...` 用 compose 服务名（`worker`/`postgres`）即可，硬编码 `agent-worker-1` 这类容器名会在 compose 重建后失效；脚本保持"服务名"作为唯一标识更健壮。另：`python scripts/restore_snapshot.py` 直接运行时 `sys.path` 不含仓库根，模块间导入需避免（脚本已改为自包含）。
+
+### 检查问题（请用自己的话回答）
+为什么"备份校验"必须在恢复前做？为什么只验证"数据库表行数恢复"不够，还必须通过 API 下载报告并比对 sha256？
+
+### 已知限制与风险
+- 备份为手动触发（无 cron 定时）；RPO 取决于备份频率，RTO 实测秒级（dump 52KB + 工件 1.7MB）。
+- 全库 `pg_restore --clean` 会先 DROP 再 CREATE，只适合演练/灾难恢复场景；单 job 级恢复只覆盖工件，不覆盖 DB 行（需配 `--restore-db`）。
+- `backup/` 目录已被 `.gitignore` 排除，快照内容不入库；恢复脚本 `--restore-artifacts` 只动目标 job，不影响其他 job。
