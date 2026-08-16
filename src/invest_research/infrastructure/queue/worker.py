@@ -166,7 +166,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
 
     - 未显式传入 ``flow_runner`` 时按 ``FLOW_MODE`` 环境变量构建（默认 fake）；
     - loader：``JobRepository.get(job)`` → 用 ORM 字段重建 ``ResearchRequest``；
-    - writer：``JobRepository.update_status``（pending→running、running→succeeded）。
+    - writer：``JobRepository.update_status``（pending→running，终态 succeeded/failed）。
     """
     repo = JobRepository(_build_session_factory())
 
@@ -200,6 +200,16 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 if row is None:
                     return
                 row.status = JobStatus.SUCCEEDED.value
+                row.completed_at = datetime.now(timezone.utc)
+                session.commit()
+
+        def mark_failed(self, job_id: uuid.UUID) -> None:
+            # P05.5-deploy-fix：Flow 异常 → running → failed（防止任务永久卡 running）
+            with _build_session_factory()() as session:
+                row = session.get(ResearchJobORM, job_id)
+                if row is None:
+                    return
+                row.status = JobStatus.FAILED.value
                 row.completed_at = datetime.now(timezone.utc)
                 session.commit()
 

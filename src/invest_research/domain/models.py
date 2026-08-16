@@ -331,7 +331,9 @@ class FinancialAnalysisPack(BaseModel):
 
     version: str = Field(min_length=1)  # 例如 "analysis_pack_v1"
     period_end: date
-    facts: list[FinancialFact] = Field(min_length=1)
+    # P05.5-deploy-fix：允许空 facts——无可用财务事实时如实为空（报告据实标注数据限制），
+    # 而不是让整个流水线崩溃（LLM 输出空 facts 是真实边界情况）
+    facts: list[FinancialFact] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)
     analysis_notes: str | None = None
     limitations: list[str] = Field(default_factory=list)

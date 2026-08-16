@@ -4,6 +4,7 @@
   pending → running → succeeded 的终态推进；
 - 验证"防止已完成任务重复执行"（mark_running 返回 False 时不运行 Flow）；
 - 验证任务不存在时安全返回；
+- 验证 Flow 抛异常时任务进入 failed（不永久卡 running，P05.5-deploy-fix）；
 - 全程不依赖真实数据库/Redis/CrewAI（对齐"测试使用 fake Flow"）。
 
 fake loader 提供 `.load(job_id)` 方法，与 JobRequestLoader 协议一致
@@ -15,16 +16,19 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
+import pytest
+
 from invest_research.application.execution import ExecuteResearchJobService
 from invest_research.domain.models import ResearchRequest
 
 
 class FakeWriter:
-    """fake 状态写入端口：记录 mark_running / mark_succeeded 调用。"""
+    """fake 状态写入端口：记录 mark_running / mark_succeeded / mark_failed 调用。"""
 
     def __init__(self, running_can_proceed: bool = True) -> None:
         self.marked_running: list[uuid.UUID] = []
         self.marked_succeeded: list[uuid.UUID] = []
+        self.marked_failed: list[uuid.UUID] = []
         self._can_proceed = running_can_proceed
 
     def mark_running(self, job_id: uuid.UUID) -> bool:
@@ -33,6 +37,9 @@ class FakeWriter:
 
     def mark_succeeded(self, job_id: uuid.UUID) -> None:
         self.marked_succeeded.append(job_id)
+
+    def mark_failed(self, job_id: uuid.UUID) -> None:
+        self.marked_failed.append(job_id)
 
 
 class FakeLoader:
@@ -48,11 +55,14 @@ class FakeLoader:
 class FakeFlow:
     """fake Flow：记录收到的 request（不依赖 CrewAI）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, raise_on_run: bool = False) -> None:
         self.requests: list[ResearchRequest] = []
+        self._raise_on_run = raise_on_run
 
     def run(self, request: ResearchRequest) -> None:
         self.requests.append(request)
+        if self._raise_on_run:
+            raise RuntimeError("boom")
 
 
 def _sample_request() -> ResearchRequest:
@@ -77,6 +87,7 @@ def test_pending_to_terminal_runs_flow() -> None:
 
     assert writer.marked_running == [job_id]
     assert writer.marked_succeeded == [job_id]
+    assert writer.marked_failed == []
     assert len(flow.requests) == 1
     assert flow.requests[0].input_company == "Microsoft"
 
@@ -94,6 +105,7 @@ def test_completed_job_not_rerun() -> None:
 
     assert writer.marked_running == [job_id]
     assert writer.marked_succeeded == []
+    assert writer.marked_failed == []
     assert flow.requests == []
 
 
@@ -110,4 +122,23 @@ def test_missing_job_is_safe_noop() -> None:
 
     assert writer.marked_running == [job_id]
     assert writer.marked_succeeded == []
+    assert writer.marked_failed == []
     assert flow.requests == []
+
+
+def test_flow_failure_marks_failed_and_reraises() -> None:
+    """Flow 抛异常：任务进入 failed（不卡 running），异常向上传播（worker 可记日志）。"""
+    job_id = uuid.uuid4()
+    writer = FakeWriter(running_can_proceed=True)
+    flow = FakeFlow(raise_on_run=True)
+    service = ExecuteResearchJobService(
+        loader=FakeLoader(_sample_request()), writer=writer, flow_runner=flow
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        service.process(job_id)
+
+    assert writer.marked_running == [job_id]
+    assert writer.marked_succeeded == []
+    assert writer.marked_failed == [job_id]
+    assert len(flow.requests) == 1
