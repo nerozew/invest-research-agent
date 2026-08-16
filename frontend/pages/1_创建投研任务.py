@@ -1,12 +1,13 @@
-"""创建投研任务页面（P04-UI-10）。
+"""创建投研任务页面（P04-UI-10 + P06-06A 档位选择）。
 
 功能：
 - 输入公司名称/ticker、as_of_date、语言与表单类型；
+- P06-06A：增加 fast/deep 研究档位单选（UI 默认 fast，显式传值给后端）；
 - 使用 st.form 避免普通 rerun 重复提交；
 - 创建后把 job_id 写入 session_state + URL（P04-UI-08），
   刷新/复制 URL 后可恢复；
 - 提供复制 job_id、查看任务详情、查看报告与工件、返回最近任务；
-- 展示公司、job_id 与状态。
+- 展示公司、job_id、档位与状态。
 
 前端只调用 FastAPI，不直接访问数据库/Redis/Flow。
 """
@@ -40,10 +41,18 @@ def _get_key_manager() -> IdempotencyKeyManager:
     return st.session_state["idem_manager"]
 
 
-def _render_success_nav(job_id: str, company: str) -> None:
+def _render_profile_badge(research_profile: str) -> str:
+    """把档位名转成徽章文本（fast → ⚡ 快速；deep → 🔬 深度；未知回退原文）。"""
+    return {"fast": "⚡ 快速", "deep": "🔬 深度"}.get(research_profile, research_profile)
+
+
+def _render_success_nav(job_id: str, company: str, research_profile: str) -> None:
     """创建成功后的连贯导航：复制 / 详情 / 报告 / 返回。"""
     st.success("任务创建成功！")
-    st.info(f"**公司**：{company} ｜ **job_id**：`{job_id}` ｜ **状态**：⏳ 等待中")
+    st.info(
+        f"**公司**：{company} ｜ **job_id**：`{job_id}` ｜ "
+        f"**档位**：{_render_profile_badge(research_profile)} ｜ **状态**：⏳ 等待中"
+    )
     st.code(job_id, language=None)
 
     col_copy, col_detail, col_report, col_back = st.columns(4)
@@ -65,7 +74,7 @@ def _render_success_nav(job_id: str, company: str) -> None:
 
 
 def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) -> None:
-    """表单：公司/ticker、as_of_date、语言、表单类型（st.form 防重复提交）。"""
+    """表单：公司/ticker、as_of_date、语言、表单类型、研究档位（st.form 防重复提交）。"""
     with st.form("create_research_job_form"):
         input_company = st.text_input(
             "公司名称或股票代码", placeholder="例如 Microsoft、AAPL、苹果公司"
@@ -79,6 +88,18 @@ def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) 
             options=["10-K", "10-Q", "10-K/A", "10-Q/A"],
             default=["10-K", "10-Q"],
         )
+        # P06-06A：每任务研究档位选择。UI 默认 fast（推荐）；显式传值给后端 ResearchRequest。
+        research_profile = st.radio(
+            "研究档位",
+            options=["fast", "deep"],
+            index=0,
+            format_func=lambda v: (
+                "快速模式（推荐）：耗时和费用较低，适合初步研究与演示"
+                if v == "fast"
+                else "深度模式：研究更充分，但耗时和费用更高"
+            ),
+            key="create_research_profile",
+        )
         submitted = st.form_submit_button("创建任务", type="primary")
 
     if not submitted:
@@ -90,6 +111,8 @@ def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) 
             as_of_date=as_of_date,
             language=language,
             requested_forms=tuple(requested_forms),
+            # P06-06A：前端显式传递用户所选档位（不依赖领域默认 deep）
+            research_profile=research_profile,
         )
     except Exception as exc:  # ValidationError 是输入错误，展示给用户修正
         st.error(f"输入不合法：{exc}")
@@ -114,7 +137,7 @@ def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) 
     job_id = str(result.job_id)
     # P04-UI-08：创建成功后持久化 job_id 到 session + URL，自动进入任务上下文
     save_job_id(job_id)
-    _render_success_nav(job_id, input_company)
+    _render_success_nav(job_id, input_company, research_profile)
 
 
 def main() -> None:
