@@ -33,6 +33,7 @@ class FetchFactsRequest(BaseModel):
 
     cik: str
     taxonomy: str = "us-gaap"
+    as_of_date: date | None = None
 
     @field_validator("cik")
     @classmethod
@@ -80,6 +81,10 @@ def _to_fact(
             period_start=date.fromisoformat(start),
             period_end=date.fromisoformat(end),
             form_type=entry.get("form"),
+            fiscal_year=entry.get("fy"),
+            fiscal_period=entry.get("fp"),
+            frame=entry.get("frame"),
+            accession_number=entry.get("accn"),
             fact_version="v1",
         )
     # 时点型（instant）：仅有 end（end 必须存在）
@@ -95,12 +100,26 @@ def _to_fact(
         unit=unit,
         instant_date=date.fromisoformat(end),
         form_type=entry.get("form"),
+        fiscal_year=entry.get("fy"),
+        fiscal_period=entry.get("fp"),
+        frame=entry.get("frame"),
+        accession_number=entry.get("accn"),
         fact_version="v1",
     )
 
 
-def parse_company_facts(payload: dict[str, Any], cik: str, taxonomy: str) -> list[FinancialFact]:
-    """从 Company Facts payload 提取指定 taxonomy 下所有 concept 的事实。"""
+def parse_company_facts(
+    payload: dict[str, Any],
+    cik: str,
+    taxonomy: str,
+    as_of_date: date | None = None,
+) -> list[FinancialFact]:
+    """从 Company Facts payload 提取指定 taxonomy 下的事实。
+
+    如果给定 ``as_of_date``，使用 SEC 条目的 ``filed`` 日期排除截止日
+    之后才公开的数据，防止回测时的未来数据泄漏。旧 fixture 没有
+    ``filed`` 时保持向后兼容。
+    """
     facts_block = payload.get("facts", {}).get(taxonomy, {})
     if not isinstance(facts_block, dict):
         return []
@@ -118,6 +137,13 @@ def parse_company_facts(payload: dict[str, Any], cik: str, taxonomy: str) -> lis
             for entry in entries:
                 if not isinstance(entry, dict) or "val" not in entry:
                     continue
+                filed = entry.get("filed")
+                if as_of_date is not None and isinstance(filed, str):
+                    try:
+                        if date.fromisoformat(filed) > as_of_date:
+                            continue
+                    except ValueError:
+                        continue
                 try:
                     result.append(_to_fact(cik, taxonomy, concept, label, unit, entry))
                 except (KeyError, ValueError):
@@ -154,5 +180,10 @@ class SECCompanyFactsTool:
             )
 
         payload = json.loads(response.text)
-        facts = parse_company_facts(payload, request.cik, request.taxonomy)
+        facts = parse_company_facts(
+            payload,
+            request.cik,
+            request.taxonomy,
+            request.as_of_date,
+        )
         return ToolSuccess(value=FetchFactsResponse(facts=facts))

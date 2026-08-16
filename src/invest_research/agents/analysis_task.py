@@ -208,14 +208,17 @@ def build_analysis_task(
 ) -> Task:
     """构建 Analysis Task：用 fake LLM + 分析工具白名单，输出绑定 FinancialAnalysisPack。"""
     task_agent = (
-        agent
-        if agent is not None
-        else build_analysis_agent(config, fake=fake, profile=profile)
+        agent if agent is not None else build_analysis_agent(config, fake=fake, profile=profile)
     )
     return Task(
         description=(
             "分析任务输入：input_company={input_company}，as_of_date={as_of_date}，requested_forms={requested_forms}。\n"
-            "基于上游 ResearchPack、FinancialFact 与 ParsedDocument，选择可比期间与 concept，"
+            "以下 financial_facts 是确定性预取并按 as_of_date 截断的 SEC XBRL JSON：\n"
+            "{financial_facts}\n"
+            "只允许使用该 JSON 中的 value/unit/period/concept/locator 生成 facts；"
+            "禁止从模型知识、新闻摘要或推测填数。"
+            "缺少数据时 facts/metrics 留空并写入 limitations。\n"
+            "基于上游 ResearchPack 与上述 FinancialFact，选择可比期间与 concept，"
             "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
             "产出符合 FinancialAnalysisPack 契约的结构化分析包。"
         ),

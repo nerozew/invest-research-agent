@@ -7,9 +7,10 @@ P05.5-fix：resolve_and_prefetch 返回 PrefetchResult（公司身份 + SEC/Serp
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 from invest_research.domain.errors import ErrorCode
-from invest_research.domain.models import CompanyIdentity, ResearchRequest
+from invest_research.domain.models import CompanyIdentity, FinancialFact, ResearchRequest
 from invest_research.infrastructure.real_tools import (
     ResearchToolkit,
     build_research_tools,
@@ -20,6 +21,7 @@ from invest_research.infrastructure.tool_cache import ToolCallCache
 from invest_research.tools.base import ToolError, ToolFailure, ToolSuccess
 from invest_research.tools.company_resolver import ResolveCompanyResponse
 from invest_research.tools.google_search import SearchResponse
+from invest_research.tools.sec_company_facts import FetchFactsResponse
 from invest_research.tools.sec_submissions import FetchSubmissionsResponse
 
 _CIK = "0000789019"
@@ -57,11 +59,37 @@ def _request() -> ResearchRequest:
     return ResearchRequest(input_company="MSFT", as_of_date=_AS_OF)
 
 
-def _toolkit(resolver: object, submissions: object, search: object) -> ResearchToolkit:
+def _facts_result() -> object:
+    return ToolSuccess(
+        value=FetchFactsResponse(
+            facts=[
+                FinancialFact(
+                    company_id=_CIK,
+                    source_id="",
+                    taxonomy="us-gaap",
+                    concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+                    value=Decimal("100"),
+                    unit="USD",
+                    period_start=date(2024, 1, 1),
+                    period_end=date(2024, 12, 31),
+                    form_type="10-K",
+                    accession_number="0000789019-25-000001",
+                )
+            ]
+        )
+    )
+
+
+def _toolkit(
+    resolver: object,
+    submissions: object,
+    search: object,
+    facts: object | None = None,
+) -> ResearchToolkit:
     return ResearchToolkit(
         resolver=resolver,  # type: ignore[arg-type]
         submissions=submissions,  # type: ignore[arg-type]
-        facts=None,  # type: ignore[arg-type]
+        facts=facts if facts is not None else _CountingTool(_facts_result()),  # type: ignore[arg-type]
         downloader=None,  # type: ignore[arg-type]
         search=search,  # type: ignore[arg-type]
     )
@@ -83,6 +111,8 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     # 摘要必须随 PrefetchResult 返回（不只预热缓存）
     assert result.submissions_summary is not None
     assert result.search_summary is not None
+    assert result.financial_facts_summary is not None
+    assert "RevenueFromContractWithCustomerExcludingAssessedTax" in (result.financial_facts_summary)
     assert resolver.calls == 1
     assert submissions.calls == 1
     assert search.calls == 1
@@ -94,6 +124,7 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     )
     assert cache.get(sub_key) is not None
     assert cache.get(cache.key("web_search", {"query": "MSFT", "as_of": as_of})) is not None
+    assert cache.get(cache.key("sec_company_facts", {"cik": _CIK, "as_of_date": as_of})) is not None
 
 
 def test_prefetch_skips_fetch_on_cache_hit() -> None:
@@ -110,6 +141,10 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     )
     cache.put(sub_key, "cached-submissions")
     cache.put(cache.key("web_search", {"query": "MSFT", "as_of": as_of}), "cached-search")
+    cache.put(
+        cache.key("sec_company_facts", {"cik": _CIK, "as_of_date": as_of}),
+        "cached-facts",
+    )
 
     result = resolve_and_prefetch(_request(), _toolkit(resolver, submissions, search), cache)
 
@@ -117,6 +152,7 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     assert result.company_identity.cik == _CIK
     assert submissions.calls == 0  # 命中缓存，未执行真实获取
     assert search.calls == 0
+    assert result.financial_facts_summary == "cached-facts"
 
 
 def test_prefetch_failed_status_on_ambiguous_resolution() -> None:
@@ -137,9 +173,7 @@ def test_prefetch_failed_status_on_ambiguous_resolution() -> None:
 
 def test_prefetch_failed_status_on_resolve_failure() -> None:
     resolver = _CountingTool(
-        ToolFailure(
-            error=ToolError(error_code=ErrorCode.INPUT_INVALID, message="未找到公司: MSFT")
-        )
+        ToolFailure(error=ToolError(error_code=ErrorCode.INPUT_INVALID, message="未找到公司: MSFT"))
     )
     submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
@@ -161,7 +195,7 @@ def test_prefetch_respects_tool_budget() -> None:
     submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
-    budget = ToolBudget(caps={"sec_submissions": 1, "web_search": 1})
+    budget = ToolBudget(caps={"sec_submissions": 1, "sec_company_facts": 1, "web_search": 1})
 
     # 第一次预取：消耗 1 次 sec_submissions + 1 次 web_search
     result1 = resolve_and_prefetch(
@@ -202,6 +236,7 @@ def test_build_research_tools_cache_executes_once() -> None:
 
     assert submissions.calls == 1
 
+
 def test_prefetch_counts_into_invocation_stats() -> None:
     """预取的真实 SEC/Serper 调用必须计入 evidence stats（P05-13 验收 requirement7）。"""
     resolver = _CountingTool(
@@ -218,5 +253,5 @@ def test_prefetch_counts_into_invocation_stats() -> None:
 
     assert result.company_identity is not None
     assert stats.get("sec_submissions_calls") == 1
+    assert stats.get("sec_company_facts_calls") == 1
     assert stats.get("web_search_calls") == 1
-

@@ -282,6 +282,7 @@ def test_live_runner_persists_rendered_markdown_report(
     assert pdf_path.exists()
     assert pdf_path.read_bytes().startswith(b"%PDF")
 
+
 # ---------------------------------------------------------------------------
 # P05.5-fix：ResearchRequest 注入 / prefetch 注入 / 结构化收尾 / Action 拒绝 / 工具预算
 # ---------------------------------------------------------------------------
@@ -378,6 +379,10 @@ def test_runner_injects_prefetch_result_into_crew_inputs(
         submissions_summary="- 10-K | filed 2025-09-27 | https://www.sec.gov/10k.htm",
         search_summary="- Apple News | https://example.com | apple.com",
         status="ok",
+        financial_facts_summary=(
+            '{"ok":true,"facts":[{"concept":"Revenues","value":"100",'
+            '"unit":"USD","period_end":"2025-09-27"}]}'
+        ),
     )
 
     class _CapturingCrew:
@@ -399,6 +404,8 @@ def test_runner_injects_prefetch_result_into_crew_inputs(
     )
     assert "0000320193" in inputs["prefetch_summary"]
     assert "10-K" in inputs["prefetch_summary"]
+    assert "Revenues" in inputs["financial_facts"]
+    assert "100" in inputs["financial_facts"]
 
 
 def test_action_input_output_not_treated_as_research_pack_without_cache(
@@ -709,4 +716,3 @@ def test_manifest_evidence_written_when_stats_wired(
     assert isinstance(inv, dict)
     assert inv.get("sec_submissions_calls", 0) > 0
     assert inv.get("web_search_calls", 0) > 0
-

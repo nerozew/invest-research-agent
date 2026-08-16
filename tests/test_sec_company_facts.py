@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -63,6 +64,8 @@ def test_parses_facts_with_fidelity(msft_facts: dict[str, Any]) -> None:
     assert revenue_fy.value == Decimal("245100000000.00")
     assert revenue_fy.unit == "USD"
     assert revenue_fy.form_type == "10-K"
+    assert revenue_fy.fiscal_year == 2024
+    assert revenue_fy.fiscal_period == "FY"
     assert revenue_fy.fact_version == "v1"
 
 
@@ -99,3 +102,43 @@ def test_http_status_error_maps_to_failure(msft_facts: dict[str, Any]) -> None:
     assert isinstance(result, ToolFailure)
     assert result.error.error_code == ErrorCode.RATE_LIMITED
     assert result.error.is_retryable is True
+
+
+def test_as_of_date_filters_by_public_filing_date() -> None:
+    """期间结束日在截止日前，但 filed 在截止日后的事实仍必须排除。"""
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "label": "Revenue",
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2024-01-01",
+                                "end": "2024-12-31",
+                                "filed": "2025-02-01",
+                                "val": 100,
+                                "form": "10-K",
+                                "accn": "early",
+                            },
+                            {
+                                "start": "2024-01-01",
+                                "end": "2024-12-31",
+                                "filed": "2025-03-01",
+                                "val": 101,
+                                "form": "10-K/A",
+                                "accn": "future-amendment",
+                            },
+                        ]
+                    },
+                }
+            }
+        }
+    }
+    result = SECCompanyFactsTool(_mock_client(payload)).execute(
+        FetchFactsRequest(cik="0000789019", as_of_date=date(2025, 2, 15))
+    )
+
+    assert isinstance(result, ToolSuccess)
+    assert [fact.value for fact in result.value.facts] == [Decimal("100")]
+    assert result.value.facts[0].accession_number == "early"

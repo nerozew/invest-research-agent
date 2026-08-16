@@ -294,9 +294,7 @@ class LiveResearchFlowRunner:
         所有值必须是 str/int/float/bool（CrewAI interpolate_only 的限制）：
         as_of_date 用 ISO 字符串、company_identity 用格式化文本。
         """
-        forms = (
-            ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
-        )
+        forms = ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
         inputs: dict[str, str] = {
             "input_company": request.input_company,
             "as_of_date": request.as_of_date.isoformat(),
@@ -304,6 +302,12 @@ class LiveResearchFlowRunner:
             "language": request.language,
             "company_identity": "未预解析（需先用 CompanyResolver 解析）",
             "prefetch_summary": prefetch_summary_text(prefetch_result),
+            "financial_facts": (
+                prefetch_result.financial_facts_summary
+                if prefetch_result is not None
+                and prefetch_result.financial_facts_summary is not None
+                else '{"ok": false, "facts": [], "message": "未预取到 SEC Company Facts"}'
+            ),
         }
         if prefetch_result is not None and prefetch_result.company_identity is not None:
             identity = prefetch_result.company_identity
@@ -326,9 +330,7 @@ class LiveResearchFlowRunner:
                 start = getattr(task, "start_time", None)
                 end = getattr(task, "end_time", None)
                 if start is not None and end is not None:
-                    self._recorder.record_agent(
-                        role, int((end - start).total_seconds() * 1000)
-                    )
+                    self._recorder.record_agent(role, int((end - start).total_seconds() * 1000))
         usage = getattr(result, "token_usage", None)
         self._recorder.set_token_usage(extract_token_usage(usage))
 
@@ -355,9 +357,7 @@ class LiveResearchFlowRunner:
             state.report_draft = _to_packed(outputs[2], ReportDraft)
 
         if state.research_pack is None or state.analysis_pack is None or state.report_draft is None:
-            raise LiveFlowExecutionError(
-                "Crew 输出不完整：需要 research/analysis/writer 三个 pack"
-            )
+            raise LiveFlowExecutionError("Crew 输出不完整：需要 research/analysis/writer 三个 pack")
         return state
 
     def _extract_research_pack(self, obj: Any, request: ResearchRequest) -> ResearchPack:
@@ -375,21 +375,17 @@ class LiveResearchFlowRunner:
         - 不伪造来源：无有效 SEC 来源时明确抛 LiveFlowExecutionError。
         """
         if self._finalize_used:
-            raise LiveFlowExecutionError(
-                "结构化收尾已使用过一次，禁止重复收尾"
-            ) from cause
+            raise LiveFlowExecutionError("结构化收尾已使用过一次，禁止重复收尾") from cause
         self._finalize_used = True
 
         identity = self._resolved_identity(request)
         if identity is None:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无法确定公司身份，无法结构化收尾；"
-                "禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无法确定公司身份，无法结构化收尾；禁止生成伪造 ResearchPack"
             ) from cause
         if self._cache is None:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无工具缓存，无法结构化收尾；"
-                "禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无工具缓存，无法结构化收尾；禁止生成伪造 ResearchPack"
             ) from cause
 
         forms = ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
@@ -437,8 +433,7 @@ class LiveResearchFlowRunner:
             )
         if not sources:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无有效 SEC 来源，无法结构化收尾；"
-                "禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无有效 SEC 来源，无法结构化收尾；禁止生成伪造 ResearchPack"
             ) from cause
         return ResearchPack(
             version="research_pack_v1",
@@ -453,10 +448,7 @@ class LiveResearchFlowRunner:
 
     def _resolved_identity(self, request: ResearchRequest) -> CompanyIdentity | None:
         """优先取预取结果中的公司身份；否则确定性本地解析（不联网）。"""
-        if (
-            self._prefetch_result is not None
-            and self._prefetch_result.company_identity is not None
-        ):
+        if self._prefetch_result is not None and self._prefetch_result.company_identity is not None:
             return self._prefetch_result.company_identity
         from invest_research.tools.company_resolver import (
             CompanyResolverTool,

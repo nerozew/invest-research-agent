@@ -25,6 +25,7 @@ class PrefetchResult:
     submissions_summary: str | None  # SEC 申报摘要（多行文本）
     search_summary: str | None  # Serper 搜索摘要（多行文本）
     status: PrefetchStatus  # ok / partial / failed
+    financial_facts_summary: str | None = None  # 截止日前 SEC XBRL 事实 JSON
 
 
 def prefetch_summary_text(result: PrefetchResult | None) -> str:
@@ -42,6 +43,9 @@ def prefetch_summary_text(result: PrefetchResult | None) -> str:
     if result.search_summary:
         lines.append("[Serper search]")
         lines.append(result.search_summary)
+    if result.financial_facts_summary:
+        lines.append("[SEC company facts]")
+        lines.append(result.financial_facts_summary)
     if result.status == "partial":
         lines.append("（部分预取未成功，可补充调用对应工具）")
     return "\n".join(lines)

@@ -34,6 +34,7 @@ from crewai.tools import tool
 
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import ResearchRequest
+from invest_research.financial.concept_mapping import CONCEPTS_V1_PATH, load_concept_mapping
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.prefetch import PrefetchResult, PrefetchStatus
 from invest_research.infrastructure.tool_budget import ToolBudget
@@ -59,9 +60,9 @@ __all__ = [
     "build_research_tools",
 ]
 
-# SEC Company Facts 摘要条数上限（防止把整份 XBRL 塞进 LLM context；
-# P05.5-fix：15 条已足够分析选数，过大导致工具循环上下文复利爆炸）
-_FACTS_MAX_ITEMS = 15
+# 每个指标保留最近两个可比期，足够计算同比且避免整份 XBRL
+# 进入 LLM context。concept 白名单来自版本化 concepts_v1.json。
+_FACTS_PERIODS_PER_METRIC = 2
 # 搜索结果条数上限（Serper 分页已限 page_size ≤ 50；P05.5-fix 收紧到 10）
 _SEARCH_MAX_ITEMS = 10
 
@@ -102,7 +103,12 @@ def _serialize_search_result(result: Any) -> str:
 
 
 def _serialize_facts(result: Any, as_of_date: str | None) -> str:
-    """把 SEC Company Facts ToolResult 序列化为摘要（按 as_of_date 过滤 + 限条数）。"""
+    """序列化有限、可追溯的 SEC XBRL 事实集。
+
+    只选 concepts_v1 中的指标候选，每个指标选实际存在的最高
+    优先级 concept，再保留最近两个期间。值、单位、期间和 SEC
+    accession locator 一起交给 Analysis Agent，禁止只给一串裸数字。
+    """
     if getattr(result, "kind", None) == "failure":
         return _unpack(result)
     facts = result.value.facts
@@ -114,18 +120,72 @@ def _serialize_facts(result: Any, as_of_date: str | None) -> str:
             if effective is not None and effective <= cutoff:
                 kept.append(f)
         facts = kept
-    summary = [
+
+    mapping = load_concept_mapping(CONCEPTS_V1_PATH)
+    available = {fact.concept for fact in facts}
+    selected: list[tuple[str, Any]] = []
+    for entry in mapping.entries:
+        concept = next((name for name in entry.candidates if name in available), None)
+        if concept is None:
+            continue
+        candidates = [fact for fact in facts if fact.concept == concept]
+        candidates.sort(
+            key=lambda fact: fact.period_end or fact.instant_date or date.min,
+            reverse=True,
+        )
+        seen_periods: set[tuple[object, ...]] = set()
+        for fact in candidates:
+            period_key = (
+                fact.period_start,
+                fact.period_end,
+                fact.instant_date,
+                fact.unit,
+            )
+            if period_key in seen_periods:
+                continue
+            seen_periods.add(period_key)
+            selected.append((entry.metric_name, fact))
+            if len(seen_periods) >= _FACTS_PERIODS_PER_METRIC:
+                break
+
+    summary = []
+    for metric_name, fact in selected:
+        effective = fact.period_end or fact.instant_date
+        locator = (
+            f"accn={fact.accession_number}; concept={fact.concept}; "
+            f"period={effective.isoformat() if effective else 'unknown'}"
+        )
+        summary.append(
+            {
+                "company_id": fact.company_id,
+                "source_id": f"sec-companyfacts-{fact.company_id}",
+                "source_url": (
+                    f"https://data.sec.gov/api/xbrl/companyfacts/CIK{fact.company_id}.json"
+                ),
+                "metric_name": metric_name,
+                "taxonomy": fact.taxonomy,
+                "concept": fact.concept,
+                "label": fact.label,
+                "value": str(fact.value),
+                "unit": fact.unit,
+                "period_start": fact.period_start.isoformat() if fact.period_start else None,
+                "period_end": fact.period_end.isoformat() if fact.period_end else None,
+                "instant_date": fact.instant_date.isoformat() if fact.instant_date else None,
+                "fiscal_year": fact.fiscal_year,
+                "fiscal_period": fact.fiscal_period,
+                "form_type": fact.form_type,
+                "accession_number": fact.accession_number,
+                "locator": locator,
+            }
+        )
+    return _tool_result_json(
         {
-            "concept": f.concept,
-            "value": str(f.value),
-            "unit": f.unit,
-            "period_end": f.period_end.isoformat() if f.period_end else None,
-            "instant_date": f.instant_date.isoformat() if f.instant_date else None,
-            "form_type": f.form_type,
+            "ok": True,
+            "mapping_version": mapping.version,
+            "count": len(summary),
+            "facts": summary,
         }
-        for f in facts[-_FACTS_MAX_ITEMS:]
-    ]
-    return _tool_result_json({"ok": True, "count": len(summary), "facts": summary})
+    )
 
 
 def _count(stats: dict[str, int] | None, key: str) -> None:
@@ -135,9 +195,7 @@ def _count(stats: dict[str, int] | None, key: str) -> None:
 
 
 @contextmanager
-def _timed(
-    recorder: PerformanceRecorder | None, tool_name: str
-) -> Iterator[None]:
+def _timed(recorder: PerformanceRecorder | None, tool_name: str) -> Iterator[None]:
     """工具执行上下文：性能计时（可选）+ OTel span（P06-05）。
 
     - recorder 为 None 时跳过计时（零额外开销）；
@@ -339,7 +397,10 @@ def build_research_tools(
         if exhausted is not None:
             return exhausted
         try:
-            req = FetchFactsRequest(cik=cik)
+            req = FetchFactsRequest(
+                cik=cik,
+                as_of_date=date.fromisoformat(as_of_date) if as_of_date else None,
+            )
             with _timed(recorder, "sec_company_facts"):
                 result = facts_tool.execute(req)
             text = _serialize_facts(result, as_of_date)
@@ -433,9 +494,7 @@ def build_research_tools(
 
         def _run() -> Any:
             try:
-                return search_tool.execute(
-                    SearchQuery(query=query, as_of=as_of_date, page_size=10)
-                )
+                return search_tool.execute(SearchQuery(query=query, as_of=as_of_date, page_size=10))
             except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
                 _count(stats, "web_search_failures")
                 return ToolFailure(
@@ -484,10 +543,11 @@ def resolve_and_prefetch(
     budget: ToolBudget | None = None,
     stats: dict[str, int] | None = None,
 ) -> PrefetchResult:
-    """公司身份确认后并行预取 SEC submissions + Serper 搜索，返回 PrefetchResult。
+    """公司身份确认后并行预取 SEC submissions/facts + Serper。
 
     - 解析公司（确定性）；歧义/失败返回 status=failed 的 PrefetchResult（不猜测）；
-    - 并行执行两个独立 I/O（SEC submissions + Serper 搜索），各自先查缓存，
+    - 并行执行三个独立 I/O（SEC submissions + Company Facts + Serper），
+      各自先查缓存，
       未命中按预算执行并按成功结果写缓存（键与 build_research_tools 一致）；
     - 摘要随 PrefetchResult 返回，供 runner 注入 Research Task（不只预热缓存）；
     - 仅并行独立 I/O；Analysis 仍依赖 Research、Writer 仍依赖 Research+Analysis。
@@ -497,7 +557,11 @@ def resolve_and_prefetch(
     )
     if resolve_result.kind == "failure" or not resolve_result.value.resolved:
         return PrefetchResult(
-            company_identity=None, submissions_summary=None, search_summary=None, status="failed"
+            company_identity=None,
+            submissions_summary=None,
+            search_summary=None,
+            status="failed",
+            financial_facts_summary=None,
         )
     identity = resolve_result.value.candidates[0]
     cik = identity.cik
@@ -505,6 +569,7 @@ def resolve_and_prefetch(
     forms_str = _forms_key(request)
     submissions_summary: str | None = None
     search_summary: str | None = None
+    financial_facts_summary: str | None = None
 
     def fetch_submissions() -> None:
         nonlocal submissions_summary
@@ -512,7 +577,11 @@ def resolve_and_prefetch(
             "sec_submissions",
             {"cik": cik, "as_of_date": as_of, "requested_forms": forms_str},
         )
-        if cache.get(key) is not None:
+        cached = cache.get(key)
+        if cached is not None:
+            submissions_summary = cached
+            if recorder is not None:
+                recorder.record_cache_hit("sec_submissions")
             return
         if budget is not None and not budget.try_acquire("sec_submissions"):
             return
@@ -528,10 +597,14 @@ def resolve_and_prefetch(
         if result.kind == "success":
             cache.put(key, _unpack(result))
             filings = result.value.filings
-            submissions_summary = "\n".join(
-                f"- {f.form_type} | filed {f.filing_date.isoformat()} | {f.primary_document_url}"
-                for f in filings[:_SEARCH_MAX_ITEMS]
-            ) or "（无 10-K/10-Q 申报记录）"
+            submissions_summary = (
+                "\n".join(
+                    f"- {f.form_type} | filed {f.filing_date.isoformat()} | "
+                    f"{f.primary_document_url}"
+                    for f in filings[:_SEARCH_MAX_ITEMS]
+                )
+                or "（无 10-K/10-Q 申报记录）"
+            )
         else:
             _LOGGER.warning("prefetch sec_submissions 失败: %s", result.error.message)
             _count(stats, "sec_submissions_failures")
@@ -539,7 +612,11 @@ def resolve_and_prefetch(
     def fetch_search() -> None:
         nonlocal search_summary
         key = cache.key("web_search", {"query": request.input_company, "as_of": as_of})
-        if cache.get(key) is not None:
+        cached = cache.get(key)
+        if cached is not None:
+            search_summary = cached
+            if recorder is not None:
+                recorder.record_cache_hit("web_search")
             return
         if budget is not None and not budget.try_acquire("web_search"):
             return
@@ -551,15 +628,43 @@ def resolve_and_prefetch(
         if result.kind == "success":
             cache.put(key, _serialize_search_result(result))
             items = result.value.items[:_SEARCH_MAX_ITEMS]
-            search_summary = "\n".join(
-                f"- {r.title} | {r.url} | {r.publisher or ''}" for r in items
-            ) or "（无搜索结果）"
+            search_summary = (
+                "\n".join(f"- {r.title} | {r.url} | {r.publisher or ''}" for r in items)
+                or "（无搜索结果）"
+            )
         else:
             _LOGGER.warning("prefetch web_search 失败: %s", result.error.message)
             _count(stats, "web_search_failures")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(fetch_submissions), executor.submit(fetch_search)]
+    def fetch_facts() -> None:
+        nonlocal financial_facts_summary
+        key = cache.key("sec_company_facts", {"cik": cik, "as_of_date": as_of})
+        cached = cache.get(key)
+        if cached is not None:
+            financial_facts_summary = cached
+            if recorder is not None:
+                recorder.record_cache_hit("sec_company_facts")
+            return
+        if budget is not None and not budget.try_acquire("sec_company_facts"):
+            return
+        _count(stats, "sec_company_facts_calls")
+        with _timed(recorder, "sec_company_facts"):
+            result = toolkit.facts.execute(
+                FetchFactsRequest(cik=cik, as_of_date=request.as_of_date)
+            )
+        if result.kind == "success":
+            financial_facts_summary = _serialize_facts(result, as_of)
+            cache.put(key, financial_facts_summary)
+        else:
+            _LOGGER.warning("prefetch sec_company_facts 失败: %s", result.error.message)
+            _count(stats, "sec_company_facts_failures")
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(fetch_submissions),
+            executor.submit(fetch_facts),
+            executor.submit(fetch_search),
+        ]
         for future in futures:
             try:
                 future.result()
@@ -567,13 +672,20 @@ def resolve_and_prefetch(
                 continue
 
     status: PrefetchStatus = (
-        "ok" if (submissions_summary is not None and search_summary is not None) else "partial"
+        "ok"
+        if (
+            submissions_summary is not None
+            and financial_facts_summary is not None
+            and search_summary is not None
+        )
+        else "partial"
     )
     return PrefetchResult(
         company_identity=identity,
         submissions_summary=submissions_summary,
         search_summary=search_summary,
         status=status,
+        financial_facts_summary=financial_facts_summary,
     )
 
 
@@ -588,9 +700,7 @@ def build_research_prefetcher(
     """返回 prefetch 可调用对象（公司解析 + 并行 SEC/Serper + 缓存预热）。"""
 
     def prefetch(request: ResearchRequest) -> PrefetchResult:
-        return resolve_and_prefetch(
-            request, toolkit, cache, recorder, budget=budget, stats=stats
-        )
+        return resolve_and_prefetch(request, toolkit, cache, recorder, budget=budget, stats=stats)
 
     return prefetch
 
