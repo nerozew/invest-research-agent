@@ -9,24 +9,48 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
+from typing import Any, Protocol
 
-from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
-
-from invest_research.infrastructure.queue.tasks import TASK_PROCESS_JOB
+from invest_research.infrastructure.queue.constants import TASK_PROCESS_JOB
 
 __all__ = ["CeleryJobDispatcher"]
+
+
+class _TaskSender(Protocol):
+    """Minimal Celery producer surface used by this adapter."""
+
+    def send_task(
+        self,
+        name: str,
+        args: list[str],
+        *,
+        queue: str,
+        headers: dict[str, str],
+    ) -> Any: ...
 
 
 class CeleryJobDispatcher:
     """把 job_id 投递到 Celery 队列的生产实现。"""
 
-    def __init__(self, celery_app: Celery) -> None:
+    def __init__(self, celery_app: _TaskSender) -> None:
         self._app = celery_app
 
-    def dispatch(self, job_id: uuid.UUID) -> None:
-        """投递 job_id（字符串）到 research-jobs 队列。失败抛异常由调用方记录。"""
+    def dispatch(
+        self,
+        job_id: uuid.UUID,
+        *,
+        trace_context: Mapping[str, str] | None = None,
+    ) -> None:
+        """Dispatch a job and propagate persisted or current trace context."""
+        from invest_research.infrastructure.observability.tracing import (
+            current_trace_carrier,
+        )
+
+        headers = dict(trace_context) if trace_context else current_trace_carrier()
         self._app.send_task(
             TASK_PROCESS_JOB,
             args=[str(job_id)],
             queue="research-jobs",
+            headers=headers,
         )

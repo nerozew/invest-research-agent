@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from typing import Any
 
 from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.propagate import extract, inject
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
@@ -35,6 +37,8 @@ __all__ = [
     "get_tracer",
     "span",
     "trace_id_from_context",
+    "current_trace_carrier",
+    "extract_trace_context",
 ]
 
 DEFAULT_SERVICE_NAME = "invest-research"
@@ -95,6 +99,7 @@ def span(
     attributes: dict[str, Any] | None = None,
     *,
     tracer_name: str = DEFAULT_SERVICE_NAME,
+    context: Context | None = None,
 ) -> Iterator[Any]:
     """开启一个 span（contextmanager）：``with span("flow.run", {...}): ...``。
 
@@ -103,8 +108,33 @@ def span(
       高基数 label 之外的任何密钥）。
     """
     tracer = get_tracer(tracer_name)
-    with tracer.start_as_current_span(name, attributes=attributes) as current:
+    with tracer.start_as_current_span(
+        name,
+        context=context,
+        attributes=attributes,
+    ) as current:
         yield current
+
+
+def current_trace_carrier() -> dict[str, str]:
+    """Serialize the active OTel context for an outbox or Celery message."""
+    carrier: dict[str, str] = {}
+    inject(carrier)
+    return carrier
+
+
+def extract_trace_context(carrier: object | None) -> Context | None:
+    """Extract a parent context from untrusted queue headers."""
+    if not isinstance(carrier, dict):
+        return None
+    safe = {
+        str(key): value.decode() if isinstance(value, bytes) else str(value)
+        for key, value in carrier.items()
+        if isinstance(key, str) and isinstance(value, (str, bytes))
+    }
+    if not safe:
+        return None
+    return extract(safe)
 
 
 def trace_id_from_context() -> str | None:

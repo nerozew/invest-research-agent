@@ -12,6 +12,7 @@ MVP 不引入 transactional outbox；「数据库成功但消息投递失败」�
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Protocol
 
 __all__ = ["JobDispatcher"]
@@ -23,4 +24,9 @@ class JobDispatcher(Protocol):
     实现者负责：投递失败时抛出可分类异常；调用方决定是否阻断响应。
     """
 
-    def dispatch(self, job_id: uuid.UUID) -> None: ...
+    def dispatch(
+        self,
+        job_id: uuid.UUID,
+        *,
+        trace_context: Mapping[str, str] | None = None,
+    ) -> None: ...

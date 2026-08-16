@@ -13,14 +13,14 @@ P04-06 只做"消息投递 → worker 消费"验证：
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Protocol
 
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
 
-__all__ = ["JobTaskHandler", "TASK_PROCESS_JOB", "register_tasks"]
+from invest_research.infrastructure.queue.constants import TASK_PROCESS_JOB
 
-# 任务名：worker 与 producer 共享的稳定契约。
-TASK_PROCESS_JOB = "invest_research.process_research_job"
+__all__ = ["JobTaskHandler", "TASK_PROCESS_JOB", "register_tasks"]
 
 
 class JobTaskHandler(Protocol):
@@ -36,14 +36,28 @@ def register_tasks(app: Celery, handler: JobTaskHandler) -> Celery:
     且只在 ``register_tasks`` 显式调用时注册——保持模块导入零副作用。
     """
 
+    # Celery apps created in one Python process can inherit a previously
+    # finalized task with the same global name. Re-registration must bind the
+    # handler passed to *this* app (important for test isolation and worker
+    # reloads), rather than silently keeping a stale closure.
+    if TASK_PROCESS_JOB in app.tasks:
+        app.tasks.unregister(TASK_PROCESS_JOB)
+
     @app.task(  # type: ignore[untyped-decorator]
         name=TASK_PROCESS_JOB, bind=True
     )
     def _process_research_job(self: object, job_id: str) -> str:
         """消费队列中的 job_id（worker 侧，P06-05 包在 worker.process span 内）。"""
-        from invest_research.infrastructure.observability.tracing import span
+        from invest_research.infrastructure.observability.tracing import (
+            extract_trace_context,
+            span,
+        )
 
-        with span("worker.process", {"job_id": job_id}):
+        request = getattr(self, "request", None)
+        raw_headers = getattr(request, "headers", None)
+        headers = raw_headers if isinstance(raw_headers, Mapping) else None
+        parent = extract_trace_context(dict(headers) if headers is not None else None)
+        with span("worker.process", {"job_id": job_id}, context=parent):
             handler.process(uuid.UUID(job_id))
         return job_id
 

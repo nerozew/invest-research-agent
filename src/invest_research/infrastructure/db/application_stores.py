@@ -78,6 +78,10 @@ class SqlJobStore:
         self._sf = session_factory
 
     def create(self, *, request: ResearchRequest, job_id: uuid.UUID) -> None:
+        from invest_research.infrastructure.observability.tracing import (
+            current_trace_carrier,
+        )
+
         with self._sf() as session:
             row = ResearchJobORM(
                 id=job_id,
@@ -98,7 +102,10 @@ class SqlJobStore:
                     OutboxEventORM(
                         job_id=job_id,
                         event_type=EVENT_TYPE_JOB_CREATED,
-                        payload={"job_id": str(job_id)},
+                        payload={
+                            "job_id": str(job_id),
+                            "trace_context": current_trace_carrier(),
+                        },
                         status="pending",
                         attempts=0,
                     )
@@ -372,9 +379,7 @@ class SqlOutboxStore:
             )
         return [self._snapshot(r) for r in rows]
 
-    def find_by_job(
-        self, job_id: uuid.UUID, event_type: str
-    ) -> OutboxEventSnapshot | None:
+    def find_by_job(self, job_id: uuid.UUID, event_type: str) -> OutboxEventSnapshot | None:
         with self._sf() as session:
             row = session.execute(
                 select(OutboxEventORM).where(
@@ -386,11 +391,22 @@ class SqlOutboxStore:
 
     @staticmethod
     def _snapshot(row: OutboxEventORM) -> OutboxEventSnapshot:
+        raw_context = row.payload.get("trace_context", {})
+        trace_context = (
+            {
+                str(key): str(value)
+                for key, value in raw_context.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(raw_context, dict)
+            else {}
+        )
         return OutboxEventSnapshot(
             event_id=row.id,
             job_id=row.job_id,
             event_type=row.event_type,
             attempts=row.attempts,
+            trace_context=trace_context,
         )
 
     def mark_claimed(self, event_id: uuid.UUID) -> bool:
@@ -410,9 +426,7 @@ class SqlOutboxStore:
     def mark_sent(self, event_id: uuid.UUID) -> None:
         with self._sf() as session:
             session.execute(
-                update(OutboxEventORM)
-                .where(OutboxEventORM.id == event_id)
-                .values(status="sent")
+                update(OutboxEventORM).where(OutboxEventORM.id == event_id).values(status="sent")
             )
             session.commit()
 
@@ -428,8 +442,6 @@ class SqlOutboxStore:
     def mark_failed(self, event_id: uuid.UUID) -> None:
         with self._sf() as session:
             session.execute(
-                update(OutboxEventORM)
-                .where(OutboxEventORM.id == event_id)
-                .values(status="failed")
+                update(OutboxEventORM).where(OutboxEventORM.id == event_id).values(status="failed")
             )
             session.commit()

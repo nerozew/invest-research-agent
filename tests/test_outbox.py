@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Callable
 
 import pytest
@@ -73,14 +74,28 @@ def _event_status(sf, job_id: uuid.UUID) -> str | None:
 class _OkDispatcher:
     """JobDispatcher 兼容：dispatch 成功透传。"""
 
-    def dispatch(self, job_id: uuid.UUID) -> None:
+    def __init__(self) -> None:
+        self.trace_contexts: list[Mapping[str, str] | None] = []
+
+    def dispatch(
+        self,
+        job_id: uuid.UUID,
+        *,
+        trace_context: Mapping[str, str] | None = None,
+    ) -> None:
+        self.trace_contexts.append(trace_context)
         return None
 
 
 class _FailingDispatcher:
     """JobDispatcher 兼容：dispatch 抛异常（模拟 broker 不可用）。"""
 
-    def dispatch(self, job_id: uuid.UUID) -> None:
+    def dispatch(
+        self,
+        job_id: uuid.UUID,
+        *,
+        trace_context: Mapping[str, str] | None = None,
+    ) -> None:
         raise RuntimeError("broker down")
 
 
@@ -114,6 +129,27 @@ def test_publish_success_marks_sent(sf) -> None:
     assert result.sent_count == 1
     assert result.failed_count == 0
     assert _event_status(sf, job_id) == "sent"
+
+
+def test_outbox_relay_forwards_persisted_trace_context(sf) -> None:
+    """A delayed relay must use context persisted with the outbox event."""
+    job_id = uuid.uuid4()
+    SqlJobStore(sf).create(request=_request(), job_id=job_id)
+    with sf() as session:
+        row = session.execute(
+            select(OutboxEventORM).where(OutboxEventORM.job_id == job_id)
+        ).scalar_one()
+        row.payload = {
+            "job_id": str(job_id),
+            "trace_context": {"traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01"},
+        }
+        session.commit()
+
+    dispatcher = _OkDispatcher()
+    result = OutboxRelayService(SqlOutboxStore(sf), dispatcher).publish(job_id)
+
+    assert result.sent_count == 1
+    assert dispatcher.trace_contexts == [{"traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01"}]
 
 
 def test_publish_failure_requeues_until_max_attempts(sf) -> None:

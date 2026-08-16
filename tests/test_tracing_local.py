@@ -15,6 +15,7 @@ import uuid
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
@@ -33,6 +34,8 @@ from invest_research.domain.models import (
 )
 from invest_research.infrastructure.observability.tracing import (
     build_span_exporter,
+    current_trace_carrier,
+    extract_trace_context,
     setup_tracing,
     span,
     trace_id_from_context,
@@ -54,6 +57,7 @@ def memory_exporter() -> InMemorySpanExporter:
 
 # ---- 1. 导出器配置 ----
 
+
 def test_build_exporter_default_is_console() -> None:
     assert isinstance(build_span_exporter(None), ConsoleSpanExporter)
 
@@ -65,6 +69,7 @@ def test_build_exporter_with_endpoint_is_otlp() -> None:
 
 
 # ---- 2. span 层级（API → Worker → Flow → Tool 可关联）----
+
 
 def test_span_hierarchy_shares_trace_id(memory_exporter: InMemorySpanExporter) -> None:
     """进程内模拟跨层传播：4 层 span 共享同一 trace_id 且父子链正确。"""
@@ -93,6 +98,27 @@ def test_span_hierarchy_shares_trace_id(memory_exporter: InMemorySpanExporter) -
     assert by_name["flow.run"].attributes["input_company"] == "AAPL"
 
 
+def test_celery_message_propagates_api_parent_across_context_boundary(
+    memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A serialized carrier survives a detached producer/consumer boundary."""
+    with span("api.request"):
+        headers = current_trace_carrier()
+    assert headers["traceparent"].startswith("00-")
+
+    parent_context = extract_trace_context(headers)
+    with span("worker.process", context=parent_context):
+        pass
+
+    spans = memory_exporter.get_finished_spans()
+    by_name = {item.name: item for item in spans}
+    api = by_name["api.request"]
+    worker = by_name["worker.process"]
+    assert worker.context.trace_id == api.context.trace_id
+    assert worker.parent is not None
+    assert worker.parent.span_id == api.context.span_id
+
+
 def test_trace_id_available_within_span(memory_exporter: InMemorySpanExporter) -> None:
     assert trace_id_from_context() is None  # 无 span 时为 None
     with span("probe"):
@@ -100,6 +126,7 @@ def test_trace_id_available_within_span(memory_exporter: InMemorySpanExporter) -
 
 
 # ---- 3. 真实代码路径打点 ----
+
 
 def _settings() -> Settings:
     return Settings(
@@ -179,8 +206,15 @@ def test_flow_run_span_from_live_runner(
     assert attrs["as_of_date"] == "2025-12-31"
 
 
-def test_worker_task_span(memory_exporter: InMemorySpanExporter) -> None:
+@patch("platform.system", return_value="Windows")
+def test_worker_task_span(
+    _platform_system: object,
+    memory_exporter: InMemorySpanExporter,
+) -> None:
     """Celery task 执行产生 worker.process span 且带 job_id。"""
+    # This Windows test host has a slow/broken WMI query. Celery only needs the
+    # platform name for terminal colours, so keep this unit test independent of
+    # host WMI health.
     from invest_research.infrastructure.queue.celery_app import create_celery_app
     from invest_research.infrastructure.queue.tasks import (
         TASK_PROCESS_JOB,
@@ -221,10 +255,15 @@ def test_tool_span_from_timed_wrapper(memory_exporter: InMemorySpanExporter) -> 
     assert tool_spans[0].attributes["tool.name"] == "sec_submissions"
 
 
-def test_api_middleware_span(memory_exporter: InMemorySpanExporter) -> None:
+@patch("platform.system", return_value="Windows")
+def test_api_middleware_span(
+    _platform_system: object,
+    memory_exporter: InMemorySpanExporter,
+) -> None:
     """API middleware 为每个 HTTP 请求产生 api.request span。"""
     from fastapi.testclient import TestClient
 
+    # prometheus_client asks WMI for the platform during import on Windows.
     from invest_research.api.app import create_app
 
     app = create_app(settings=_settings())
@@ -241,6 +280,7 @@ def test_api_middleware_span(memory_exporter: InMemorySpanExporter) -> None:
 
 
 # ---- 4. collector 配置文件 ----
+
 
 def test_collector_config_parses() -> None:
     """deploy/otel-collector.yaml 可解析且结构正确（本地链路查看配置）。"""

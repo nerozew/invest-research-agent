@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from invest_research.application.job_dispatcher import JobDispatcher
@@ -29,6 +29,7 @@ class OutboxEventSnapshot:
     job_id: uuid.UUID
     event_type: str
     attempts: int
+    trace_context: dict[str, str] = field(default_factory=dict)
 
 
 class OutboxStore(Protocol):
@@ -36,9 +37,7 @@ class OutboxStore(Protocol):
 
     def find_undelivered(self, *, limit: int) -> list[OutboxEventSnapshot]: ...
 
-    def find_by_job(
-        self, job_id: uuid.UUID, event_type: str
-    ) -> OutboxEventSnapshot | None: ...
+    def find_by_job(self, job_id: uuid.UUID, event_type: str) -> OutboxEventSnapshot | None: ...
 
     def mark_claimed(self, event_id: uuid.UUID) -> bool:
         """条件更新 pending → claimed；仅当仍是 pending 才成功（防并发重复）。"""
@@ -106,7 +105,10 @@ class OutboxRelayService:
         if not self._store.mark_claimed(event.event_id):
             return False
         try:
-            self._dispatcher.dispatch(event.job_id)
+            self._dispatcher.dispatch(
+                event.job_id,
+                trace_context=event.trace_context or None,
+            )
         except Exception:  # noqa: BLE001 - outbox 持久化失败状态
             if event.attempts + 1 >= self._settings.max_attempts:
                 self._store.mark_failed(event.event_id)
