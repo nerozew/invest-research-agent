@@ -24,8 +24,6 @@ from pathlib import Path, PurePosixPath
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
-
-_LOGGER = logging.getLogger(__name__)
 from sqlalchemy.sql.elements import ColumnElement
 
 from invest_research.application.artifacts import ArtifactInfo
@@ -54,6 +52,8 @@ from invest_research.infrastructure.db.models import (
     WorkflowStep as WorkflowStepORM,
 )
 from invest_research.infrastructure.db.repositories import SessionFactory
+
+_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "SqlJobStore",
@@ -88,21 +88,24 @@ class SqlJobStore:
                 status=JobStatus.PENDING.value,
                 config_snapshot={},
             )
-            session.add(row)
-            session.add(
-                OutboxEventORM(
-                    job_id=job_id,
-                    event_type=EVENT_TYPE_JOB_CREATED,
-                    payload={"job_id": str(job_id)},
-                    status="pending",
-                    attempts=0,
-                )
-            )
             try:
+                session.add(row)
+                # P05.5-deploy-fix：先 flush research_jobs 再插 outbox——
+                # SQLAlchemy UOW 实测按 outbox→job 顺序刷出（不保证 FK 依赖顺序），
+                # PostgreSQL 会因 outbox_events_job_id_fkey 直接报 FK 违反。
+                session.flush()
+                session.add(
+                    OutboxEventORM(
+                        job_id=job_id,
+                        event_type=EVENT_TYPE_JOB_CREATED,
+                        payload={"job_id": str(job_id)},
+                        status="pending",
+                        attempts=0,
+                    )
+                )
                 session.commit()
             except IntegrityError as exc:
                 session.rollback()
-                # P05.5-deploy-fix：不要把任意 IntegrityError 误报成"已存在"——
                 # 记录真实约束错误（NOT NULL/类型/唯一）便于部署排障。
                 _LOGGER.error("创建 job 失败: %s", exc.orig)
                 raise _StoreError(f"创建 job 失败: {exc.orig}") from exc

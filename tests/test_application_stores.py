@@ -286,3 +286,39 @@ def test_artifact_content_only_registered_and_safe(sf, tmp_path: Path):
     assert content.read(job_id, "report.md") == b"hello"
     assert content.read(job_id, "other.md") is None
     assert content.read(uuid.uuid4(), "report.md") is None
+
+
+def test_job_store_create_respects_outbox_fk_order():
+    """P05.5-deploy-fix：research_jobs 必须先于 outbox_events 落库。
+
+    SQLAlchemy UOW 实测按 outbox→job 顺序刷出；SQLite 默认不强制外键所以旧测试
+    测不出来，这里启用 PRAGMA foreign_keys=ON（等价 PostgreSQL 的 FK 检查）。
+    """
+    from sqlalchemy import event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from invest_research.infrastructure.db.models import OutboxEvent as OutboxEventORM
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, rec):  # type: ignore[no-untyped-def]
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+    job_id = uuid.uuid4()
+    SqlJobStore(factory).create(request=_request(), job_id=job_id)
+
+    with factory() as session:
+        assert session.get(ResearchJobORM, job_id) is not None
+        events = session.query(OutboxEventORM).filter_by(job_id=job_id).all()
+        assert len(events) == 1
+        assert events[0].event_type == "job_created"
+
