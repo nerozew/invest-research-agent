@@ -94,6 +94,10 @@ class _CommittingSessionRaises:
     def add(self, _: object) -> None:
         return None
 
+    def flush(self) -> None:
+        """Mirror SqlJobStore's explicit parent-row flush before commit."""
+        return None
+
     def commit(self) -> None:
         raise self._exc
 
