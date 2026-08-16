@@ -17,12 +17,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
+
+_LOGGER = logging.getLogger(__name__)
 from sqlalchemy.sql.elements import ColumnElement
 
 from invest_research.application.artifacts import ArtifactInfo
@@ -97,9 +100,12 @@ class SqlJobStore:
             )
             try:
                 session.commit()
-            except IntegrityError:
+            except IntegrityError as exc:
                 session.rollback()
-                raise _StoreError(f"job 已存在: {job_id}")
+                # P05.5-deploy-fix：不要把任意 IntegrityError 误报成"已存在"——
+                # 记录真实约束错误（NOT NULL/类型/唯一）便于部署排障。
+                _LOGGER.error("创建 job 失败: %s", exc.orig)
+                raise _StoreError(f"创建 job 失败: {exc.orig}") from exc
 
 
 class SqlJobQueryStore:
