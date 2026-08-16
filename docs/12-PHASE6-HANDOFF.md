@@ -71,14 +71,15 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 
 ## 7. Git 状态（本快照）
 
-本轮代码 commit：
+本轮代码 commit（均为本地，**未 push**）：
 
-- 上轮：`b71e328` docs(p06): reconcile audit findings and handoff
-- 本轮：P06-06 compose observability profile（待提交，不 push）
+- `21b3133` feat(p06-06a): add per-job research profile to frontend（前端档位单选 + 徽章）
+- `f7034e6` feat(p06-06b): real-time step progress with SqlProgressSink and minimal frontend stage display（ProgressSink + 步骤标记 + 前端阶段映射 + 测试 + 文档）
 
-最终验证：相关测试 36 passed；Ruff `All checks passed`；`mypy src` 108 个源文件全绿；
-`docker compose --profile observability config --quiet` 通过；全部 10 个服务健康。
-本轮未 push、未调真实付费 API、未 SSH、未部署。
+最终验证：相关测试 87 passed；Ruff `All checks passed`；`mypy src` 110 个源文件全绿；
+0007 迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过；fast/deep fake smoke 通过
+（running 期间 current_step+steps、终态 8 步全成功、无真实 API 调用）。
+本轮未 push、未调真实付费 API（fake smoke 已覆盖）、未 SSH、未部署。
 
 ## 8. 新窗口继续短提示词
 
