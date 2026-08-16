@@ -130,6 +130,38 @@ def test_render_handles_markdown_subset(tmp_path: Path) -> None:
         doc.close()
 
 
+def test_render_consumes_inline_markdown_markers(tmp_path: Path) -> None:
+    out = tmp_path / "inline.pdf"
+    MarkdownPdfRenderer().render(
+        "正文包含 **粗体**、行内 `FinancialCalculator` 与 [SEC](https://www.sec.gov/)。",
+        out,
+    )
+    doc = pymupdf.open(out)
+    try:
+        text = "\n".join(page.get_text() for page in doc)
+        assert "粗体" in text
+        assert "FinancialCalculator" in text
+        assert "**" not in text
+        assert "`" not in text
+    finally:
+        doc.close()
+
+
+def test_render_title_does_not_duplicate_matching_leading_h1(tmp_path: Path) -> None:
+    out = tmp_path / "dedup.pdf"
+    MarkdownPdfRenderer().render(
+        "# Apple Inc. 投资研究报告\n\n## 执行摘要\n内容",
+        out,
+        title="Apple Inc. 投资研究报告",
+    )
+    doc = pymupdf.open(out)
+    try:
+        text = "\n".join(page.get_text() for page in doc)
+        assert text.count("Apple Inc. 投资研究报告") == 1
+    finally:
+        doc.close()
+
+
 def test_render_empty_markdown_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         MarkdownPdfRenderer().render("   \n", tmp_path / "empty.pdf")

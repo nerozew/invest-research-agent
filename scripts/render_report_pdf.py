@@ -3,7 +3,7 @@
 输出（写入 docs/p06-02-samples/，提交进仓库供人工视觉确认）：
 - sample_report.md      ：Jinja2 模板渲染的 Markdown 报告
 - sample_report.pdf     ：PyMuPDF 渲染的 PDF（内置中文字体、链接、分页）
-- sample_report_page1.png / page2.png：首页/次页 PNG 截图
+- sample_report_pageN.png：全部页面 PNG 截图
 
 用法：uv run python scripts/render_report_pdf.py
 
@@ -148,21 +148,22 @@ def main() -> int:
     (OUT_DIR / "sample_report.md").write_text(md, encoding="utf-8")
 
     pdf_path = MarkdownPdfRenderer().render(md, OUT_DIR / "sample_report.pdf")
-    render_page_png(pdf_path, 0, OUT_DIR / "sample_report_page1.png", dpi=120)
-
     import pymupdf
 
     with pymupdf.open(pdf_path) as doc:
         pages = len(doc)
-    if pages >= 2:
-        render_page_png(pdf_path, 1, OUT_DIR / "sample_report_page2.png", dpi=120)
+    for page_index in range(pages):
+        render_page_png(
+            pdf_path,
+            page_index,
+            OUT_DIR / f"sample_report_page{page_index + 1}.png",
+            dpi=120,
+        )
 
     print(f"[OK] 样例已生成（来源：{source}）")
     print(f"  Markdown : {OUT_DIR / 'sample_report.md'}")
     print(f"  PDF      : {pdf_path}（{pages} 页）")
-    print(f"  首页截图  : {OUT_DIR / 'sample_report_page1.png'}")
-    if pages >= 2:
-        print(f"  次页截图  : {OUT_DIR / 'sample_report_page2.png'}")
+    print(f"  页面截图  : {OUT_DIR / 'sample_report_pageN.png'}（共 {pages} 张）")
     return 0
 
 

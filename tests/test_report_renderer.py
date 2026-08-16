@@ -135,9 +135,7 @@ def test_limitations_render_and_absent_when_empty() -> None:
 
 def test_table_cell_escaping() -> None:
     """竖线与换行不破坏表格结构（md_cell 转义）。"""
-    out = ReportRenderer().render(
-        _fixed_input(legal_name="ACME | Corp\nLtd", ticker="|", cik=None)
-    )
+    out = ReportRenderer().render(_fixed_input(legal_name="ACME | Corp\nLtd", ticker="|", cik=None))
     assert "| ACME \\| Corp Ltd |" in out
     assert "| \\| |" in out
     # 原始换行不应出现在表格单元格内
@@ -243,6 +241,19 @@ def test_build_render_input_from_state() -> None:
     assert data.language == "zh-CN"
     assert len(data.sources) == 1
     assert data.sources[0].locator == "10-K"
+
+
+def test_build_render_input_strips_writer_leading_h1() -> None:
+    state = _sample_state()
+    assert state.report_draft is not None
+    title = state.report_draft.title
+    state.report_draft = state.report_draft.model_copy(
+        update={"markdown": f"# {title}\n\n## 执行摘要\n内容"}
+    )
+    data = build_render_input(state, generated_at=datetime(2025, 11, 1, 0, 0, 0))
+    assert data is not None
+    assert data.body_markdown.startswith("## 执行摘要")
+    assert f"# {title}" not in data.body_markdown
     assert data.limitations == ["指标因数据不足无法计算"]
     assert data.citation_keys == ["src_sec_2025_10k"]
     # 渲染出来的报告也包含正文与封面

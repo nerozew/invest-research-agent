@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -100,6 +101,21 @@ def _source_line(src: ReportSource) -> str:
     return "".join(parts)
 
 
+def _strip_leading_report_h1(markdown: str) -> str:
+    """Strip the writer's leading H1 because the template owns the report title."""
+    lines = markdown.splitlines()
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None:
+        return markdown
+    match = re.fullmatch(r"#\s+(.+?)\s*", lines[first].strip())
+    if match is None:
+        return markdown
+    del lines[first]
+    while first < len(lines) and not lines[first].strip():
+        del lines[first]
+    return "\n".join(lines)
+
+
 class ReportRenderer:
     """加载 Jinja2 模板并渲染报告 Markdown（确定性：同输入必同输出）。"""
 
@@ -168,7 +184,7 @@ def build_render_input(
         as_of_date=request.as_of_date.isoformat() if request is not None else "",
         generated_at=gen,
         language=request.language if request is not None else "zh-CN",
-        body_markdown=draft.markdown,
+        body_markdown=_strip_leading_report_h1(draft.markdown),
         citation_keys=list(draft.citation_keys),
         sources=sources,
         limitations=limitations,
