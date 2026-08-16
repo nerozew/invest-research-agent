@@ -1,10 +1,12 @@
 # P04-10/UI-05：本地 Docker Compose（migrate / API / Worker / Streamlit / PostgreSQL / Redis）
+# P06-06：observability profile（Prometheus / Grafana / OTel Collector / Jaeger）
 # 远程运行优先使用 GHCR 预构建镜像（GitHub Actions 构建并推送，见 .github/workflows/docker-image.yml）。
 # 服务内部用服务名通信；不公开 DB/Redis 端口；PostgreSQL 使用持久化 volume；
 # healthcheck 配置齐全；不含任何真实密钥（敏感配置由运行时 .env 提供，不进镜像）。
 #
 # 使用前设置：export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase5
 # 本地可选构建：docker compose build（会用仓库 Dockerfile 构建同名镜像，作为未设置变量时的回退）
+# 启用观测组件：docker compose --profile observability up -d（不影响基础服务行为）
 
 x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
@@ -32,6 +34,9 @@ x-app-env: &app-env
   PYTHONPATH: /app/src
   # 非 root 用户 app 无 /home/app；crewai(chromadb) 需要可写数据目录，HOME 指向可写的 /tmp
   HOME: /tmp
+  # P06-06：应用 OTLP trace 导出到 observability profile 的 collector。
+  # 未启用该 profile 时，导出失败由 OTel SDK 批量处理器静默重试丢弃，不影响业务。
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
 
 services:
   postgres:
@@ -81,7 +86,9 @@ services:
       context: .
       dockerfile: Dockerfile
     command: sh -c "uvicorn invest_research.infrastructure.wiring:create_production_app_factory --factory --host 0.0.0.0 --port 8000"
-    environment: *app-env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,7 +113,9 @@ services:
       context: .
       dockerfile: Dockerfile
     command: sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app worker --loglevel=info --queues=research-jobs"
-    environment: *app-env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-worker
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,7 +150,98 @@ services:
       retries: 5
       start_period: 15s
 
+  # ============ P06-06 observability profile（仅显式启用时启动）============
+  # 启动：docker compose --profile observability up -d
+  # 说明：观测组件使用独立 profile，不改变基础服务（postgres/redis/api/worker/streamlit）行为。
+  # 所有镜像使用明确版本（不使用 latest）；采集/存储均为本地开发用途，不暴露公网。
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      # 本地开发默认 admin/admin；生产部署必须通过环境变量覆盖（见 docs/10 §7）。
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.113.0
+    profiles: ["observability"]
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "13133:13133"
+    # 官方 collector 镜像为 distroless（无 shell）；healthcheck 用非 shell CMD 探测进程存活。
+    # 实时健康由配置中的 health_check extension 提供（13133）。
+    healthcheck:
+      test: ["CMD", "/otelcol", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      # 启用 OTLP 接收（collector 通过 4317 gRPC 转发 trace）
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+    # 最小 trace 后端：默认内存存储（重启丢失），仅本地查看链路，不用于生产。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:16686/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 volumes:
   postgres_data:
   redis_data:
   artifacts_data:
+  prometheus_data:
+  grafana_data:

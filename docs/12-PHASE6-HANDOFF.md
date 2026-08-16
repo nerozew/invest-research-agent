@@ -6,88 +6,79 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`（本地 commit，**未 push**）
-- **Phase 6 状态**：P06-01~05 ✅；新增 P06-05A（SEC Company Facts 真实数据流）✅；P06-06~14 未开始。
-- **P06-02**：PDF 重构为 markdown-it-py + PyMuPDF Story，4 页样例已逐页视觉检查通过，已标 ✅。
-- **P06-05**：已补上原先缺失的 Outbox/Celery W3C trace-context 传播，不再只是进程内模拟。
-- **当前验证**：全量 764 passed / 19 skipped；Ruff 全绿；`mypy src` 108 个源文件全绿。
+- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；P06-07~14 未开始。
+- **P06-06**：完整本地 Docker Compose observability profile（Prometheus / Grafana / OTel Collector / Jaeger）已真实启动并通过健康检查。
+- **当前验证**：相关测试 36 passed；Ruff 全绿；`mypy src` 108 个源文件全绿；`docker compose --profile observability config --quiet` 通过。
 
 ## 2. 已完成任务与本地 commit
 
 | 任务 | 内容 | 测试 | 本地 commit |
 |---|---|---|---|
-| 测试基建 | 沙箱安全 tmp 目录（conftest 覆盖 mode=0o700 问题）+ CrewAI SQLite 存储重定向 + connectivity_check ruff 修复 | 全量回归 692 passed | `1803251` |
 | P06-01 ✅ | Jinja2 固化 Markdown 报告模板 + golden tests（reporting/renderer.py + report.md.j2） | test_report_renderer 15 passed；全量 708 | `d01a92c`（代码）、`533437e`（docs） |
-| P06-02 ✅ | CommonMark→HTML→PyMuPDF Story；粗体/表格/列表/代码/链接/中文分页；去重 H1；4 页视觉检查 | 相关 28 passed | 本轮待提交 |
-| P06-03 ✅ | 工件生命周期清理（临时文件/过期任务/.keep 保护/基准保留 N 个；dry_run 默认） | test_artifact_lifecycle 13 passed；全量 731 | `dd2aec7`（代码）、`cf80d9b`（docs） |
-| P06-04 ✅ | 生产配置档位：environment=production 占位符密钥 fail-fast + 密钥卫生测试 | test_secrets_config 11 passed；全量 742 | `bc12798`（代码）、`6403b05`（docs） |
-| P06-05 ✅ | trace carrier 同 Outbox 持久化，Celery headers 投递，Worker 提取 parent context | trace/outbox/dispatcher 18 passed | 本轮待提交 |
-| P06-05A ✅ | SEC Company Facts 并行预取、filed/as_of 截断、concept mapping 选数、Analysis 硬约束注入 | 相关 42 passed | 本轮待提交 |
+| P06-02 ✅ | CommonMark→HTML→PyMuPDF Story（4 页样例已逐页视觉检查） | 相关 28 passed | `5c9e2df` |
+| P06-03 ✅ | 工件生命周期清理（临时文件/过期任务/.keep 保护/基准保留 N 个；dry_run 默认） | test_artifact_lifecycle 13 passed | `dd2aec7`（代码）、`cf80d9b`（docs） |
+| P06-04 ✅ | 生产配置档位：environment=production 占位符密钥 fail-fast + 密钥卫生测试 | test_secrets_config 11 passed | `bc12798`（代码）、`6403b05`（docs） |
+| P06-05 ✅ | trace carrier 同 Outbox 持久化，Celery headers 投递，Worker 提取 parent context | trace/outbox/dispatcher 18 passed | `33f0643` |
+| P06-05A ✅ | SEC Company Facts 并行预取、filed/as_of 截断、concept mapping 选数、Analysis 硬约束注入 | 相关 42 passed | `4a0b1a9` |
+| P06-06 ✅ | 完整本地 Docker Compose observability profile（Prometheus/Grafana/OTel Collector/Jaeger） | test_compose_observability 12 passed；相关 36 passed | 本轮待提交 |
 
 ## 3. 关键产物文件（P06 增量）
 
 ```
-src/invest_research/reporting/renderer.py          # P06-01 Jinja2 渲染器 + build_render_input
+compose.yml                                    # P06-06：observability profile（prometheus/grafana/otel-collector/jaeger）
+deploy/prometheus/prometheus.yml               # P06-06：采集 API /metrics
+deploy/grafana/provisioning/datasources/prometheus.yml  # P06-06：自动 provision Prometheus datasource（uid=prometheus）
+deploy/grafana/provisioning/dashboards/dashboard.yml    # P06-06：自动加载 research.json dashboard
+deploy/otel-collector.yaml                     # P06-05/06：OTLP HTTP → debug + Jaeger，health_check extension
+tests/test_compose_observability.py            # P06-06：12 个静态校验测试
+src/invest_research/reporting/renderer.py      # P06-01 Jinja2 渲染器 + build_render_input
 src/invest_research/reporting/templates/report.md.j2  # 报告模板（封面/正文/来源链接/限制/免责声明）
-src/invest_research/reporting/pdf.py                # P06-02 MarkdownPdfRenderer + render_page_png
-tests/fixtures/golden_report.md                     # P06-01 golden 基准（逐字节比对）
-docs/p06-02-samples/                                # 示例 PDF(3页,42链接)/MD/首页+次页 PNG（真实 AAPL live 工件渲染）
-scripts/render_report_pdf.py                        # 示例重新生成脚本
-src/invest_research/infrastructure/artifact_lifecycle.py  # P06-03 CleanupPolicy/Stats/Service
-src/invest_research/infrastructure/observability/tracing.py # P06-05 span()/OTLP/可重复配置
-deploy/otel-collector.yaml                          # P06-05 本地 collector（.gitignore 已放行 /deploy/）
-tests/test_report_renderer.py / test_pdf_renderer.py / test_artifact_lifecycle.py / test_secrets_config.py / test_tracing_local.py
+src/invest_research/infrastructure/observability/tracing.py  # P06-05 span()/OTLP/可重复配置
+tests/fixtures/golden_report.md                # P06-01 golden 基准（逐字节比对）
+docs/p06-02-samples/                           # 示例 PDF(4页,42链接)/MD/PNG（真实 AAPL live 工件渲染）
+scripts/render_report_pdf.py                   # 示例重新生成脚本
 ```
 
 ## 4. 已更新文档
 
-- `docs/05-DEVELOPMENT-ROADMAP.md`：P06-01 ✅ / **P06-02 ⏳（视觉确认待人工，未标 ✅）** / P06-03 ✅ / P06-04 ✅ / P06-05 ✅。
-- `docs/09-LEARNING-LOG.md`：P06-01~05 五条学习条目（含检查问题，未附答案）。
-- `docs/10-RUN-GUIDE.md`：新增 §7 生产配置与密钥管理（profile / 卫生红线 / 部署前检查清单）。
-- `.env.example`：ENVIRONMENT=production 说明、密钥红线注释、OTEL 变量占位。
+- `docs/05-DEVELOPMENT-ROADMAP.md`：P06-06 ✅ / P06-07 为下一候选。
+- `docs/09-LEARNING-LOG.md`：P06-06 学习条目（3 知识点 + 检查问题 + 已知限制）。
+- `docs/10-RUN-GUIDE.md`：此前已含 §7 生产配置与密钥管理。
 
 ## 5. 等待人工确认的事项（已清空）
 
-> P06-02 的 4 页 PDF 已逐页视觉检查并修复，下方两项是历史记录，不再是待办。
-> 下一个需用户配合的节点是 P06-06：恢复 WMI/WSL2 并安装 Docker Desktop。
-
-1. **P06-02 视觉检查（历史记录，已完成）**：新样例为 4 页，全部页已检查。原检查项为：
-   `sample_report_page1.png` / `page2.png`，确认：① 中文字体渲染正常（无豆腐块/乱码）；
-   ② 来源链接可点击（第 2~3 页约 42 个 SEC 链接）；③ 分页断行美观。确认后把路线图
-   `P06-02 ⏳` 改为 `P06-02 ✅` 并提交（若发现问题，修 `reporting/pdf.py` 后重跑测试与示例）。
-2. **P06-02 已知外观问题**：正文若自带 `# 标题` 会与模板封面标题重复（LLM 初稿内容）；如需去重可让
-   `build_render_input` 剥离初稿首个匹配的 H1。
+> P06-06 的 observability 服务已全部健康；P06-07 是下一任务（本地部署 smoke test），
+> 需用户授权切换到该任务后再执行。
 
 ## 6. 已知风险与注意事项
 
-1. **本会话测试运行方式（沙箱特定）**：受限沙箱下 `uv` 缓存不可写（需 `UV_CACHE_DIR` 指到工作区内）、
-   pytest 默认 tmp 目录（mode=0o700）会被拒写。已通过 `tests/conftest.py` 覆盖 `tmp_path_factory`
-   解决（目录默认权限 + 会话唯一根 + 不删除），并重定向 `appdirs.user_data_dir` 让 CrewAI SQLite
-   存储走临时目录。日常 `uv run pytest` 在正常环境仍可用；沙箱下用
-   `.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider`。
-2. **OTel `set_tracer_provider` Once 守卫**：已重置守卫使 `setup_tracing` 可重复配置（最后一次生效）；
-   这是测试与进程内重配的必要行为，勿回退。
-3. **`deploy/` 目录刚加入 .gitignore 白名单**（`!/deploy/`）；后续 P06-06 compose 若新增根目录文件需同步放行。
-4. **未 push、未触发 Actions、未部署、未 SSH**：全部按夜间安全规则执行；下一次任何 push 前先确认。
-5. **Windows WMI 环境故障**：本机 `platform.system()/machine()` 会卡在 WMI，连带
-   SQLAlchemy/Prometheus/Celery 导入假死。本轮测试仅在 pytest 启动器中代替
-   这两个纯系统信息查询；安装 Docker 前应先恢复 WMI/PowerShell/WSL 健康。
+1. **观测镜像体积大、慢网络下首次 pull 超时**：Prometheus v2.55.1 / Grafana 11.3.0 /
+   Jaeger 1.62.0 均较大；网络不稳定时 `docker pull` 会 10 分钟超时中断。
+   解法：串行重试 `docker pull`（Docker 会断点续传已下载 layer，复用不重复下载）。
+2. **OTel Collector 官方镜像是 distroless（无 shell）**：compose healthcheck 用
+   `["CMD", "/otelcol", "--version"]` 探测进程存活；真实健康由配置中的
+   `health_check` extension（13133 端口）提供。
+3. **Jaeger 使用 all-in-one 内存存储**：重启丢失链路数据，仅用于本地查看，不用于生产。
+4. **`deploy/` 目录已在 .gitignore 白名单放行**（`!/deploy/`）；新增根目录文件需同步放行。
+5. **未 push、未触发 Actions、未部署、未 SSH**：全部按夜间安全规则执行。
+6. **Windows WMI 环境故障（历史）**：本机 `platform.system()/machine()` 曾在 WMI 卡死；
+   本轮测试与 Docker Desktop 均正常，未再复现。
 
 ## 7. Git 状态（本快照）
 
 本轮代码 commit：
 
-- `5c9e2df` P06-02 PDF 样式渲染与逐页验收；
-- `33f0643` P06-05 Outbox/Celery trace context 跨进程传播；
-- `4a0b1a9` P06-05A point-in-time SEC facts 注入 Analysis；
-- `48514bc` 修复旧 DB fault-injection fake 与显式 `flush()` 不一致。
+- 上轮：`b71e328` docs(p06): reconcile audit findings and handoff
+- 本轮：P06-06 compose observability profile（待提交，不 push）
 
-最终验证：`764 passed / 19 skipped / 1 warning`；Ruff `All checks passed`；
-`mypy src` 108 个源文件全绿。本轮未 push、未调真实付费 API、未 SSH、未部署。
+最终验证：相关测试 36 passed；Ruff `All checks passed`；`mypy src` 108 个源文件全绿；
+`docker compose --profile observability config --quiet` 通过；全部 10 个服务健康。
+本轮未 push、未调真实付费 API、未 SSH、未部署。
 
 ## 8. 新窗口继续短提示词
 
 > 【Phase 6 继续】读取 `docs/12-PHASE6-HANDOFF.md`、`docs/13-ERRORS-REVIEW.md`
-> 和 `docs/05-DEVELOPMENT-ROADMAP.md`。P06-01~05A 已完成，全量 764 passed / 19 skipped，
-> Ruff/mypy 全绿。下一步是 P06-06，但当前 Windows 无 Docker，WMI 查询卡死，
-> 需先恢复 WMI/PowerShell/WSL2 并安装 Docker Desktop。Docker 可用后再完成 compose
-> profile 的真实启动验收；未经授权不 push、不 live API、不 SSH。
+> 和 `docs/05-DEVELOPMENT-ROADMAP.md`。P06-01~06 已完成，相关测试 36 passed、
+> Ruff/mypy 全绿；完整 Docker Compose observability profile 已真实启动（10 服务健康）。
+> 下一步是 P06-07（本地部署 smoke test：health、任务执行、报告下载、指标和链路查询），
+> 需用户授权切到该任务；未经授权不 push、不 live API、不 SSH。

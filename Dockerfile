@@ -1,5 +1,7 @@
-# syntax=docker/dockerfile:1
 # P04-09：multi-stage Dockerfile。API / Worker / Streamlit 共用同一镜像，以不同启动命令运行。
+# 说明：不使用 `# syntax=docker/dockerfile:1` 远程语法指令——它会要求构建时从 registry
+# 拉取 docker/dockerfile:1 语法镜像，在 registry 网络不可用时构建直接失败。
+# Docker Desktop 内置 parser 已完整支持本文件使用的多阶段/COPY --from/RUN --mount=type=cache。
 # 由 GitHub Actions（.github/workflows/docker-image.yml）在 hosted runner 上构建并推送 GHCR。
 
 # ---------- 阶段 1：构建依赖 ----------

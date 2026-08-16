@@ -2204,3 +2204,24 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-06 ✅：完整本地 Docker Compose observability profile
+
+**产物**：`compose.yml`（新增 observability profile：prometheus/grafana/otel-collector/jaeger）、`deploy/prometheus/prometheus.yml`、`deploy/grafana/provisioning/datasources/prometheus.yml`、`deploy/grafana/provisioning/dashboards/dashboard.yml`、`deploy/otel-collector.yaml`（更新：Jaeger 导出 + health_check）、`tests/test_compose_observability.py`（12 测试）。
+
+### 3 个知识点
+
+1. **compose profile 是"按需启动"的编排边界**：`profiles: ["observability"]` 让观测组件只有在 `docker compose --profile observability up -d` 时才启动——基础服务（postgres/redis/api/worker/streamlit）行为完全不变，本地日常开发不拉取几百 MB 的观测镜像。profile 是 Compose 的"可选服务组"，不是单独的 compose 文件。
+2. **observability 的配置面是"数据文件"而非代码**：Prometheus 的 `scrape_configs`、Grafana 的 `datasources/dashboards provisioning`、OTel Collector 的 `exporters` 都是挂载进容器的只读 YAML/JSON——容器是固化版本镜像，配置随仓库版本化。Grafana datasource 的 `uid` 必须与 dashboard JSON 中引用的 `uid` 一致，才能让 dashboard 自动绑定数据源。
+3. **健康检查"探测对象"要与服务类型匹配**：Postgres 用 `pg_isready`、API/Streamlit 用 HTTP 探活、Prometheus/Grafana/Jaeger 用 `wget` 探测自带 health 端点、OTel Collector 官方镜像是 distroless（无 shell）——healthcheck 用非 shell 的 `["CMD", "/otelcol", "--version"]` 探测进程存活，真实健康由配置里的 `health_check` extension（13133）提供。观测栈默认 `FLOW_MODE=fake`，绝不在本地启动时触碰真实 LLM/Serper。
+
+### 检查问题（请用自己的话回答）
+为什么"观测组件用 compose profile 隔离"比"直接加进默认启动列表"更适合本地开发？Grafana datasource 的 `uid` 在 provisioning 里起什么作用？
+
+### 已知限制
+- Jaeger 使用 all-in-one 内存存储（重启丢失链路），仅用于本地查看，不用于生产；
+- 观测镜像体积较大（Prometheus/Grafana/Jaeger），慢速网络下首次 `pull` 耗时较长（本机已实测网络间歇性超时，需重试）；
+- 完整业务 smoke（创建任务→Worker→报告下载→指标/链路查询）留待 P06-07。
+
+---
+
+

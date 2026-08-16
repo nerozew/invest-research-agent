@@ -1,0 +1,12 @@
+# P06-06：Grafana 自动 provision Prometheus datasource
+# datasource uid 必须与 dashboard（research.json）中引用的 uid 一致。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
