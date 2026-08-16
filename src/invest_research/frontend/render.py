@@ -159,6 +159,7 @@ def job_list_row(entry: JobListEntry) -> dict[str, str]:
         "创建时间": format_cn_time(entry.created_at),
         "开始时间": format_cn_time(entry.started_at),
         "结束时间": format_cn_time(entry.completed_at),
+        "耗时": _format_duration(entry.duration_seconds),
         "当前阶段": current_stage_label(entry.current_step) or "—",
     }
 

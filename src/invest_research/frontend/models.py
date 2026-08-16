@@ -127,6 +127,7 @@ class JobListEntry(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    duration_seconds: float | None = None
 
 
 class JobListPage(BaseModel):
