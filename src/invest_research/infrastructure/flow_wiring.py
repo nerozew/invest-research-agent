@@ -254,8 +254,12 @@ class LiveResearchFlowRunner:
                 exc,
             )
 
-    def run(self, request: ResearchRequest) -> None:
-        """FlowRunner 端口实现：完整执行真实生产 Crew/Flow（同步）。"""
+    def run(self, request: ResearchRequest) -> ResearchFlowState:
+        """FlowRunner 端口实现：完整执行真实生产 Crew/Flow（同步）。
+
+        P06-07 前置修复：返回最终 ``ResearchFlowState``，供 Worker 在成功
+        路径发布最终报告工件（fake/live 共用流程）。
+        """
         # P06-06A：按任务档位选择当前预算（合法值由 domain.ResearchProfileMode 校验）。
         # 不在构造/全局环境做固定档位；任务不同、档位不同。
         self._current_profile = ResearchProfile.for_mode(
@@ -268,6 +272,7 @@ class LiveResearchFlowRunner:
         state = self._run_live(request)
         self.last_state = state
         self.run_manifest = state.run_manifest
+        return state
 
     def _run_live(self, request: ResearchRequest) -> ResearchFlowState:
         """P06-05：真实执行包在 ``flow.run`` OTel span 内（属性只含低基数字段）。"""
@@ -660,12 +665,18 @@ class LiveResearchFlowRunner:
         return QualityAction.NONE
 
     def _persist_intermediates(self, request: ResearchRequest, state: ResearchFlowState) -> None:
-        """把中间产物写入工件目录（原子写，不覆盖）。"""
-        from invest_research.reporting.pdf import MarkdownPdfRenderer
-        from invest_research.reporting.renderer import ReportRenderer, build_render_input
+        """把中间产物写入 ``artifacts/<job_id>/``（原子写，overwrite）。
+
+        P06-07 前置修复：
+        - 目录统一为 ``<artifact_root>/<job_id>/``（不再用 company_as_of，避免
+          并发/重复任务互相覆盖）；
+        - 08_report.md / 09_report.pdf 不再在这里生成——最终报告由
+          ``reporting.artifact_publisher.ReportArtifactPublisher`` 统一发布
+          （fake/live 共用，且发布失败走 Worker failed 语义）。
+        """
         from invest_research.tools.artifact_store import ArtifactStore
 
-        job_root = self._artifact_root / f"{request.input_company}_{request.as_of_date.isoformat()}"
+        job_root = self._artifact_root / str(self.job_id)
         store = ArtifactStore(job_root)
 
         payloads: dict[str, str | bytes] = {
@@ -684,12 +695,6 @@ class LiveResearchFlowRunner:
             ),
             "07_manifest.json": json.dumps(state.run_manifest, ensure_ascii=False, default=str),
         }
-        # P06-01/02：Jinja2 模板渲染的最终 Markdown 报告 + PyMuPDF 渲染的 PDF 版本
-        rendered = build_render_input(state)
-        if rendered is not None:
-            report_md = ReportRenderer().render(rendered)
-            payloads["08_report.md"] = report_md
-            payloads["09_report.pdf"] = MarkdownPdfRenderer().render_to_bytes(report_md)
         for key, content in payloads.items():
             # P05.5-fix：live 单次运行覆盖旧工件，保证工件反映本次运行（诊断不误导）
             data = content if isinstance(content, bytes) else content.encode("utf-8")

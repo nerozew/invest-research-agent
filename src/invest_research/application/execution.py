@@ -14,6 +14,11 @@
 - Flow 抛出任何异常 → mark_failed（从 running → 终态 failed），绝不把
   任务永久留在 running（P05.5-deploy-fix：live 下 Analysis 空 facts 撞
   schema 校验曾导致任务卡 running）。
+
+P06-07 前置修复：最终报告发布（ReportArtifactPublisher）在 Worker 成功获得
+Flow state 后、``mark_succeeded`` **之前**执行。发布失败（缺少草稿 /
+Markdown/PDF 渲染失败）走 ``mark_failed`` 并向上传播——任务状态反映真实
+发布结果，绝不把"报告渲染失败"误报成"完整发布成功"。
 """
 
 from __future__ import annotations
@@ -22,12 +27,14 @@ import uuid
 from typing import Protocol
 
 from invest_research.domain.models import ResearchRequest
+from invest_research.flows.state import ResearchFlowState
 
 __all__ = [
     "ExecutionStatusWriter",
     "ExecuteResearchJobService",
     "FlowRunner",
     "JobRequestLoader",
+    "ReportPublisher",
 ]
 
 
@@ -46,9 +53,23 @@ class ExecutionStatusWriter(Protocol):
 
 
 class FlowRunner(Protocol):
-    """执行研究 Flow 的端口（生产实现包装 ResearchFlow；测试用 fake）。"""
+    """执行研究 Flow 的端口（生产实现包装 ResearchFlow；测试用 fake）。
 
-    def run(self, request: ResearchRequest) -> None: ...
+    P06-07 前置修复：``run`` 返回最终 ``ResearchFlowState``，供 Worker
+    在成功路径发布最终报告工件（fake/live 共用）。
+    """
+
+    def run(self, request: ResearchRequest) -> ResearchFlowState: ...
+
+
+class ReportPublisher(Protocol):
+    """最终报告发布端口（P06-07 前置修复）。
+
+    实现：``reporting.artifact_publisher.ReportArtifactPublisher``（fake/live 共用）。
+    失败抛 ``ReportArtifactPublishError``——调用方把任务标记为 failed。
+    """
+
+    def publish(self, job_id: uuid.UUID, state: ResearchFlowState) -> list[dict[str, object]]: ...
 
 
 class ExecuteResearchJobService:
@@ -59,7 +80,9 @@ class ExecuteResearchJobService:
        → 直接返回，绝不重复执行；
     2. 加载请求失败（任务已删除）→ 直接返回；
     3. 调用 Flow 运行；运行抛异常 → mark_failed 后向上传播；
-    4. 成功 → mark_succeeded（进入终态）。
+    4. Flow 成功后发布最终报告（可选注入 publisher）；发布失败 → mark_failed
+       并向上传播（真实发布结果，不误报完整发布成功）；
+    5. 全部成功 → mark_succeeded（进入终态）。
     """
 
     def __init__(
@@ -68,10 +91,12 @@ class ExecuteResearchJobService:
         loader: JobRequestLoader,
         writer: ExecutionStatusWriter,
         flow_runner: FlowRunner,
+        report_publisher: ReportPublisher | None = None,
     ) -> None:
         self._loader = loader
         self._writer = writer
         self._flow_runner = flow_runner
+        self._report_publisher = report_publisher
 
     def process(self, job_id: uuid.UUID) -> None:
         # 只有 pending 的任务才从 mark_running 拿到 True（防止重复执行/已完成任务）。
@@ -81,8 +106,16 @@ class ExecuteResearchJobService:
         if request is None:
             return
         try:
-            self._flow_runner.run(request)
+            state = self._flow_runner.run(request)
         except Exception:
             self._writer.mark_failed(job_id)
             raise
+        # P06-07 前置修复：最终报告发布必须先于 mark_succeeded。
+        # 发布失败（缺少草稿/渲染失败）→ mark_failed，不误报完整发布成功。
+        if self._report_publisher is not None:
+            try:
+                self._report_publisher.publish(job_id, state)
+            except Exception:
+                self._writer.mark_failed(job_id)
+                raise
         self._writer.mark_succeeded(job_id)

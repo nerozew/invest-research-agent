@@ -46,13 +46,15 @@ class ResearchFlowRunner:
         self.progress: ProgressSink | None = None
         self.job_id: uuid.UUID | None = None
 
-    def run(self, request: ResearchRequest) -> None:
+    def run(self, request: ResearchRequest) -> ResearchFlowState:
         # P06-06B：把 Worker 注入的 job_id/progress 传给 Flow 步骤边界钩子
         self.last_state = self._flow.run_fake(
             request,
             job_id=self.job_id,
             progress=self.progress,
         )
+        # P06-07 前置修复：FlowRunner 端口返回最终 state（Worker 发布最终报告用）
+        return self.last_state
 
 
 class ResearchJobExecutionHandler:

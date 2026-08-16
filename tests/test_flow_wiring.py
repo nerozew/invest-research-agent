@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date
 from types import SimpleNamespace
 
@@ -254,6 +255,7 @@ def test_live_runner_persists_rendered_markdown_report(
     from pathlib import Path
 
     artifact_root = str(tmp_path_factory.mktemp("report_md"))
+    job_id = uuid.uuid4()
 
     class _FakeCrew:
         def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
@@ -264,23 +266,19 @@ def test_live_runner_persists_rendered_markdown_report(
         artifact_root=artifact_root,
         crew_factory=lambda cfg, rt: _FakeCrew(),  # type: ignore[no-any-return]
     )
+    runner.job_id = job_id  # Worker 在 run 前注入 job_id
     runner.run(_request())
 
-    job_dir = Path(artifact_root) / "MSFT_2025-12-31"
-    report_path = job_dir / "08_report.md"
-    assert report_path.exists()
-    content = report_path.read_text(encoding="utf-8")
-    assert "# Microsoft Corp 报告" in content
-    assert "| 公司 | Microsoft Corp |" in content
-    assert "| CIK | 0000789019 |" in content
-    assert "引用与来源（模板自动生成）" in content
-    assert "非投资建议声明（固定文本）" in content
-    # 正文（Writer 初稿）原样透传
-    assert "## 执行摘要" in content
-
-    pdf_path = job_dir / "09_report.pdf"
-    assert pdf_path.exists()
-    assert pdf_path.read_bytes().startswith(b"%PDF")
+    job_dir = Path(artifact_root) / str(job_id)
+    # 中间产物写入 job 目录（不再使用 company_as_of）
+    assert (job_dir / "00_request.json").is_file()
+    assert (job_dir / "05_report_draft.json").is_file()
+    assert (job_dir / "07_manifest.json").is_file()
+    # 08/09 由 Publisher 发布，runner 不再生成
+    assert not (job_dir / "08_report.md").exists()
+    assert not (job_dir / "09_report.pdf").exists()
+    # 旧版 company_as_of 目录不再被写入
+    assert not (Path(artifact_root) / "MSFT_2025-12-31").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ from invest_research.infrastructure.db.models import (
 from invest_research.infrastructure.queue.execution_recorder import (
     ExecutionRecorder,
     derive_steps,
-    move_artifacts_to_job_dir,
+    merge_artifacts_to_job_dir,
 )
 
 _AS_OF = date(2025, 10, 31)
@@ -120,7 +120,7 @@ def test_derive_steps_marks_gate_and_manifest_failed_on_reject() -> None:
     assert steps["07_manifest"]["status"] == "failed"
 
 
-def test_move_artifacts_to_job_dir(tmp_path) -> None:
+def test_merge_artifacts_to_job_dir(tmp_path) -> None:
     root = tmp_path / "artifacts"
     src = root / "AAPL_2025-10-31"
     src.mkdir(parents=True)
@@ -128,11 +128,12 @@ def test_move_artifacts_to_job_dir(tmp_path) -> None:
     (src / "07_manifest.json").write_text('{"status":"published"}', encoding="utf-8")
 
     job_id = uuid.uuid4()
-    artifacts = move_artifacts_to_job_dir(str(root), job_id, _request())
+    artifacts = merge_artifacts_to_job_dir(str(root), job_id, _request())
 
-    # 目录已移动到 <job_id> 下
+    # 文件合并迁移到 <job_id> 下（旧目录保留，只移文件；不删除避免误删）
     assert (root / str(job_id) / "00_request.json").is_file()
-    assert not src.exists()
+    assert src.exists()
+    assert not (src / "00_request.json").exists()
     # 只登记存在的两个文件，且带 checksum/byte_size
     keys = [a["artifact_key"] for a in artifacts]
     assert keys == ["00_request.json", "07_manifest.json"]

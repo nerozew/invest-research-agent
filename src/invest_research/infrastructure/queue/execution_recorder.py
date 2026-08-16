@@ -39,6 +39,18 @@ _ARTIFACT_TYPES: dict[str, str] = {
     "05_report_draft.json": "report_draft",
     "06_quality_report.json": "quality_report",
     "07_manifest.json": "manifest",
+    "08_report.md": "final_report_markdown",
+    "09_report.pdf": "final_report_pdf",
+}
+
+# 兼容迁移：旧版 live runner 写到 company_as_of 目录的键（不含 08/09）
+_LEGACY_ARTIFACT_TYPES: dict[str, str] = {
+    "00_request.json": "request",
+    "02_research_pack.json": "research_pack",
+    "04_financial_analysis_pack.json": "analysis_pack",
+    "05_report_draft.json": "report_draft",
+    "06_quality_report.json": "quality_report",
+    "07_manifest.json": "manifest",
 }
 
 # (步骤名, sequence_no, state 字段名)
@@ -97,36 +109,54 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def move_artifacts_to_job_dir(
-    artifact_root: str, job_id: uuid.UUID, request: ResearchRequest
-) -> list[dict[str, object]]:
-    """把 live 产物的 <company>_<as_of> 目录移到 <job_id> 目录，返回登记数据。
-
-    未找到目录（如 fake 模式无产物）时返回空列表。
-    """
-    root = Path(artifact_root).resolve()
-    src = root / f"{request.input_company}_{request.as_of_date.isoformat()}"
-    if not src.is_dir():
-        return []
-    dst = root / str(job_id)
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.move(str(src), str(dst))
+def _scan_job_dir(job_dir: Path, types: dict[str, str]) -> list[dict[str, object]]:
+    """扫描 job 目录下白名单键的工件，返回登记数据（不写 DB）。"""
     artifacts: list[dict[str, object]] = []
-    for key, artifact_type in _ARTIFACT_TYPES.items():
-        path = dst / key
+    for key, artifact_type in types.items():
+        path = job_dir / key
         if not path.is_file():
             continue
         artifacts.append(
             {
                 "artifact_key": key,
                 "artifact_type": artifact_type,
-                "storage_uri": f"{job_id}/{key}",
+                "storage_uri": f"{job_dir.name}/{key}",
                 "content_checksum": _sha256(path),
                 "byte_size": path.stat().st_size,
             }
         )
     return artifacts
+
+
+def merge_artifacts_to_job_dir(
+    artifact_root: str, job_id: uuid.UUID, request: ResearchRequest
+) -> list[dict[str, object]]:
+    """把工件统一收口到 <artifact_root>/<job_id>/ 并返回登记数据。
+
+    - 存在旧版 <company>_<as_of> 目录时合并迁移 00-07 文件到 job 目录；
+    - job 目录已存在（fake 已写入 00-07 / Publisher 已写入 08/09）时只补扫；
+    - 返回 job 目录白名单内全部 00-09 文件登记元数据。
+    未找到任何目录时返回空列表。
+    """
+    root = Path(artifact_root).resolve()
+    src = root / f"{request.input_company}_{request.as_of_date.isoformat()}"
+    dst = root / str(job_id)
+
+    if src.is_dir():
+        dst.mkdir(parents=True, exist_ok=True)
+        moved = False
+        for key, _ in _LEGACY_ARTIFACT_TYPES.items():
+            src_file = src / key
+            dst_file = dst / key
+            if src_file.is_file() and not dst_file.exists():
+                shutil.move(str(src_file), str(dst_file))
+                moved = True
+        if moved:
+            _LOGGER.info("已把旧版工件迁移到 job 目录: %s -> %s", src, dst)
+    elif not dst.is_dir():
+        return []
+
+    return _scan_job_dir(dst, _ARTIFACT_TYPES)
 
 
 class ExecutionRecorder:
@@ -143,7 +173,7 @@ class ExecutionRecorder:
         artifacts: list[dict[str, object]] = []
         if state.request is not None:
             try:
-                artifacts = move_artifacts_to_job_dir(self._artifact_root, job_id, state.request)
+                artifacts = merge_artifacts_to_job_dir(self._artifact_root, job_id, state.request)
             except OSError as exc:
                 _LOGGER.warning("移动/登记工件失败 job=%s: %s", job_id, exc)
         with self._sf() as session:
@@ -177,6 +207,20 @@ class ExecutionRecorder:
                     continue
                 # 旧任务无实时步骤：按终态补全（attempt_count=1）
                 session.add(WorkflowStep(id=uuid.uuid4(), job_id=job_id, **step))
-            for artifact in artifacts:
-                session.add(Artifact(id=uuid.uuid4(), job_id=job_id, **artifact))
+            # P06-07 前置修复：幂等登记——已存在的 (job_id, artifact_key) 跳过。
+            if artifacts:
+                from sqlalchemy import select
+
+                existing_keys = set(
+                    session.execute(
+                        select(Artifact.artifact_key).where(Artifact.job_id == job_id)
+                    )
+                    .scalars()
+                    .all()
+                )
+                for artifact in artifacts:
+                    key = str(artifact["artifact_key"])
+                    if key in existing_keys:
+                        continue
+                    session.add(Artifact(id=uuid.uuid4(), job_id=job_id, **artifact))
             session.commit()

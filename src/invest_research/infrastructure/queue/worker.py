@@ -43,6 +43,7 @@ from invest_research.infrastructure.queue.flow_adapter import (
 from invest_research.infrastructure.queue.tasks import register_tasks
 from invest_research.infrastructure.tool_budget import ToolBudget
 from invest_research.infrastructure.tool_cache import ToolCallCache
+from invest_research.reporting.artifact_publisher import ReportArtifactPublisher
 
 __all__ = ["celery_app"]
 
@@ -275,16 +276,19 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             count_research_job("failed")
 
     runner = flow_runner if flow_runner is not None else _default_flow_runner()
+    # P06-07 前置修复：Worker 成功获得 Flow state 后发布最终报告
+    # （fake/live 共用确定性服务；发布失败 → mark_failed，不误报完整发布成功）。
+    artifact_root = os.environ.get("ARTIFACT_ROOT", "artifacts")
+    report_publisher = ReportArtifactPublisher(artifact_root)
     service = ExecuteResearchJobService(
         loader=_RepoLoader(),
         writer=_RepoWriter(),
         flow_runner=runner,
+        report_publisher=report_publisher,
     )
 
     # P05.5-opt：成功执行后把步骤/工件/耗时落库（失败只告警，不回滚已成功任务）
-    recorder = ExecutionRecorder(
-        session_factory, os.environ.get("ARTIFACT_ROOT", "artifacts")
-    )
+    recorder = ExecutionRecorder(session_factory, artifact_root)
 
     def _record_execution(job_id: uuid.UUID) -> None:
         try:

@@ -129,7 +129,7 @@ def test_download_artifact_returns_content() -> None:
     resp = client.get(f"/v1/research-jobs/{job_id}/artifacts/research_pack.json")
 
     assert resp.status_code == 200
-    assert resp.headers["content-type"] == "application/octet-stream"
+    assert resp.headers["content-type"] == "application/json"
     assert resp.content == b'{"sources": []}'
 
 

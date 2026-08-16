@@ -78,6 +78,24 @@ from invest_research.settings import Settings, get_settings
 __all__ = ["create_app"]
 
 
+def _artifact_media_type(artifact_key: str) -> str:
+    """按 artifact_key 扩展名返回下载 Content-Type（P06-07 前置修复）。
+
+    - .md    → text/markdown; charset=utf-8
+    - .pdf   → application/pdf
+    - .json  → application/json
+    其余保持 application/octet-stream（安全默认）。
+    """
+    lowered = artifact_key.lower()
+    if lowered.endswith(".md"):
+        return "text/markdown; charset=utf-8"
+    if lowered.endswith(".pdf"):
+        return "application/pdf"
+    if lowered.endswith(".json"):
+        return "application/json"
+    return "application/octet-stream"
+
+
 def _get_health_checker(request: Request) -> HealthChecker:
     """FastAPI 依赖：从 ``app.state`` 取出注入的 checker。
 
@@ -434,10 +452,9 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={"detail": "工件不存在"},
             )
-        return Response(
-            content=content,
-            media_type="application/octet-stream",
-        )
+        # P06-07 前置修复：按 artifact_key 扩展名返回正确的 Content-Type。
+        media_type = _artifact_media_type(artifact_key)
+        return Response(content=content, media_type=media_type)
 
     @app.post(
         "/v1/research-jobs",
