@@ -12,6 +12,8 @@ x-app-env: &app-env
   BROKER_URL: redis://redis:6379/0
   ARTIFACT_ROOT: /app/artifacts
   SEC_USER_AGENT_CONTACT: ${SEC_USER_AGENT_CONTACT:-your-email@example.com}
+  # HTTP User-Agent 必须 ASCII（默认值含中文会让 httpx 崩溃）
+  HTTP_USER_AGENT: ${HTTP_USER_AGENT:-invest-research/0.1 (+your-email@example.com)}
   LLM_API_KEY: ${LLM_API_KEY:-your-llm-api-key-placeholder}
   LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
   LLM_MODEL_RESEARCH: ${LLM_MODEL_RESEARCH:-qwen-max}

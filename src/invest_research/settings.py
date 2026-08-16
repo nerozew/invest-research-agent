@@ -134,7 +134,8 @@ class Settings(BaseSettings):
     # ---- HTTP 客户端（P02-02：显式连接/读取超时，见可靠性 §5.1）----
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 30.0
-    http_user_agent: str = "invest-research/0.1 (+your-email@example.com 由 .env 覆盖)"
+    # HTTP User-Agent 必须是 ASCII（httpx 拒绝非 ASCII 头；中文说明只能放注释）
+    http_user_agent: str = "invest-research/0.1 (+your-email@example.com)"
 
     # ---- SEC 合规（P02-03：全局限流，项目安全上限 5 req/s，低于官方 10 req/s）----
     sec_rate_limit_per_second: float = 5.0
