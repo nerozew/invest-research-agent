@@ -72,6 +72,8 @@ class ResearchJob(Base):
     as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="zh-CN")
     requested_forms: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # P06-06A：每任务研究档位（fast/deep），默认 deep（旧数据兼容）
+    research_profile: Mapped[str] = mapped_column(String(10), nullable=False, default="deep")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     current_step: Mapped[str | None] = mapped_column(String(50), nullable=True)
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

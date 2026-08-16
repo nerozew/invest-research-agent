@@ -100,6 +100,8 @@ class JobSnapshot(BaseModel):
     job_id: uuid.UUID
     status: JobStatus
     current_step: str | None = None
+    # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
+    research_profile: str = "deep"
     error_code: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None
@@ -114,6 +116,7 @@ class JobSnapshot(BaseModel):
         job_id: uuid.UUID,
         status: JobStatus,
         current_step: str | None = None,
+        research_profile: str = "deep",
         error_code: str | None = None,
         error_message: str | None = None,
         started_at: datetime | None = None,
@@ -124,6 +127,7 @@ class JobSnapshot(BaseModel):
             job_id=job_id,
             status=status,
             current_step=current_step,
+            research_profile=research_profile,
             error_code=error_code,
             error_message=error_message,
             started_at=started_at,

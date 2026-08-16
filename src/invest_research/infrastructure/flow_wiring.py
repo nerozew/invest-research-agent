@@ -173,12 +173,19 @@ class LiveResearchFlowRunner:
         self._reflection = ReflectionController()
         # 研究档位（P05.5）：fast/deep 预算，默认 deep（向后兼容）
         self._profile = profile if profile is not None else ResearchProfile.for_mode("deep")
+        # P06-06A：每次 run 按任务档位（request.research_profile）覆盖的当前档位。
+        # 构造参数 profile 保留为默认回退（deep）；任务档位优先级更高（不改全局环境变量）。
+        self._current_profile = self._profile
+        # P06-06A：按任务档位解析后的有效 LLM 配置（fast 关闭思考模式）。
+        # 单 worker 串行处理任务且每 job 一个 runner 实例，run() 内更新是安全的。
+        self._effective_config = self._config
         # 可注入 crew_factory：测试传 fake crew（返回预置 pack），离线验证完整控制流；
-        # 默认 None 时用真实 ``build_live_research_crew``（生产真实模型调用）。
+        # 默认 None 时用真实 ``build_live_research_crew``（生产真实模型调用），
+        # profile 动态读取当前任务档位。
         self._crew_factory: Callable[..., Crew] = (
             crew_factory
             if crew_factory is not None
-            else lambda cfg, rt: build_live_research_crew(cfg, rt, profile=self._profile)
+            else lambda cfg, rt: build_live_research_crew(cfg, rt, profile=self._current_profile)
         )
         # 外部调用统计（P05-13）：真实工具经 build_research_tools 写入该 dict，
         # runner 在生成 manifest 时并入 evidence（不泄露任何密钥）。
@@ -207,6 +214,15 @@ class LiveResearchFlowRunner:
 
     def run(self, request: ResearchRequest) -> None:
         """FlowRunner 端口实现：完整执行真实生产 Crew/Flow（同步）。"""
+        # P06-06A：按任务档位选择当前预算（合法值由 domain.ResearchProfileMode 校验）。
+        # 不在构造/全局环境做固定档位；任务不同、档位不同。
+        self._current_profile = ResearchProfile.for_mode(
+            "fast" if request.research_profile == "fast" else "deep"
+        )
+        # fast 任务显式关闭思考模式（Qwen3.5 等默认思考极慢）；deep 保留构造时配置。
+        self._effective_config = self._config
+        if self._current_profile.mode == "fast":
+            self._effective_config = self._config.model_copy(update={"enable_thinking": False})
         state = self._run_live(request)
         self.last_state = state
         self.run_manifest = state.run_manifest
@@ -246,8 +262,9 @@ class LiveResearchFlowRunner:
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
         inputs = self._build_crew_inputs(request, prefetch_result)
 
-        # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）
-        crew = self._crew_factory(self._config, self._research_tools)
+        # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）。
+        #    P06-06A：按任务档位解析后的有效配置（fast 已关闭思考模式）。
+        crew = self._crew_factory(self._effective_config, self._research_tools)
         try:
             result = crew.kickoff(inputs=inputs)
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast

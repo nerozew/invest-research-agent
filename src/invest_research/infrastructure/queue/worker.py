@@ -180,6 +180,8 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 as_of_date=job.as_of_date,
                 language=job.language,
                 requested_forms=tuple(job.requested_forms),
+                # P06-06A：把每个 Job 持久化的研究档位传给 FlowRunner
+                research_profile=job.research_profile,
             )
 
     class _RepoWriter:

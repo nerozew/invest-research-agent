@@ -89,6 +89,8 @@ class SqlJobStore:
                 as_of_date=request.as_of_date,
                 language=request.language,
                 requested_forms=list(request.requested_forms),
+                # P06-06A：每任务研究档位随任务持久化
+                research_profile=request.research_profile,
                 status=JobStatus.PENDING.value,
                 config_snapshot={},
             )
@@ -155,6 +157,7 @@ class SqlJobQueryStore:
             job_id=job.id,
             status=JobStatus(job.status),
             current_step=job.current_step,
+            research_profile=job.research_profile,
             error_code=job.error_code,
             error_message=job.error_message,
             started_at=job.started_at,
@@ -203,6 +206,7 @@ class SqlJobListStore:
                 language=r.language,
                 status=JobStatus(r.status),
                 current_step=r.current_step,
+                research_profile=r.research_profile,
                 error_code=r.error_code,
                 created_at=r.created_at,
                 started_at=r.started_at,

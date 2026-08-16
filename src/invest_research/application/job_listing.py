@@ -48,6 +48,8 @@ class JobListEntry(BaseModel):
     language: str
     status: JobStatus
     current_step: str | None = None
+    # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
+    research_profile: str = "deep"
     error_code: str | None = None
     created_at: datetime
     started_at: datetime | None = None

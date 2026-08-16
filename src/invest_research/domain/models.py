@@ -26,6 +26,18 @@ _ALLOWED_LANGUAGES = frozenset({"zh-CN", "en"})
 _DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q")
 
 
+class ResearchProfileMode(StrEnum):
+    """每任务研究档位（P06-06A）。
+
+    - ``FAST``：低迭代、低重试预算，适合演示与初步报告（不降级 AI 质量保证，
+      只是预算更少）；
+    - ``DEEP``：更充分研究，耗时与模型费用更高（默认，与旧请求兼容）。
+    """
+
+    FAST = "fast"
+    DEEP = "deep"
+
+
 class ResearchRequest(BaseModel):
     """用户发起研究任务时的原始输入（workflow 步骤 00 的输入）。"""
 
@@ -42,6 +54,10 @@ class ResearchRequest(BaseModel):
 
     # 请求的 SEC 表单类型（非空，默认 10-K + 10-Q）
     requested_forms: tuple[str, ...] = Field(default=_DEFAULT_FORMS)
+
+    # P06-06A：每任务研究档位（fast/deep）。默认 deep 保证旧请求兼容；
+    # Pydantic 自动校验非法值（API 422）。
+    research_profile: str = Field(default=ResearchProfileMode.DEEP.value)
 
     @field_validator("input_company")
     @classmethod
@@ -74,6 +90,16 @@ class ResearchRequest(BaseModel):
         """requested_forms 不能为空。"""
         if not value:
             raise ValueError("requested_forms 不能为空")
+        return value
+
+    @field_validator("research_profile")
+    @classmethod
+    def _validate_research_profile(cls, value: str) -> str:
+        """研究档位只能为 fast 或 deep（P06-06A）。"""
+        try:
+            ResearchProfileMode(value)
+        except ValueError as exc:
+            raise ValueError("research_profile 仅支持 fast 或 deep") from exc
         return value
 
 
