@@ -51,7 +51,9 @@ class CreateResearchJobService:
 # ---------------------------------------------------------------------------
 
 
-def _duration_seconds(started_at: datetime | None, completed_at: datetime | None) -> float | None:
+def compute_duration_seconds(
+    started_at: datetime | None, completed_at: datetime | None
+) -> float | None:
     """计算耗时秒数；未开始（started_at 缺失）时返回 None。"""
     if started_at is None:
         return None
@@ -90,7 +92,7 @@ class StepSnapshot(BaseModel):
             attempt_count=attempt_count,
             error_code=error_code,
             error_message=error_message,
-            duration_seconds=_duration_seconds(started_at, completed_at),
+            duration_seconds=compute_duration_seconds(started_at, completed_at),
         )
 
 
@@ -132,7 +134,7 @@ class JobSnapshot(BaseModel):
             error_message=error_message,
             started_at=started_at,
             completed_at=completed_at,
-            duration_seconds=_duration_seconds(started_at, completed_at),
+            duration_seconds=compute_duration_seconds(started_at, completed_at),
             steps=steps,
         )
 

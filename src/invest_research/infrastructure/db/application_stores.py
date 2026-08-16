@@ -29,7 +29,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from invest_research.application.artifacts import ArtifactInfo
 from invest_research.application.idempotency import StoredJob
 from invest_research.application.job_listing import JobListCursor, JobListEntry
-from invest_research.application.jobs import JobSnapshot, StepSnapshot
+from invest_research.application.jobs import JobSnapshot, StepSnapshot, compute_duration_seconds
 from invest_research.application.outbox import (
     EVENT_TYPE_JOB_CREATED,
     OutboxEventSnapshot,
@@ -153,7 +153,7 @@ class SqlJobQueryStore:
             )
             for s in steps
         )
-        return JobSnapshot(
+        return JobSnapshot.build(
             job_id=job.id,
             status=JobStatus(job.status),
             current_step=job.current_step,
@@ -211,6 +211,7 @@ class SqlJobListStore:
                 created_at=r.created_at,
                 started_at=r.started_at,
                 completed_at=r.completed_at,
+                duration_seconds=compute_duration_seconds(r.started_at, r.completed_at),
             )
             for r in rows
         )
