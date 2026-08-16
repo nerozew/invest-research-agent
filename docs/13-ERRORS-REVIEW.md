@@ -112,6 +112,29 @@
 - **处理**：UV_CACHE_DIR 指向工作区；沙箱下测试用 .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider。
 - **面试要点**：环境差异（缓存目录权限）是部署/CI 常见坑，配置项要可覆盖（环境变量）。
 
+## 14. P06-05 假阳性：进程内 span 嵌套不等于跨进程 trace
+
+- **现象**：路线图宣称 FastAPI→Worker→Flow→Tool 可关联，但测试只在一个 Python 进程中嵌套四个 span。
+- **根因**：API 与 Worker 在不同进程，Celery/Redis 会切断内存上下文；没有序列化 W3C `traceparent` 就会生成两条独立 trace。
+- **修复**：创建 Job 时把 trace carrier 与 outbox 事件同事务持久化；relay 传入 Celery headers；Worker 提取 parent context 后创建 `worker.process`。
+- **验证**：离线契约测试验证 carrier 序列化/反序列化后 trace_id 与 parent.span_id 不变；真实 collector 查询留待 P06-07。
+- **面试要点**：分布式链路的核心不是“每层都有 span”，而是跨网络/消息边界传递同一 trace context。
+
+## 15. 空 facts 只是止血：Analysis 根本没拿到 SEC XBRL
+
+- **现象**：允许 `FinancialAnalysisPack.facts=[]` 后任务不再崩溃，但报告指标仍是 N/A，样例中甚至出现占位数值。
+- **根因**：Research Agent 虽可调 SEC Company Facts，但 ResearchPack 不携带 facts；Analysis Agent 只有 concept 选择和计算工具，没有任何真实数值输入。
+- **修复**：CIK 解析后并行预取 submissions、Company Facts 和搜索；Company Facts 用 `filed <= as_of_date` 防止未来数据，再按版本化 concept mapping 选择最近两个可比期，将带单位/期间/locator 的 JSON 注入 Analysis Task。
+- **验证**：新增 filed-date 截断、prefetch 缓存/预算/统计、Crew inputs 注入的离线测试。真实数字输出需在 P06-07 受控 live smoke 中最终确认。
+- **面试要点**：“模型不编数”不能只写提示词；先由确定性程序选数和截断，再让 Agent 负责解释。
+
+## 16. Windows WMI 查询卡死导致 Python/PowerShell “无输出”
+
+- **现象**：`platform.system()` / `platform.machine()` 长时间无返回，导入 SQLAlchemy、Prometheus 或 Celery 时 pytest 看似随机卡死；`Get-CimInstance` 也卡住。
+- **根因范围**：`Winmgmt` 服务虽为 Running，但 WMI 查询链路异常；这是 Windows 主机环境问题，不是投研业务代码或数据库逻辑问题。
+- **本轮处理**：只在测试启动器中为两个纯系统信息函数提供常量，使离线业务测试可继续；没有在产品代码中隐藏或绕过 WMI 故障。
+- **后续**：P06-06 安装 Docker Desktop/WSL2 前，先修复 Windows 管理服务与 PowerShell 环境；否则 Docker Desktop 安装与 WSL 后端也可能不稳定。
+
 ## 附：一个被误会的“问题”——DeepSeek 上下文缓存 0% 命中
 
 - 现象：某请求缓存命中率 0%，怀疑缓存被清。

@@ -2112,9 +2112,9 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
-## P06-02 ⏳：Markdown→PDF 渲染（实现完成，视觉检查待人工确认）
+## P06-02 ✅：Markdown→PDF 渲染（样式与视觉检查完成）
 
-**产物**：`src/invest_research/reporting/pdf.py`（MarkdownPdfRenderer + render_page_png）、`tests/test_pdf_renderer.py`（10 测试）、`scripts/render_report_pdf.py`、示例文件 `docs/p06-02-samples/`（sample_report.md / sample_report.pdf 3 页 / 首页+次页 PNG 截图，用真实 AAPL live 工件渲染，42 个可点击链接）。
+**产物**：`src/invest_research/reporting/pdf.py`（markdown-it-py 安全解析 + PyMuPDF Story 分页）、`tests/test_pdf_renderer.py`、`scripts/render_report_pdf.py`、`docs/p06-02-samples/`（sample_report.pdf 4 页 + 全部页 PNG，42 个唯一 SEC 来源链接）。
 
 ### 3 个知识点
 
@@ -2126,9 +2126,8 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 为什么 `page.get_links()` 在 `doc.save()` 之前是空的？这提醒测试断言链接时要按什么顺序操作？
 
 ### 已知限制
-- 仅支持基础 Markdown 子集（标题/列表/引用/分隔线/表格/行内链接）；`**` 粗体、代码块按普通文本输出；
-- **视觉检查未完成（当前模型不能看图）**：中文渲染观感、链接点击区域、分页断行是否美观需人工打开 `docs/p06-02-samples/sample_report.pdf` 与 PNG 截图确认——**未标 ✅**；
-- 渲染出的 Markdown 中正文若自带 `# 标题` 会与模板封面标题重复（LLM 初稿内容，非模板缺陷）。
+- HTML 输入被禁用，避免把未信任报告内容当作 HTML 渲染；
+- 首个 H1 由模板统一管理，正文中的重复 H1 会被确定性去除。
 
 ---
 
@@ -2176,7 +2175,7 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ### 3 个知识点
 
-1. **trace 关联 = trace_id 共享 + parent/child 链**：API→Worker→Flow→Tool 四层 span 共享同一 `trace_id`，且每个 span 的 `parent.span_id` 指向上层 span 的 `span_id`。跨进程真实环境靠 W3C traceparent 上下文传播；离线测试在进程内用 `with span(...)` 嵌套模拟，即可验证"链路可关联"——**acceptance 的核心是层级结构而非传输方式**。
+1. **trace 关联必须真正跨过消息边界**：API span 的 W3C `traceparent` 先写入 Transactional Outbox payload，relay 投递时放入 Celery headers，Worker 从 headers 提取 parent context 后再开 `worker.process`。只在同一进程里嵌套 span 不能证明跨进程链路正确。
 2. **OTel SDK 的 Once 守卫坑**：`set_tracer_provider` 默认只允许设置一次（`_TRACER_PROVIDER_SET_ONCE` 内部 Once 对象），测试里多次 `setup_tracing` 会静默失败（只打 warning、provider 不换）。解法是在 `setup_tracing` 里重置 `_done` 守卫，得到"最后一次调用生效"语义——对测试隔离和进程内重配都是正确行为。
 3. **no-op provider 是零成本的默认**：所有 span 打点都在真实代码路径里（middleware、task、runner、工具包装），但**未调用 `setup_tracing` 时 OTel 用 no-op provider**，span 创建零开销——所以普通测试不加任何 tracing 依赖也能跑，打点是"可选观测"而非"强制副作用"。
 
@@ -2185,7 +2184,23 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ### 已知限制
 - 本地 collector 配置已提供（`deploy/otel-collector.yaml`），但**未实际启动 collector/导入 compose**（属 P06-06/07 本地部署范围，本任务只做离线配置与测试）；
-- 跨进程真实链路（API 进程 → broker → Worker 进程）的 W3C 上下文传播未在本任务接入队列消息头，离线测试是进程内模拟——真实跨进程验证留待 P06-07 部署 smoke。
+- 队列消息头与 Outbox 持久化已接入；真实 Redis/Celery/collector 上的 trace 查询留待 P06-07 Docker smoke。
+
+---
+
+## P06-05A ✅：SEC Company Facts → Analysis 真实数据流
+
+**产物**：`infrastructure/real_tools.py` 三路并行预取、`PrefetchResult.financial_facts_summary`、Analysis Task 的 `{financial_facts}` 硬约束、SEC filed-date 截断测试。
+
+### 3 个知识点
+
+1. **period_end 不等于数据可得日**：历史截止日验证必须看 SEC 条目的 `filed`，否则后来修订的旧期间数据会造成未来数据泄漏。
+2. **先确定性选数，再让 Agent 解释**：系统用 `concepts_v1.json` 选择白名单 concept，每个指标只保留最近两个可比期，Agent 只能消费这份 JSON，不凭记忆填数。
+3. **并行化只用于互不依赖的 I/O**：SEC submissions、Company Facts 和 Serper 在已知 CIK 后可并行；Analysis 仍依赖 Research，Writer 仍依赖 Analysis，不改变业务因果顺序。
+
+### 检查问题
+
+为什么只用 `period_end <= as_of_date` 过滤 Company Facts 仍可能引入未来信息？
 
 ---
 

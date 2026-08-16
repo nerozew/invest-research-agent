@@ -35,10 +35,12 @@ Ubuntu 服务器（admin_ze@192.168.203.129，hostname milnus）已部署 compos
 - 重跑 live 任务验证：预期空 facts 也能 published（报告如实标注“无财务事实”）；失败任务应显示 failed 而非卡 running；
 - 验证新 worker 的 workflow_steps/artifacts/耗时落库（ExecutionRecorder）。
 
-### 3. 后续数据流缺口（已提出、未拍板，非本次验收阻塞）
+### 3. 后续数据流缺口（已解决，P06-05A）
 
-- Analysis 拿不到真实 XBRL 事实：ResearchPack 不带 facts、Analysis 工具白名单无 SEC 工具；
-- 可选方案：prefetch 阶段取 SECCompanyFacts 并注入 analysis inputs（让报告有真实财务指标）。
+- SEC Company Facts 已与 submissions/Serper 并行预取，并通过
+  `PrefetchResult.financial_facts_summary` 显式注入 Analysis Task；
+- 事实按 SEC `filed` 日期和 `as_of_date` 截断，按 `concepts_v1.json`
+  选择最近两个可比期；真实数字报告待 P06-07 Docker live smoke 验证。
 
 ## 四、环境备忘
 
