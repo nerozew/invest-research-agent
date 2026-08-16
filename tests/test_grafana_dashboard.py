@@ -27,12 +27,26 @@ def test_dashboard_has_required_panels(dashboard: dict) -> None:
     joined = " ".join(exprs)
     # 成功率
     assert "research_jobs_total" in joined
-    # P95
+    # P95（匹配真实 Histogram workflow_step_duration_seconds_bucket）
     assert "histogram_quantile(0.95" in joined
+    assert "workflow_step_duration_seconds_bucket" in joined
     # 重试
     assert "tool_retries_total" in joined
     # 错误
     assert "quality_gate_failures_total" in joined
+    # P06-06C：两个最小 Stat（Prometheus target up / stale_running_steps）
+    assert "up" in joined
+    assert "stale_running_steps" in joined
+
+
+def test_dashboard_has_target_up_and_stale_stats(dashboard: dict) -> None:
+    stat_panels = [p for p in dashboard["panels"] if p["type"] == "stat"]
+    stat_exprs = [p["targets"][0]["expr"] for p in stat_panels]
+    assert len(stat_panels) >= 2
+    # 至少一个 Stat 查询 Prometheus target 是否 up（API+Worker）
+    assert any("up{" in expr and "invest-research" in expr for expr in stat_exprs)
+    # 至少一个 Stat 展示 stale_running_steps
+    assert any("stale_running_steps" in expr for expr in stat_exprs)
 
 
 def test_dashboard_has_refresh_and_timeline(dashboard: dict) -> None:

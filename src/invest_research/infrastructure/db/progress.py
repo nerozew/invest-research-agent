@@ -149,9 +149,18 @@ class SqlProgressSink:
         """步骤成功：running → succeeded，写 completed_at（保留 attempt_count）。
 
         成功后若 current_step 仍指向该步骤则清空（current_step 只指向 running 步骤）。
+        P06-06C：真实转换成功（rowcount>0）时对步骤终态计数并 observe 真实耗时
+        （started_at 缺失则只计数不 observe；指标写入失败不影响业务）。
         """
         with self._sf() as session:
             try:
+                row = session.execute(
+                    select(WorkflowStepORM.started_at).where(
+                        WorkflowStepORM.job_id == job_id,
+                        WorkflowStepORM.step_name == step_name,
+                        WorkflowStepORM.status.in_(_SUCCEEDABLE_SOURCES),
+                    )
+                ).scalar_one_or_none()
                 result = cast(
                     CursorResult[Any],
                     session.execute(
@@ -172,6 +181,8 @@ class SqlProgressSink:
                 raise StepRecordError(
                     f"标记步骤成功失败 job={job_id} step={step_name}: {exc}"
                 ) from exc
+        if result.rowcount > 0:
+            self._record_step_terminal_metric(step_name, "succeeded", row)
 
     def mark_step_failed(
         self,
@@ -185,10 +196,18 @@ class SqlProgressSink:
         """步骤失败：running → failed_retryable/failed_terminal，保存脱敏错误摘要。
 
         失败后若 current_step 仍指向该步骤则清空（current_step 只指向 running 步骤）。
+        P06-06C：真实转换成功（rowcount>0）时对步骤终态计数并 observe 真实耗时。
         """
         sanitized = (error_message or "")[:_MAX_ERROR_MESSAGE]
         with self._sf() as session:
             try:
+                row = session.execute(
+                    select(WorkflowStepORM.started_at).where(
+                        WorkflowStepORM.job_id == job_id,
+                        WorkflowStepORM.step_name == step_name,
+                        WorkflowStepORM.status.in_(_FAILABLE_SOURCES),
+                    )
+                ).scalar_one_or_none()
                 result = cast(
                     CursorResult[Any],
                     session.execute(
@@ -216,6 +235,32 @@ class SqlProgressSink:
                 raise StepRecordError(
                     f"标记步骤失败失败 job={job_id} step={step_name}: {exc}"
                 ) from exc
+        if result.rowcount > 0:
+            status = "failed_terminal" if terminal else "failed_retryable"
+            self._record_step_terminal_metric(step_name, status, row)
+
+    @staticmethod
+    def _record_step_terminal_metric(
+        step_name: str,
+        status: str,
+        started_at_row: Any,
+    ) -> None:
+        """步骤终态指标：真实持续秒数 = now - started_at（缺失则只计数不 observe）。
+
+        SQLite（测试）返回 offset-naive datetime：先补 UTC tzinfo 再做减法，
+        避免 TypeError。指标写入失败由 metrics_events 内部脱敏处理，绝不改变业务结果。
+        """
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_step_terminal,
+        )
+
+        duration: float | None = None
+        if started_at_row is not None:
+            started = started_at_row
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            duration = max((_now() - started).total_seconds(), 0.0)
+        count_step_terminal(step_name, status, duration)
 
     def fail_all_running_steps(
         self,

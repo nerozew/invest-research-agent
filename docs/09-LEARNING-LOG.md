@@ -2283,3 +2283,24 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+---
+
+## P06-06C：接通 Prometheus 业务指标与 Jaeger 真实 trace 数据链 ✅
+
+**产物**：OTLP endpoint 规范化 + 业务指标事件 + Worker 多进程指标端点 + Prometheus/Grafana 修复
+
+### 3 个知识点
+
+1. **prometheus_client 多进程模式（multi-process registry）**：Celery prefork 的每个子进程若各自直接创建 Counter/Gauge/Histogram，这些数据只落在进程内，Prometheus 采集时看不到。必须在任何 prometheus_client 导入前设置 `PROMETHEUS_MULTIPROC_DIR`，让每个子进程写独立 pid_*.db 文件；父进程的 HTTP server 用 `MultiProcessCollector` 按 label 汇总所有 .db 文件。这是"API 容器 /metrics 看不到 Worker 指标"的根因与解法。
+
+2. **OTLP HTTP 导出端点必须含完整路径**：`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` 只是基础地址，`OTLPSpanExporter(endpoint=...)` 要求完整 URL 含 `/v1/traces`，否则 Collector 返回 404 Not Found。统一用 normalize 函数补路径，并正确修剪末尾斜杠、避免重复拼接。
+
+3. **指标事件的语义防重复计数**：业务指标只能在确定性状态转换成功（如 SQL rowcount>0、乐观锁成功）后计数，而不是在"尝试执行"处计数。这样 at-least-once 投递与重复 Celery 消息不会让 Counter 明显多计。
+
+### 检查问题（请用自己的话回答）
+为什么 Worker 的 `PROMETHEUS_MULTIPROC_DIR` 环境变量必须在任何 `prometheus_client` 导入之前设置？如果 API 和 Worker 在同一个容器但不同进程，这套多进程机制还适用吗？
+
+### 已知限制与风险
+- Worker 独立 endpoints 与 API 分别被 Prometheus 采集，同名指标自动合并求和；但跨 target 的求和无法区分来源进程，需依赖 job label 区分。
+- 当前工具失败已分类为可重试（`ToolError.is_retryable`）即计入 tool_retries_total，未来接入 tenacity 重试循环后应在 before_sleep 回调处计数，避免双重计数。
+- 验证时宿主机 .env 含 FLOW_MODE=live 导致意外真实调用；Docker compose 验收必须用 `--env-file` 显式覆盖为 fake。

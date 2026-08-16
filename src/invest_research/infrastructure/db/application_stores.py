@@ -118,6 +118,12 @@ class SqlJobStore:
                 # 记录真实约束错误（NOT NULL/类型/唯一）便于部署排障。
                 _LOGGER.error("创建 job 失败: %s", exc.orig)
                 raise _StoreError(f"创建 job 失败: {exc.orig}") from exc
+        # P06-06C：Job 真实创建成功（事务提交后）才计数 pending。
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_research_job,
+        )
+
+        count_research_job("pending")
 
 
 class SqlJobQueryStore:
@@ -296,7 +302,15 @@ class SqlCancelStatusWriter:
             # 用 inline ignore 保持 mypy strict 通过。
             affected = int(result.rowcount)  # type: ignore[attr-defined]
             session.commit()
-            return affected == 1
+        # P06-06C：仅真实转换成功（乐观锁 rowcount=1）时计数 cancelled，
+        # 幂等重复取消不重复计数。
+        if affected == 1:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("cancelled")
+        return affected == 1
 
 
 class SqlArtifactCatalogStore:

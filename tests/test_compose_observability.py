@@ -139,10 +139,34 @@ def test_prometheus_config_parses() -> None:
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert loaded is not None
     jobs = loaded["scrape_configs"]
-    assert len(jobs) == 1
-    assert jobs[0]["job_name"] == "invest-research-api"
-    assert jobs[0]["metrics_path"] == "/metrics"
-    assert jobs[0]["static_configs"][0]["targets"] == ["api:8000"]
+    # P06-06C：API 与 Worker 是两个独立 target（Worker 多进程指标端点）。
+    assert len(jobs) == 2
+    api_job = next(j for j in jobs if j["job_name"] == "invest-research-api")
+    assert api_job["metrics_path"] == "/metrics"
+    assert api_job["static_configs"][0]["targets"] == ["api:8000"]
+
+
+def test_prometheus_worker_target_and_histogram_whitelist() -> None:
+    path = PROJECT_ROOT / "deploy" / "prometheus" / "prometheus.yml"
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    jobs = loaded["scrape_configs"]
+    worker_job = next(j for j in jobs if j["job_name"] == "invest-research-worker")
+    assert worker_job["metrics_path"] == "/metrics"
+    assert worker_job["static_configs"][0]["targets"] == ["worker:9101"]
+
+    # Prometheus metric_relabel 白名单必须保留 Histogram 的 _bucket/_sum/_count。
+    for job in jobs:
+        relabel_regex = job["metric_relabel_configs"][0]["regex"]
+        for suffix in (
+            "workflow_step_duration_seconds",
+            "workflow_step_duration_seconds_bucket",
+            "workflow_step_duration_seconds_sum",
+            "workflow_step_duration_seconds_count",
+        ):
+            assert suffix in relabel_regex, f"{job['job_name']} 白名单缺少 {suffix}"
+        # 白名单不允许出现高基数字段占位
+        assert "job_id" not in relabel_regex
+        assert "company" not in relabel_regex
 
 
 def test_grafana_datasource_provisioning() -> None:

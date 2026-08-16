@@ -6,7 +6,7 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`（本地 commit，**未 push**）
-- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅**；P06-07~14 未开始。
+- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅；P06-06C ✅**；P06-07~14 未开始。
 - **P06-06**：完整本地 Docker Compose observability profile（Prometheus / Grafana / OTel Collector / Jaeger）已真实启动并通过健康检查。
 - **P06-06A**：每任务 fast/deep 研究档位（前端单选 + 0007 迁移 + Worker 路由 + fast 关闭思考模式）。
 - **P06-06B**：ProgressSink 实时步骤状态（幂等创建 00-07、合法状态转换、失败收口 running、终态清空 current_step、前端阶段中文映射）。
@@ -26,6 +26,7 @@
 | P06-06 ✅ | 完整本地 Docker Compose observability profile（Prometheus/Grafana/OTel Collector/Jaeger） | test_compose_observability 12 passed；相关 36 passed | 本轮待提交 |
 | P06-06A ✅ | 每任务 fast/deep 档位：ResearchProfileMode + 0007 迁移 + 前端单选/徽章 + Worker 路由 | 相关 87 passed（含新增前端/进度）；Ruff/mypy 全绿；0007 真实 PostgreSQL upgrade→downgrade→upgrade 通过 | 代码已在 `b2d773e`（后端）+ 本轮前端 |
 | P06-06B ✅ | 实时步骤状态：ProgressSink + SqlProgressSink 短事务/幂等创建 + Flow/Worker 步骤标记 + 前端阶段中文映射 | SqlProgressSink 11、ExecutionRecorder 不重复、前端 19、Worker 87 全绿 | 本轮待提交 |
+| P06-06C ✅ | 接通 Prometheus 业务指标与 Jaeger 真实 trace 数据链：OTLP 端点规范化 + 业务指标事件 + Worker 多进程指标端点 + Prometheus/Grafana 修复 | 离线 48+48 passed；Ruff/mypy 全绿；Docker fake 验收：两 target up、metrics/Histogram 非空、Jaeger trace 跨 Outbox/Celery 关联、无 OTLP 404、无真实外部调用 | 本轮待提交 |
 
 ## 3. 关键产物文件（P06 增量）
 

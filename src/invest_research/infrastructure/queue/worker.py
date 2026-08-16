@@ -224,6 +224,12 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 progress.mark_step_running(job_id, "00_request")
             except StepRecordError as exc:
                 _progress_logger().warning("进度初始化失败 job=%s: %s", job_id, exc)
+            # P06-06C：条件转换成功（返回 True）才计数 running（重复投递不会重复计数）
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("running")
             return True
 
         def mark_succeeded(self, job_id: uuid.UUID) -> None:
@@ -235,6 +241,12 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row.completed_at = datetime.now(timezone.utc)
                 row.current_step = None  # P06-06B：终态清空 current_step
                 session.commit()
+            # P06-06C：真实到达终态才计数 succeeded（重复投递不重复计数）
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("succeeded")
 
         def mark_failed(self, job_id: uuid.UUID) -> None:
             # P05.5-deploy-fix：Flow 异常 → running → failed（防止任务永久卡 running）
@@ -255,6 +267,12 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 )
             except StepRecordError as exc:
                 _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
+            # P06-06C：真实到达终态才计数 failed（重复执行不会重复计数）
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("failed")
 
     runner = flow_runner if flow_runner is not None else _default_flow_runner()
     service = ExecuteResearchJobService(
@@ -293,11 +311,25 @@ def _setup_otel_from_env() -> None:
 
 
 def _build_celery_app() -> Celery:
-    """构建 Celery app：broker 取环境变量 BROKER_URL，缺省 memory://。"""
+    """构建 Celery app：broker 取环境变量 BROKER_URL，缺省 memory://。
+
+    P06-06C：prometheus_client 多进程模式要求在任何 prometheus_client 使用
+    之前设置 PROMETHEUS_MULTIPROC_DIR。此处先于所有 metrics 模块（延迟导入）
+    设置环境变量，fork 的子进程继承该值，各自写独立 pid_*.db；API 进程不设置
+    此变量，保持默认单进程 REGISTRY，物理隔离两个容器的指标。
+    """
+    os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus_metrics")
     broker = os.environ.get("BROKER_URL", "memory://")
     _setup_otel_from_env()
     app = create_celery_app(broker_url=broker)
     register_tasks(app, _build_handler())
+    # P06-06C：worker_init 启动父进程 HTTP metrics 端点（9101）；
+    # worker_process_shutdown 删除子进程 .db 文件。
+    from invest_research.infrastructure.observability.worker_metrics_server import (
+        install_worker_signals,
+    )
+
+    install_worker_signals(app)
     return app
 
 

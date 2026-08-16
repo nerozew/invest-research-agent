@@ -249,7 +249,11 @@ def _cached_execute(
     execute_fn: Callable[[], Any],
     budget: ToolBudget | None = None,
 ) -> str:
-    """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 BUDGET_EXHAUSTED。"""
+    """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 BUDGET_EXHAUSTED。
+
+    P06-06C：真实执行完成后按成功/失败计数 tool_calls_total；
+    失败且错误可重试时按 tool/error_code 计数 tool_retries_total。
+    """
     cached, key = _cached_lookup(cache, recorder, tool_name, params)
     if cached is not None:
         return cached
@@ -261,7 +265,47 @@ def _cached_execute(
     text = serialize_fn(result)
     if cache is not None and key is not None and getattr(result, "kind", None) == "success":
         cache.put(key, text)
+    _record_tool_metrics(tool_name, result)
     return text
+
+
+def _record_tool_metrics(tool_name: str, result: Any) -> None:
+    """工具调用完成指标：成功/失败计数 + 可重试失败重试计数（尽力而为）。
+
+    失败时 result 是 ToolFailure（kind="failure"）；可重试判定委托
+    ToolError.is_retryable（domain 错误分类白名单）。计数失败不影响业务。
+    """
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_tool_call,
+        count_tool_retry,
+    )
+
+    is_success = getattr(result, "kind", None) == "success"
+    status = "success" if is_success else "failure"
+    count_tool_call(tool_name, status)
+    if is_success:
+        return
+    err = getattr(result, "error", None)
+    code = getattr(err, "error_code", None)
+    code_value = code.value if code is not None and hasattr(code, "value") else str(code)
+    if bool(getattr(err, "is_retryable", False)):
+        count_tool_retry(tool_name, code_value)
+
+
+def _record_tool_failure_metrics(tool_name: str, error_code: str) -> None:
+    """非缓存工具路径失败指标：按 tool/status 计数 + 可重试时计数重试。
+
+    用于异常路径直接返回失败 JSON 的工具（无 ToolFailure 对象可复用）。
+    """
+    from invest_research.domain.errors import is_retryable
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_tool_call,
+        count_tool_retry,
+    )
+
+    count_tool_call(tool_name, "failure")
+    if is_retryable(error_code):
+        count_tool_retry(tool_name, error_code)
 
 
 @dataclass(frozen=True)
@@ -406,11 +450,14 @@ def build_research_tools(
             text = _serialize_facts(result, as_of_date)
             if cache is not None and key is not None and result.kind == "success":
                 cache.put(key, text)
+            _record_tool_metrics("sec_company_facts", result)
             return text
         except ValueError as exc:
+            _record_tool_failure_metrics("sec_company_facts", "INPUT_INVALID")
             return _tool_failure_json("INPUT_INVALID", f"无效入参: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
             _count(stats, "sec_company_facts_failures")
+            _record_tool_failure_metrics("sec_company_facts", "INTERNAL_BUG")
             return _tool_failure_json("INTERNAL_BUG", f"SECCompanyFacts 异常: {type(exc).__name__}")
 
     @tool("FilingDownloader")
@@ -460,12 +507,20 @@ def build_research_tools(
             with _timed(recorder, "document_parser"):
                 outcome = parse_document(raw, media_type)
         except DocumentParseError as exc:
+            _record_tool_failure_metrics("document_parser", "DOCUMENT_UNSUPPORTED")
             return _tool_failure_json("DOCUMENT_UNSUPPORTED", str(exc))
         except (ValueError, TypeError) as exc:
+            _record_tool_failure_metrics("document_parser", "INPUT_INVALID")
             return _tool_failure_json("INPUT_INVALID", f"无效 base64: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
             _count(stats, "document_parser_failures")
+            _record_tool_failure_metrics("document_parser", "INTERNAL_BUG")
             return _tool_failure_json("INTERNAL_BUG", f"DocumentParser 异常: {type(exc).__name__}")
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_tool_call,
+        )
+
+        count_tool_call("document_parser", "success")
         doc = outcome.document
         blocks = getattr(doc, "blocks", None) or getattr(doc, "pages", None) or []
         snippet = blocks[:60]
@@ -717,10 +772,13 @@ def build_artifact_store_tool(artifact_store: ArtifactStore) -> list[Any]:
             result = store_tool.execute(
                 ArtifactStoreRequest(operation="write", artifact_key=artifact_key, content=content)
             )
+            _record_tool_metrics("artifact_writer", result)
             return _unpack(result)
         except (ValueError, TypeError) as exc:
+            _record_tool_failure_metrics("artifact_writer", "INPUT_INVALID")
             return _tool_failure_json("INPUT_INVALID", f"无效 base64: {exc}")
         except Exception as exc:  # noqa: BLE001 - 应用边界统一失败语义
+            _record_tool_failure_metrics("artifact_writer", "INTERNAL_BUG")
             return _tool_failure_json("INTERNAL_BUG", f"ArtifactWriter 异常: {type(exc).__name__}")
 
     return [artifact_writer]

@@ -41,10 +41,18 @@ def run_startup_recovery(
 
     - 调用 ``recovery_service.recover(now=now)`` 完成扫描与恢复；
     - 把结果写入 ``counter``（累计计数 + 最近一次扫描）；
+    - P06-06C：按本次真实恢复数更新 ``stale_running_steps`` Gauge
+      （指标写入失败由 metrics_events 脱敏处理，不影响恢复流程）；
     - 返回本次恢复数（供调用方决定是否记录日志/更新 gauge）。
     """
     result = recovery_service.recover(now=now() if now is not None else None)
     counter.record(result)
+    # P06-06C：把本次扫描恢复的 stale 步骤数设置为当前 Gauge 值。
+    from invest_research.infrastructure.observability.metrics_events import (
+        set_stale_running_steps,
+    )
+
+    set_stale_running_steps(result.recovered_count)
     logger.info(
         "startup_recovery_done",
         extra={

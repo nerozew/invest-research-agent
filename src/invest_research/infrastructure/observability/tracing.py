@@ -1,10 +1,12 @@
-"""OpenTelemetry trace（P05-07 基础 + P06-05 本地链路配置）。
+"""OpenTelemetry trace（P05-07 基础 + P06-05 本地链路配置 + P06-06C 端点修复）。
 
 提供：
 - ``setup_tracing``：初始化 TracerProvider + 导出器：
   - 默认（无 OTLP endpoint）：``SimpleSpanProcessor + ConsoleSpanExporter``（本地可观测）；
   - 配置 ``endpoint``（如 http://localhost:4318，对应本地 collector）：OTLP HTTP
     导出 + ``BatchSpanProcessor``（按 ``batch_interval_ms`` 批量上报）；
+- ``normalize_otlp_endpoint``：把 OTLP HTTP 基础地址规范化为含 ``/v1/traces`` 的
+  完整导出端点（P06-06C：OTLPSpanExporter 要求完整路径，否则 404）；
 - ``build_span_exporter``：按 endpoint 选择导出器（纯函数，便于测试）；
 - ``get_tracer`` / ``span``：按名称取 tracer / 开启一个 span（contextmanager）；
 - ``trace_id_from_context``：读取当前 span context 的 trace_id，供结构化日志关联。
@@ -34,6 +36,7 @@ from opentelemetry.sdk.trace.export import (
 __all__ = [
     "setup_tracing",
     "build_span_exporter",
+    "normalize_otlp_endpoint",
     "get_tracer",
     "span",
     "trace_id_from_context",
@@ -43,13 +46,41 @@ __all__ = [
 
 DEFAULT_SERVICE_NAME = "invest-research"
 
+# OTLP HTTP 协议要求导出 POST 到完整路径 http://host:port/v1/traces。
+# collector 环境变量 OTEL_EXPORTER_OTLP_ENDPOINT 约定只配置基础地址（不含路径），
+# SDK 客户端要求显式传给 OTLPSpanExporter(endpoint=...) 的必须是含 /v1/traces 的完整 URL。
+_OTLP_TRACES_PATH = "/v1/traces"
+
+
+def normalize_otlp_endpoint(endpoint: str | None) -> str | None:
+    """把 OTLP HTTP 基础地址规范化为含 ``/v1/traces`` 的完整导出端点。
+
+    - ``None`` / 空字符串 → None（调用方回退控制台导出）；
+    - 已含 ``/v1/traces``（任意结尾）→ 原样返回；
+    - 基础地址 → 追加 ``/v1/traces``；
+    - 正确处理末尾斜杠：``http://host:4318/`` → ``http://host:4318/v1/traces``。
+    """
+    if endpoint is None:
+        return None
+    stripped = endpoint.strip()
+    if not stripped:
+        return None
+    if stripped.rstrip("/").endswith(_OTLP_TRACES_PATH):
+        return stripped
+    return f"{stripped.rstrip('/')}{_OTLP_TRACES_PATH}"
+
 
 def build_span_exporter(endpoint: str | None) -> SpanExporter:
-    """按 endpoint 选择导出器：OTLP HTTP（配置了端点）或控制台（本地默认）。"""
-    if endpoint:
+    """按 endpoint 选择导出器：OTLP HTTP（配置了端点）或控制台（本地默认）。
+
+    P06-06C：传给 OTLPSpanExporter 前先经 ``normalize_otlp_endpoint`` 规范化，
+    修正 http://otel-collector:4318 导致的 `/v1/traces` 缺失（404 Not Found）。
+    """
+    normalized = normalize_otlp_endpoint(endpoint)
+    if normalized:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-        return OTLPSpanExporter(endpoint=endpoint)
+        return OTLPSpanExporter(endpoint=normalized)
     return ConsoleSpanExporter()
 
 

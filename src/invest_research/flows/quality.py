@@ -37,6 +37,16 @@ def run_quality_gate(state: ResearchFlowState) -> QualityReport:
     if state.report_draft is None:
         warnings.append("report_draft 缺失，章节与非投资建议声明无法检查")
 
+    # P06-06C：按稳定 gate 类别（issue.code）计数质量门禁失败。
+    # issue.code 是确定性短标识（如 missing_section / forbidden_advice），
+    # 不是消息文本，天然低基数且可聚合。计数失败不影响门禁结果。
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_quality_gate_failure,
+    )
+
+    for issue in q_issues:
+        count_quality_gate_failure(issue.code)
+
     return QualityReport(
         version="quality_report_v1",
         all_passed=all_passed_from_issues(q_issues),
