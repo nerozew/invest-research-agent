@@ -6,6 +6,8 @@
 - 注册 P04-07 的 Flow adapter：把 job_id 委派给 ``ExecuteResearchJobService``；
   loader/writer 使用真实 ``JobRepository``（惰性构建 DB 连接），
   flow_runner 用 ``ResearchFlowRunner``（fake 逻辑 Flow，P03 已验证 00-07 全链）。
+- P06-06B：Worker 开始处理 Job 时幂等创建 00-07 步骤并标记实时进度；
+  Job 失败时收口 running 步骤，终态清空 current_step。
 
 模块导入零 DB/Redis 连接：engine/session 在 ``process`` 首次调用时
 才由 ``_session_factory()`` 惰性创建。
@@ -25,9 +27,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from invest_research.application.execution import ExecuteResearchJobService
+from invest_research.application.progress import ProgressSink, StepRecordError
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus
 from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
+from invest_research.infrastructure.db.progress import SqlProgressSink
 from invest_research.infrastructure.db.repositories import JobRepository
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.queue.celery_app import create_celery_app
@@ -161,20 +165,33 @@ def _default_flow_runner() -> ResearchFlowRunner:
     return runner  # type: ignore[return-value]
 
 
+def _progress_logger() -> logging.Logger:
+    return logging.getLogger(__name__)
+
+
 def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJobExecutionHandler:
     """构造 worker 侧 handler：真实 Repository 加载/写状态 + Flow 执行。
 
     - 未显式传入 ``flow_runner`` 时按 ``FLOW_MODE`` 环境变量构建（默认 fake）；
     - loader：``JobRepository.get(job)`` → 用 ORM 字段重建 ``ResearchRequest``；
-    - writer：``JobRepository.update_status``（pending→running，终态 succeeded/failed）。
+    - writer：``JobRepository.update_status``（pending→running，终态 succeeded/failed）；
+    - P06-06B：SqlProgressSink 注入 loader（flow 运行前设置 job_id/progress），
+      writer 在 running/终态维护 current_step 与步骤收口。
     """
-    repo = JobRepository(_build_session_factory())
+    session_factory = _build_session_factory()
+    repo = JobRepository(session_factory)
+    # P06-06B：实时步骤进度端口（SQL 实现，短事务；写入失败不影响任务）
+    progress: ProgressSink = SqlProgressSink(session_factory)
 
     class _RepoLoader:
         def load(self, job_id: uuid.UUID) -> ResearchRequest | None:
             job = repo.get(job_id)
             if job is None:
                 return None
+            # P06-06B：把 job_id/progress 注入 flow runner（run 前由 ExecutionService
+            #  先调用 loader，再调用 flow_runner.run(request)——顺序保证注入生效）。
+            runner.progress = progress
+            runner.job_id = job_id
             return ResearchRequest(
                 input_company=job.input_company,
                 as_of_date=job.as_of_date,
@@ -187,33 +204,50 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
     class _RepoWriter:
         def mark_running(self, job_id: uuid.UUID) -> bool:
             # 条件更新 pending→running 并记录 started_at（乐观锁防重复执行）
-            with _build_session_factory()() as session:
+            with session_factory() as session:
                 row = session.get(ResearchJobORM, job_id)
                 if row is None or row.status != JobStatus.PENDING.value:
                     return False
                 row.status = JobStatus.RUNNING.value
                 row.started_at = datetime.now(timezone.utc)
                 session.commit()
-                return True
+            # P06-06B：幂等创建 00-07 步骤并标记 00_request running（重复投递不重复插入）
+            try:
+                progress.initialize_steps(job_id)
+                progress.mark_step_running(job_id, "00_request")
+            except StepRecordError as exc:
+                _progress_logger().warning("进度初始化失败 job=%s: %s", job_id, exc)
+            return True
 
         def mark_succeeded(self, job_id: uuid.UUID) -> None:
-            with _build_session_factory()() as session:
+            with session_factory() as session:
                 row = session.get(ResearchJobORM, job_id)
                 if row is None:
                     return
                 row.status = JobStatus.SUCCEEDED.value
                 row.completed_at = datetime.now(timezone.utc)
+                row.current_step = None  # P06-06B：终态清空 current_step
                 session.commit()
 
         def mark_failed(self, job_id: uuid.UUID) -> None:
             # P05.5-deploy-fix：Flow 异常 → running → failed（防止任务永久卡 running）
-            with _build_session_factory()() as session:
+            with session_factory() as session:
                 row = session.get(ResearchJobORM, job_id)
                 if row is None:
                     return
                 row.status = JobStatus.FAILED.value
                 row.completed_at = datetime.now(timezone.utc)
+                row.current_step = None  # P06-06B：终态清空 current_step
                 session.commit()
+            # P06-06B：收口所有仍为 running 的步骤为 failed_terminal（不留虚假 running）
+            try:
+                progress.fail_all_running_steps(
+                    job_id,
+                    error_code="FLOW_EXECUTION_FAILED",
+                    error_message="任务执行失败，流程异常终止",
+                )
+            except StepRecordError as exc:
+                _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
 
     runner = flow_runner if flow_runner is not None else _default_flow_runner()
     service = ExecuteResearchJobService(
@@ -224,16 +258,14 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
 
     # P05.5-opt：成功执行后把步骤/工件/耗时落库（失败只告警，不回滚已成功任务）
     recorder = ExecutionRecorder(
-        _build_session_factory(), os.environ.get("ARTIFACT_ROOT", "artifacts")
+        session_factory, os.environ.get("ARTIFACT_ROOT", "artifacts")
     )
 
     def _record_execution(job_id: uuid.UUID) -> None:
         try:
             recorder.record(job_id, getattr(runner, "last_state", None))
         except Exception as exc:  # noqa: BLE001 - 记录失败不影响任务结果
-            logging.getLogger(__name__).warning(
-                "执行记录落库失败 job=%s: %s", job_id, exc
-            )
+            _progress_logger().warning("执行记录落库失败 job=%s: %s", job_id, exc)
 
     return ResearchJobExecutionHandler(service, recorder=_record_execution)
 

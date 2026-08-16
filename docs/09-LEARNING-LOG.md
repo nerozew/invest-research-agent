@@ -2224,4 +2224,43 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 
 ---
 
+## P06-06A：每任务 fast/deep 研究档位（前端 + 后端持久化 + Worker 路由）
+
+**产物**：`domain/models.py` `ResearchProfileMode` + `ResearchRequest.research_profile`、`migrations/versions/0007_research_profile.py`、ORM/Store/DTO 持久化、`LiveResearchFlowRunner` 按任务档位动态切换（fast 关闭思考模式）、`frontend/pages/1_创建投研任务.py` 档位单选（UI 默认 fast 且显式传值）、`frontend/render.py` 档位徽章（⚡ 快速 / 🔬 深度）、列表/详情展示。
+
+### 3 个知识点
+
+1. **"UI 默认值"与"领域默认值"可以是两个不同决策**：领域模型 `ResearchRequest.research_profile` 默认 `deep` 是为了兼容旧 API 客户端（不传字段也不出错）；前端 UI 默认选 `fast` 是产品决策（推荐、低成本演示），且**显式把所选值写入请求体**——前端不依赖领域默认值，两侧语义独立、都清晰。
+2. **档位是"预算"而非"能力开关"**：fast 只是更少的迭代/重试/思考模式预算（`ResearchProfile.for_mode`），不是降级 AI 质量保证——避免"fast=假结果"的误导。
+3. **按任务档位动态覆盖，不改全局环境变量**：`run(request)` 里按 `request.research_profile` 解析当前预算（fast 关闭 `enable_thinking`），构造时 `profile` 只是回退默认——单 worker 串行 + 每 job 一个 runner 实例保证安全。
+
+### 检查问题（请用自己的话回答）
+为什么"前端 UI 默认 fast"和"领域模型默认 deep"不冲突？把两个默认值分开放置各自解决了什么问题？
+
+### 已知限制
+- 迁移 0007 已在本机 Docker PostgreSQL 真实执行 upgrade → downgrade → upgrade 通过；未在 CI 环境验证；
+- 前端未做"档位变更需确认"的二次确认（低风险，留待后续 UX 任务）。
+
+---
+
+## P06-06B：实时步骤状态与最小前端进度
+
+**产物**：`application/progress.py`（ProgressSink Protocol + 00-07 步骤常量）、`infrastructure/db/progress.py`（SqlProgressSink：短事务/幂等创建/合法状态转换/fail_all_running_steps）、`flows/research_flow.py`（fake Flow 步骤边界标记）、`flow_wiring.py`（live CrewAI TaskStartedEvent + Task 完成回调标记）、`worker.py`（mark_running 时初始化步骤、终态清空 current_step、失败收口 running）、`ExecutionRecorder` 改更新/补全（不重复插入）、`frontend/render.py` 当前阶段中文映射 + 步骤紧凑图标 + 旧任务兼容。
+
+### 3 个知识点
+
+1. **真实步骤边界与"假装有进度"的边界**：CrewAI 1.6.x 提供 TaskStartedEvent（task.py 开始 emit）和 Task 完成回调（同步调用）——能精确标记 Agent 步骤开始/完成；没有独立 documents Task，所以 `03_documents` 在 Research Task 完成后由 runner 标记（不提前 running）。**绝不解析日志文本假装进度**。
+2. **短事务 + 尽力而为的进度写入**：SqlProgressSink 每个方法独立短事务；Flow/Worker 侧捕获 `StepRecordError` 只记脱敏日志——进度写入失败**不得把成功任务误报失败**。"进度是观测，不是业务结果"。
+3. **幂等创建与状态机防护**：Worker mark_running 时 `initialize_steps` 幂等创建 00-07（复用 `uq_workflow_steps_job_step`）；`mark_step_running` 只允许 pending/failed_retryable → running；`mark_succeeded` 只允许 running → succeeded——重复 Celery 投递不重复插入、不越权迁移。ExecutionRecorder 从"插入"改"更新/补全"避免与实时进度冲突。
+
+### 检查问题（请用自己的话回答）
+为什么"进度写入失败不能把成功任务误报失败"？SqlProgressSink 的短事务 + 应用边界捕获异常各起了什么作用？
+
+### 已知限制
+- live 模式引导（公司解析 → prefetch → Crew kickoff → 门禁 → manifest）的步骤标记已接线，但**真实 live 全链未在本轮验证**（Docker smoke 只跑了 fake；真实 LLM/SEC/Serper 付费调用需用户明确授权）；
+- live Crew 的 `03_documents` 由 runner 在 Research Task 后统一标记（Crew 内无独立 documents Task），粒度是"文档处理阶段完成"而非每个文档逐个标记；
+- 测试期间曾误用 live 模式创建任务（.env 为 FLOW_MODE=live），已改用临时 `FLOW_MODE=fake` 覆盖；残留 running 任务（73ec29cf/e38d85f0）需用户清理。
+
+---
+
 

@@ -6,7 +6,7 @@
     普通测试/CI 不产生任何模型费用；
   - ``live``：fail-fast 校验真实 LLM API Key（缺失/为空即抛可读错误），
     返回 ``LiveResearchFlowRunner``（真实 Crew + 质量门禁 + 受控反思）。
-- ``LiveResearchFlowRunner``（P05-12B 完整实现）：
+- ``LiveResearchFlowRunner``（P05-12B 完整实现 + P06-06B 进度标记）：
   - ``run(request)``：执行真实生产 Crew/Flow——
     1. 接收 ResearchRequest；
     2. 运行三 Agent sequential Crew（默认真实模型；可注入 fake crew 离线验证）；
@@ -17,14 +17,23 @@
     7. 保存各步骤中间产物（全部 pack / draft / 质量报告 / manifest）；
     8. 失败抛 ``LiveFlowExecutionError``（不降级 fake）。
 
+P06-06B 进度边界（live）：
+- ``progress`` / ``job_id`` 由 Worker 在 run 前注入（可选）；
+- 真实步骤边界：01_company_resolve（预取前/后）、02_research / 04_analysis / 05_writer
+  用 CrewAI Task 的 TaskStartedEvent 与完成回调精确标记；
+- 06_quality_gate / 07_manifest 在确定性门禁前后标记；
+- 进度写入失败绝不中断任务（尽力而为，脱敏日志由调用方负责）。
+
 授权边界：live 分支缺 key fail-fast；真实模型调用只发生在 Crew kickoff 时。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -34,6 +43,7 @@ from pydantic import BaseModel, ValidationError
 
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
+from invest_research.application.progress import ProgressSink
 from invest_research.domain.models import (
     CompanyIdentity,
     FinancialAnalysisPack,
@@ -63,8 +73,15 @@ __all__ = [
     "build_flow_runner",
 ]
 
-# 三 Agent 的执行顺序（与 crew_factory._assemble_tasks 保持一致）
+_LOGGER = logging.getLogger(__name__)
+
+# 三 Agent 的执行顺序（与 crew_factory._assemble_tasks 保持一致；任务角色 → 步骤名）
 _AGENT_ROLE_ORDER = ("research", "analysis", "writer")
+_AGENT_ROLE_TO_STEP = {
+    "research": "02_research",
+    "analysis": "04_analysis",
+    "writer": "05_writer",
+}
 
 # 从 LLM 原始文本中提取 JSON 对象（贪婪匹配第一个 { 到最后一个 }，兼容围栏/前后缀）
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -143,7 +160,7 @@ def _normalize_research_sources(research_pack: ResearchPack) -> ResearchPack:
 
 
 class LiveResearchFlowRunner:
-    """live 模式的 FlowRunner 契约实现（真实 Crew + 质量门禁 + 受控反思）。
+    """live 模式的 FlowRunner 契约实现（真实 Crew + 质量门禁 + 受控反思 + 进度）。
 
     构造时只保存配置与可注入工具（不发请求）；``run`` 按 FlowRunner 端口语义
     返回 None，执行结果写入 ``last_state`` / ``run_manifest``。
@@ -202,6 +219,9 @@ class LiveResearchFlowRunner:
         self._prefetch_result: PrefetchResult | None = None
         # 结构化收尾只允许一次
         self._finalize_used = False
+        # P06-06B：实时进度端口（Worker 在 run 前注入；不注入则静默）
+        self.progress: ProgressSink | None = None
+        self.job_id: uuid.UUID | None = None
 
     @property
     def config(self) -> LLMConfig:
@@ -211,6 +231,28 @@ class LiveResearchFlowRunner:
     def assemble_crew(self, fakes: dict[str, AnyLLM]) -> Crew:
         """用注入的 fake LLM 组装三 Agent 顺序 Crew（离线契约验证，不联网）。"""
         return build_research_crew(self._config, fakes)
+
+    # ------------------------------------------------------------------
+    # P06-06B：进度标记辅助（写入失败不中断任务）
+    # ------------------------------------------------------------------
+
+    def _mark(self, step_name: str, action: str) -> None:
+        """标记步骤运行中/成功；进度未注入或写入失败均静默（尽力而为）。"""
+        if self.progress is None or self.job_id is None:
+            return
+        try:
+            if action == "running":
+                self.progress.mark_step_running(self.job_id, step_name)
+            elif action == "succeeded":
+                self.progress.mark_step_succeeded(self.job_id, step_name)
+        except Exception as exc:  # noqa: BLE001 - 进度尽力而为
+            _LOGGER.warning(
+                "进度标记失败 job=%s step=%s action=%s: %s",
+                self.job_id,
+                step_name,
+                action,
+                exc,
+            )
 
     def run(self, request: ResearchRequest) -> None:
         """FlowRunner 端口实现：完整执行真实生产 Crew/Flow（同步）。"""
@@ -249,6 +291,9 @@ class LiveResearchFlowRunner:
         """
         started_at = time.time()
 
+        # P06-06B：01_company_resolve 开始（确定性本地解析/预取边界）
+        self._mark("01_company_resolve", "running")
+
         # 0. 公司身份确认后并行预取（best-effort，失败不影响 Agent 兜底）
         prefetch_result: PrefetchResult | None = None
         if self._prefetch is not None:
@@ -258,6 +303,7 @@ class LiveResearchFlowRunner:
                 # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
                 prefetch_result = None
         self._prefetch_result = prefetch_result
+        self._mark("01_company_resolve", "succeeded")
 
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
         inputs = self._build_crew_inputs(request, prefetch_result)
@@ -265,18 +311,31 @@ class LiveResearchFlowRunner:
         # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）。
         #    P06-06A：按任务档位解析后的有效配置（fast 已关闭思考模式）。
         crew = self._crew_factory(self._effective_config, self._research_tools)
+        #    P06-06B：用 CrewAI TaskStartedEvent 标记 Task 开始（task.py:521 可靠 emit）。
+        #    scope 在 kickoff 期间保持活跃，结束后显式退出清除本轮 handler。
+        scope = self._subscribe_task_progress(crew)
         try:
             result = crew.kickoff(inputs=inputs)
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
+            if scope is not None:
+                scope.__exit__(None, None, None)
             raise LiveFlowExecutionError(
                 f"真实 Crew 执行失败: {type(exc).__name__}: {exc}"
             ) from exc
+        if scope is not None:
+            scope.__exit__(None, None, None)
+
+        # P06-06B：03_documents 在 Research Task 完成后由本 runner 标记
+        # （Research 行为内含文档处理，Crew 内无独立 documents Task）。
+        self._mark("03_documents", "succeeded")
 
         # 2. 解析三个 pack 写入 state
         state = self._extract_packs(result, request)
 
-        # 3. 确定性质量门禁
+        # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界）
+        self._mark("06_quality_gate", "running")
         state.quality_report = run_quality_gate(state)
+        self._mark("06_quality_gate", "succeeded")
 
         # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
         reflection = self._run_reflection(state)
@@ -284,6 +343,8 @@ class LiveResearchFlowRunner:
         # 5. 采集性能并生成 RunManifest（质量门禁通过才 published）
         self._record_performance(crew, result)
         performance = self._recorder.snapshot()
+        # P06-06B：07_manifest 边界
+        self._mark("07_manifest", "running")
         state.run_manifest = build_run_manifest(
             state, self._config, started_at=started_at, performance=performance
         )
@@ -297,11 +358,97 @@ class LiveResearchFlowRunner:
                 invocation[f"{tool_name}_calls"] = int(metrics["calls"])
         if invocation:
             state.run_manifest["evidence"] = {"invocation_summary": invocation}
+        self._mark("07_manifest", "succeeded")
 
         # 6. 保存中间产物（确定性落盘）
         self._persist_intermediates(request, state)
 
         return state
+
+    def _subscribe_task_progress(
+        self, crew: Crew
+    ) -> Any | None:
+        """用 CrewAI 事件总线标记 Task 开始/完成边界（P06-06B）。
+
+        - TaskStartedEvent（task.py:521）在 Task 真正开始时 emit；
+        - Task.callback（task.py:567-568）在 Task 完成时同步调用。
+        返回值是 ``scoped_handlers()`` 的 context manager；调用方必须在 kickoff
+        完成后调用 ``scope.__exit__(...)`` 清除本轮 handler（防止泄漏到下一个 Job）。
+
+        无事件总线（旧版 CrewAI）时退化为仅按顺序推断完成边界（不做提前 running），
+        返回 None。
+        """
+        if self.progress is None or self.job_id is None:
+            return None
+        try:
+            from crewai.events.event_bus import crewai_event_bus
+            from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
+        except ImportError:
+            # 旧版 CrewAI 无事件总线：退化为仅按顺序推断完成边界（不做提前 running）
+            self._attach_task_callbacks(crew)
+            return None
+
+        def _on_start(source: Any, event: TaskStartedEvent) -> None:
+            task = event.task
+            role = getattr(task, "role", None)
+            agent = getattr(task, "agent", None)
+            role_name = (
+                role
+                if isinstance(role, str) and role
+                else (getattr(agent, "role", None) if agent is not None else None)
+            )
+            step = self._role_to_step(role_name)
+            if step:
+                self._mark(step, "running")
+
+        def _on_completed(source: Any, event: TaskCompletedEvent) -> None:
+            task = event.task
+            role_name = None
+            agent = getattr(task, "agent", None)
+            if agent is not None:
+                role_name = getattr(agent, "role", None)
+            step = self._role_to_step(role_name)
+            if step:
+                self._mark(step, "succeeded")
+
+        scope = crewai_event_bus.scoped_handlers()
+        scope.__enter__()
+        crewai_event_bus.on(TaskStartedEvent)(_on_start)
+        crewai_event_bus.on(TaskCompletedEvent)(_on_completed)
+        return scope
+
+    def _attach_task_callbacks(self, crew: Crew) -> None:
+        """备用：无事件总线时给每个 Task 设置完成回调（只标记完成边界，不提前 running）。"""
+        for task in getattr(crew, "tasks", []):
+            role = getattr(task, "role", None)
+            agent = getattr(task, "agent", None)
+            role_name = (
+                role
+                if isinstance(role, str) and role
+                else (getattr(agent, "role", None) if agent is not None else None)
+            )
+            step = self._role_to_step(role_name)
+            if step is None:
+                continue
+            original = getattr(task, "callback", None)
+
+            def _cb(output: Any, _step: str = step) -> None:
+                self._mark(_step, "succeeded")
+                if original is not None:
+                    original(output)
+
+            task.callback = _cb
+
+    @staticmethod
+    def _role_to_step(role_name: str | None) -> str | None:
+        """把 Agent role 名映射到步骤名（未知 role 返回 None 不标记）。"""
+        if not role_name:
+            return None
+        lowered = str(role_name).lower()
+        for role, step in _AGENT_ROLE_TO_STEP.items():
+            if role in lowered or lowered in role:
+                return step
+        return None
 
     def _build_crew_inputs(
         self, request: ResearchRequest, prefetch_result: PrefetchResult | None

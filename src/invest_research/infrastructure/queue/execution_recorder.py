@@ -1,4 +1,4 @@
-"""Worker 执行后的落库记录：workflow_steps + artifacts 登记（P05.5-opt）。
+"""Worker 执行后的落库记录：workflow_steps + artifacts 登记（P05.5-opt + P06-06B）。
 
 背景：P04-07 最小 worker 只翻转任务状态，API 的步骤/工件/耗时接口读不到数据。
 本模块在 flow 运行成功后：
@@ -6,6 +6,12 @@
 - 把 live runner 写到 <artifact_root>/<company>_<as_of>/ 的产物移动到
   <artifact_root>/<job_id>/（与 SqlArtifactContentStore 的解析布局一致），
   并登记 artifacts 表（key/type/checksum/byte_size）。
+
+P06-06B：步骤在 Worker 运行时已由 SqlProgressSink 幂等创建并实时更新状态。
+本模块不再重复插入步骤，而是按 (job_id, step_name) 更新/补全：
+- 已存在的步骤：只补写结构化 I/O 与 output_schema_version（不覆盖运行中状态）；
+- 不存在的步骤（如旧版本跳过创建）：按终态补全（attempt_count=1）。
+这一步保证 ExecutionRecorder 与实时进度并存，不冲突、不重复。
 
 不依赖 Celery/CrewAI，可独立离线测试；worker.py 组装时使用。
 """
@@ -124,7 +130,7 @@ def move_artifacts_to_job_dir(
 
 
 class ExecutionRecorder:
-    """把已成功的执行结果落库（workflow_steps + artifacts 目录登记）。"""
+    """把已成功的执行结果落库（workflow_steps 更新/补全 + artifacts 目录登记）。"""
 
     def __init__(self, session_factory: SessionFactory, artifact_root: str) -> None:
         self._sf = session_factory
@@ -141,7 +147,35 @@ class ExecutionRecorder:
             except OSError as exc:
                 _LOGGER.warning("移动/登记工件失败 job=%s: %s", job_id, exc)
         with self._sf() as session:
+            existing: dict[str, WorkflowStep] = {
+                s.step_name: s
+                for s in session.query(WorkflowStep)
+                .filter(WorkflowStep.job_id == job_id)
+                .all()
+            }
             for step in steps:
+                name = str(step["step_name"])
+                row = existing.get(name)
+                if row is not None:
+                    # P06-06B：步骤已由 SqlProgressSink 实时创建/更新。
+                    # 这里只补写结构化 I/O 与版本摘要，不覆盖运行中状态/时间。
+                    attempt_count = step.get("attempt_count")
+                    if isinstance(attempt_count, int):
+                        row.attempt_count = max(int(row.attempt_count or 0), attempt_count)
+                    input_json = step.get("input_json")
+                    if isinstance(input_json, dict):
+                        row.input_json = {**row.input_json, **input_json}
+                    output_json = step.get("output_json")
+                    if isinstance(output_json, dict):
+                        row.output_json = {**row.output_json, **output_json}
+                    output_schema_version = step.get("output_schema_version")
+                    if isinstance(output_schema_version, str):
+                        row.output_schema_version = output_schema_version
+                    error_json = step.get("error_json")
+                    if isinstance(error_json, dict) and not row.error_json:
+                        row.error_json = error_json
+                    continue
+                # 旧任务无实时步骤：按终态补全（attempt_count=1）
                 session.add(WorkflowStep(id=uuid.uuid4(), job_id=job_id, **step))
             for artifact in artifacts:
                 session.add(Artifact(id=uuid.uuid4(), job_id=job_id, **artifact))

@@ -5,7 +5,7 @@
   委托 ``ResearchFlow.run_fake(request)``（纯 fake 逻辑 Flow，P03 已验证）。
   执行后把最终 ``state`` 记录到 ``last_state``，供测试断言与审计展示。
 - ``ResearchJobExecutionHandler``：实现 ``infrastructure.queue.tasks.JobTaskHandler``
-  端口，把 worker 收到的 job_id 委托给 ``ExecuteResearchJobService``
+  端口，把 worker 收到的 job_id 委派给 ``ExecuteResearchJobService``
   （pending→running→终态 + 防重复执行）。
 
 依赖方向：infrastructure -> application（端口/用例）+ flows（Flow 实体）。
@@ -20,6 +20,7 @@ from typing import Callable
 from invest_research.application.execution import (
     ExecuteResearchJobService,
 )
+from invest_research.application.progress import ProgressSink
 from invest_research.domain.models import ResearchRequest
 from invest_research.flows.research_flow import ResearchFlow
 from invest_research.flows.state import ResearchFlowState
@@ -32,15 +33,26 @@ class ResearchFlowRunner:
 
     ``last_state``：最后一次 ``run`` 执行后的 Flow state
     （P04-07 验收：state 从 pending 推进到 quality_report/run_manifest）。
+
+    P06-06B：``progress`` / ``job_id`` 由 Worker 构建 handler 时注入（可选）；
+    提供时在 Flow 真实步骤边界标记实时进度（不传则行为与旧版一致）。
     """
 
     def __init__(self) -> None:
         # 每个 job 新建 Flow 实例（Flow 是有状态工作台，不跨任务复用）。
         self._flow = ResearchFlow()
         self.last_state: ResearchFlowState | None = None
+        # P06-06B：Worker 在开始处理任务前注入的实时进度端口与 job_id
+        self.progress: ProgressSink | None = None
+        self.job_id: uuid.UUID | None = None
 
     def run(self, request: ResearchRequest) -> None:
-        self.last_state = self._flow.run_fake(request)
+        # P06-06B：把 Worker 注入的 job_id/progress 传给 Flow 步骤边界钩子
+        self.last_state = self._flow.run_fake(
+            request,
+            job_id=self.job_id,
+            progress=self.progress,
+        )
 
 
 class ResearchJobExecutionHandler:

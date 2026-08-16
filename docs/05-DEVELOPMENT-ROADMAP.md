@@ -222,6 +222,8 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P06-05 ✅ | 完成本地 OpenTelemetry 链路查看 | collector/exporter config | FastAPI→Worker→Flow→Tool trace 可关联 | trace、span、context |
 | P06-05A ✅ | 补齐真实财务事实数据流 | SEC Company Facts prefetch + Analysis input | 事实按 filed/as_of 截断、可追溯且不再默认为空 | point-in-time data、grounding |
 | P06-06 ✅ | 建立完整本地 Docker Compose profile | compose + config | API、Worker、PostgreSQL、Redis、Prometheus、Grafana 和 trace 组件可启动 | local operations |
+| P06-06A ✅ | 每任务 fast/deep 研究档位 | ResearchProfileMode + 0007 迁移 + 前端档位单选/徽章 | 前端显式传 research_profile；旧请求默认 deep 兼容；列表/详情显示档位；迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过 | per-job budget、UI/domain 默认分离 |
+| P06-06B ✅ | 实时步骤状态与最小前端进度 | ProgressSink 协议 + SqlProgressSink + Flow/Worker 步骤标记 + 前端阶段中文映射 | Worker 幂等创建 00-07；合法状态转换；失败不留虚假 running；终态清空 current_step；前端当前阶段；旧任务 steps=[] 兼容 | 真实步骤边界、短事务、幂等创建 |
 | P06-07 | 执行本地部署 smoke test | scripts/docs | health、任务执行、报告下载、指标和链路查询通过 | deployment verification |
 | P06-08 | 实现 PostgreSQL 与工件备份恢复演练 | scripts + runbook | 从备份恢复一个完整 job、步骤和报告 | RPO/RTO、recovery |
 | P06-09 | 建 GitHub Actions CI | workflow | lint、type、unit、integration 通过 | CI quality gate |

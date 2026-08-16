@@ -6,9 +6,12 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`（本地 commit，**未 push**）
-- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；P06-07~14 未开始。
+- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅**；P06-07~14 未开始。
 - **P06-06**：完整本地 Docker Compose observability profile（Prometheus / Grafana / OTel Collector / Jaeger）已真实启动并通过健康检查。
-- **当前验证**：相关测试 36 passed；Ruff 全绿；`mypy src` 108 个源文件全绿；`docker compose --profile observability config --quiet` 通过。
+- **P06-06A**：每任务 fast/deep 研究档位（前端单选 + 0007 迁移 + Worker 路由 + fast 关闭思考模式）。
+- **P06-06B**：ProgressSink 实时步骤状态（幂等创建 00-07、合法状态转换、失败收口 running、终态清空 current_step、前端阶段中文映射）。
+- **当前验证**：相关测试 87 passed（含新增 SqlProgressSink/前端/ExecutionRecorder 不重复插入）；Ruff 全绿；`mypy src` 110 个源文件全绿；0007 迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过；fast/deep fake smoke 通过（running 期间 current_step+steps、终态 8 步全成功、无真实 API 调用）。
+- **当前 commit**：P06-06A 代码 `b2d773e`（已存在）+ 本轮新增（未提交）。
 
 ## 2. 已完成任务与本地 commit
 
@@ -21,6 +24,8 @@
 | P06-05 ✅ | trace carrier 同 Outbox 持久化，Celery headers 投递，Worker 提取 parent context | trace/outbox/dispatcher 18 passed | `33f0643` |
 | P06-05A ✅ | SEC Company Facts 并行预取、filed/as_of 截断、concept mapping 选数、Analysis 硬约束注入 | 相关 42 passed | `4a0b1a9` |
 | P06-06 ✅ | 完整本地 Docker Compose observability profile（Prometheus/Grafana/OTel Collector/Jaeger） | test_compose_observability 12 passed；相关 36 passed | 本轮待提交 |
+| P06-06A ✅ | 每任务 fast/deep 档位：ResearchProfileMode + 0007 迁移 + 前端单选/徽章 + Worker 路由 | 相关 87 passed（含新增前端/进度）；Ruff/mypy 全绿；0007 真实 PostgreSQL upgrade→downgrade→upgrade 通过 | 代码已在 `b2d773e`（后端）+ 本轮前端 |
+| P06-06B ✅ | 实时步骤状态：ProgressSink + SqlProgressSink 短事务/幂等创建 + Flow/Worker 步骤标记 + 前端阶段中文映射 | SqlProgressSink 11、ExecutionRecorder 不重复、前端 19、Worker 87 全绿 | 本轮待提交 |
 
 ## 3. 关键产物文件（P06 增量）
 
