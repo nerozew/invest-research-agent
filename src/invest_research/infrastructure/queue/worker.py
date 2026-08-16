@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
@@ -24,9 +26,12 @@ from sqlalchemy.orm import Session
 
 from invest_research.application.execution import ExecuteResearchJobService
 from invest_research.domain.models import ResearchRequest
+from invest_research.domain.status import JobStatus
+from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
 from invest_research.infrastructure.db.repositories import JobRepository
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.queue.celery_app import create_celery_app
+from invest_research.infrastructure.queue.execution_recorder import ExecutionRecorder
 from invest_research.infrastructure.queue.flow_adapter import (
     ResearchFlowRunner,
     ResearchJobExecutionHandler,
@@ -179,14 +184,24 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
 
     class _RepoWriter:
         def mark_running(self, job_id: uuid.UUID) -> bool:
-            from invest_research.domain.status import JobStatus
-
-            return repo.update_status(job_id, JobStatus.PENDING, JobStatus.RUNNING)
+            # 条件更新 pending→running 并记录 started_at（乐观锁防重复执行）
+            with _build_session_factory()() as session:
+                row = session.get(ResearchJobORM, job_id)
+                if row is None or row.status != JobStatus.PENDING.value:
+                    return False
+                row.status = JobStatus.RUNNING.value
+                row.started_at = datetime.now(timezone.utc)
+                session.commit()
+                return True
 
         def mark_succeeded(self, job_id: uuid.UUID) -> None:
-            from invest_research.domain.status import JobStatus
-
-            repo.update_status(job_id, JobStatus.RUNNING, JobStatus.SUCCEEDED)
+            with _build_session_factory()() as session:
+                row = session.get(ResearchJobORM, job_id)
+                if row is None:
+                    return
+                row.status = JobStatus.SUCCEEDED.value
+                row.completed_at = datetime.now(timezone.utc)
+                session.commit()
 
     runner = flow_runner if flow_runner is not None else _default_flow_runner()
     service = ExecuteResearchJobService(
@@ -194,7 +209,21 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
         writer=_RepoWriter(),
         flow_runner=runner,
     )
-    return ResearchJobExecutionHandler(service)
+
+    # P05.5-opt：成功执行后把步骤/工件/耗时落库（失败只告警，不回滚已成功任务）
+    recorder = ExecutionRecorder(
+        _build_session_factory(), os.environ.get("ARTIFACT_ROOT", "artifacts")
+    )
+
+    def _record_execution(job_id: uuid.UUID) -> None:
+        try:
+            recorder.record(job_id, getattr(runner, "last_state", None))
+        except Exception as exc:  # noqa: BLE001 - 记录失败不影响任务结果
+            logging.getLogger(__name__).warning(
+                "执行记录落库失败 job=%s: %s", job_id, exc
+            )
+
+    return ResearchJobExecutionHandler(service, recorder=_record_execution)
 
 
 def _setup_otel_from_env() -> None:

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Callable
 
 from invest_research.application.execution import (
     ExecuteResearchJobService,
@@ -43,10 +44,21 @@ class ResearchFlowRunner:
 
 
 class ResearchJobExecutionHandler:
-    """Celery worker 侧的 job handler：委托执行服务。"""
+    """Celery worker 侧的 job handler：委托执行服务。
 
-    def __init__(self, service: ExecuteResearchJobService) -> None:
+    ``recorder``：可选执行后回调（P05.5-opt），成功执行后把步骤/工件/耗时落库；
+    记录失败不影响任务本身（由调用方兜底）。
+    """
+
+    def __init__(
+        self,
+        service: ExecuteResearchJobService,
+        recorder: Callable[[uuid.UUID], None] | None = None,
+    ) -> None:
         self._service = service
+        self._recorder = recorder
 
     def process(self, job_id: uuid.UUID) -> None:
         self._service.process(job_id)
+        if self._recorder is not None:
+            self._recorder(job_id)
