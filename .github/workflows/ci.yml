@@ -142,8 +142,11 @@ jobs:
 
       # 用真实 PostgreSQL 跑 Alembic 迁移 + repository 集成测试（覆盖 upgrade/downgrade 可回滚）。
       # 只跑 DB 集成测试集：test_migration_* / test_job_repository / test_step_artifact_repository。
+      # 必须覆盖全局 DATABASE_URL（sqlite）：migrations/env.py 优先读取该环境变量，
+      # 若不覆盖，Alembic 会在 SQLite 上跑迁移导致 downgrade 失败。
       - name: Run migration and DB integration tests
         env:
           SKIP_DB_TESTS: ""
+          DATABASE_URL: "postgresql+psycopg://invest:invest@localhost:5432/invest"
           TEST_DATABASE_URL: "postgresql+psycopg://invest:invest@localhost:5432/invest"
         run: uv run pytest -q -p no:cacheprovider tests/test_migration_001.py tests/test_migration_002.py tests/test_migration_003.py tests/test_migration_004.py tests/test_job_repository.py tests/test_step_artifact_repository.py
