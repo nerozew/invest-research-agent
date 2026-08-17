@@ -16,8 +16,8 @@ from crewai import Agent, Task
 
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
 from invest_research.agents.writer_task import (
-    artifact_reader,
     citation_verifier,
+    make_artifact_reader,
     template_guide,
 )
 from invest_research.domain.models import ReportDraft
@@ -33,7 +33,7 @@ REVISION_PROMPT_V1 = (
 )
 
 # 修订 Agent 白名单：读旧稿 + 验引用 + 查模板（不给新增来源/计算能力）
-_REVISION_TOOLS = [artifact_reader, citation_verifier, template_guide]
+_REVISION_TOOLS = [make_artifact_reader(), citation_verifier, template_guide]
 
 
 def build_revision_agent(config: LLMConfig, fake: AnyLLM | None = None) -> Agent:

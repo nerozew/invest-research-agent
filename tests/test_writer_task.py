@@ -13,11 +13,11 @@ from __future__ import annotations
 from invest_research.agents.llm_factory import FakeLLM, LLMConfig, LLMRole
 from invest_research.agents.writer_task import (
     REPORT_SECTIONS,
-    artifact_reader,
     build_writer_agent,
     build_writer_pair,
     build_writer_task,
     citation_verifier,
+    make_artifact_reader,
     template_guide,
 )
 from invest_research.domain.models import ReportDraft
@@ -77,10 +77,45 @@ def test_citation_verifier_is_deterministic() -> None:
 
 
 def test_artifact_reader_returns_readable() -> None:
-    """ArtifactReader：确定性返回工件可读状态。"""
-    result = artifact_reader.run(artifact_key="02_research_pack.json")
+    """ArtifactReader：未注入 loader 时确定性返回工件可读状态（占位兼容）。"""
+    reader = make_artifact_reader()
+    result = reader.run(artifact_key="02_research_pack.json")
     assert result["status"] == "readable"
     assert result["artifact_key"] == "02_research_pack.json"
+
+
+def test_artifact_reader_with_loader_returns_real_content() -> None:
+    """方案B：注入真实 loader 时 ArtifactReader 返回上游 pack 真实内容。"""
+    loader_calls: list[str] = []
+
+    def loader(artifact_key: str) -> dict[str, object] | None:
+        loader_calls.append(artifact_key)
+        if artifact_key != "research_pack":
+            return None
+        return {
+            "version": "research_pack_v1",
+            "company": {"ticker": "AAPL", "name": "Apple Inc."},
+        }
+
+    reader = make_artifact_reader(loader)
+    result = reader.run(artifact_key="research_pack")
+    assert result["status"] == "readable"
+    assert result["artifact_key"] == "research_pack"
+    assert result["content"]["company"]["ticker"] == "AAPL"
+    assert loader_calls == ["research_pack"]
+
+    # 未知 key → loader 返回 None → not_found（Writer 可在数据限制中说明，不编造）
+    not_found = reader.run(artifact_key="unknown_pack")
+    assert not_found["status"] == "not_found"
+    assert loader_calls == ["research_pack", "unknown_pack"]
+
+
+def test_artifact_reader_loader_returns_none_is_not_found() -> None:
+    """方案B：loader 返回 None 时 ArtifactReader 明确 not_found（不静默给空壳）。"""
+    reader = make_artifact_reader(lambda _key: None)
+    result = reader.run(artifact_key="analysis_pack")
+    assert result["status"] == "not_found"
+    assert "content" not in result
 
 
 def test_fake_llm_instantiates_report_draft() -> None:

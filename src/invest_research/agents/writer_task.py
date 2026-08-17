@@ -13,6 +13,8 @@ CrewAI 1.6.1 关键 API（依据官方 docs/edge 的 AGENTS 模板）：
 
 from __future__ import annotations
 
+from typing import Any, Callable
+
 from crewai import Agent, Task
 from crewai.tools import tool
 
@@ -39,18 +41,33 @@ REPORT_SECTIONS: tuple[str, ...] = (
     "来源清单与非投资建议声明",
 )
 
+# ArtifactReader 的可注入读取器：artifact_key → 可序列化内容 dict。
+# Agent 通过该回调在运行时读取上游 pack 的真实内容（依赖方向 infrastructure→agents）。
+ArtifactLoader = Callable[[str], dict[str, Any] | None]
 
-@tool("ArtifactReader")
-def artifact_reader(artifact_key: str) -> dict[str, str]:
-    """读取工作流中间工件（ResearchPack / FinancialAnalysisPack 等）。
 
-    确定性实现：这里返回工件读取的契约占位（P04-04 接 DB 后可注入真实存储）。
-    当前场景下返回 ``{"artifact_key": ...}`` 表明该工件可被读取。
-    """
-    # P02-12 的 ArtifactStoreTool 是 P02-01 契约（execute），与 CrewAI BaseTool 不同，
-    # 需经 @tool 包装才能挂在 Agent.tools 上；这里先做最小确定性实现，
-    # 真实文件读取由 P04 的 API/存储层注入。
+def _placeholder_loader(artifact_key: str) -> dict[str, Any]:
+    """默认占位读取器：返回契约占位（未注入真实存储时保持向后兼容）。"""
     return {"artifact_key": artifact_key, "status": "readable"}
+
+
+def make_artifact_reader(loader: ArtifactLoader | None = None) -> Any:
+    """构造 ArtifactReader CrewAI 工具。
+
+    - ``loader`` 为 None 时使用占位实现（fake 测试/无真实存储）；
+    - 生产路径注入可回调闭包，运行时读取上游 Task 真实输出。
+    """
+    resolver = loader if loader is not None else _placeholder_loader
+
+    @tool("ArtifactReader")
+    def artifact_reader(artifact_key: str) -> dict[str, object]:
+        """读取工作流中间工件（ResearchPack / FinancialAnalysisPack 等），返回其真实内容。"""
+        content = resolver(artifact_key)
+        if content is None:
+            return {"artifact_key": artifact_key, "status": "not_found"}
+        return {"artifact_key": artifact_key, "status": "readable", "content": content}
+
+    return artifact_reader
 
 
 @tool("CitationVerifier")
@@ -89,24 +106,29 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
     return {"is_known": section_name in REPORT_SECTIONS, "section": section_name}
 
 
-# Writer 最小工具白名单（least-privilege：读工件 / 验引用 / 查模板）
-_WRITER_TOOLS = [artifact_reader, citation_verifier, template_guide]
+# Writer 最小工具白名单（least-privilege：读工件 / 验引用 / 查模板；
+# ArtifactReader 可注入真实 loader）。
+_WRITER_TOOLS = [make_artifact_reader(), citation_verifier, template_guide]
 
 
 def build_writer_agent(
     config: LLMConfig,
     fake: AnyLLM | None = None,
     profile: ResearchProfile | None = None,
+    artifact_loader: ArtifactLoader | None = None,
 ) -> Agent:
     """构建报告撰写 Agent（统一 LLM 接口）。
 
     - 只注入 ArtifactReader + CitationVerifier + TemplateGuide；
+    - ``artifact_loader``：可选注入上游工件读取器（生产从 Task 输出读取真实 pack）；
+      未注入时 ArtifactReader 用占位实现（向后兼容 fake 测试）；
     - backstory 使用 writer_prompt_v1（明确禁止引入新事实）；
     - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.WRITER)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
     resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
+    reader = make_artifact_reader(artifact_loader)
     return Agent(
         role="报告撰写 Agent",
         goal=(
@@ -115,7 +137,7 @@ def build_writer_agent(
         ),
         backstory=prompt,
         llm=llm,
-        tools=_WRITER_TOOLS,
+        tools=[reader, citation_verifier, template_guide],
         allow_delegation=False,
         verbose=False,
         max_iter=resolved.writer_max_iter,
@@ -130,19 +152,25 @@ def build_writer_task(
     fake: AnyLLM | None = None,
     agent: Agent | None = None,
     profile: ResearchProfile | None = None,
+    artifact_loader: ArtifactLoader | None = None,
 ) -> Task:
     """构建 Writer Task：fake LLM + 写作工具白名单，输出绑定 ReportDraft。"""
     task_agent = (
         agent
         if agent is not None
-        else build_writer_agent(config, fake=fake, profile=profile)
+        else build_writer_agent(
+            config, fake=fake, profile=profile, artifact_loader=artifact_loader
+        )
     )
     return Task(
         description=(
             "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
-            "基于上游 research_pack 与 analysis_pack，按 writer_prompt_v1 规则撰写"
-            "符合 ReportDraft 契约的中文投资研究初稿：每个事实带 citation key，"
-            "区分事实/分析/风险/数据限制，包含非投资建议声明与数据截止日。"
+            "按 writer_prompt_v1 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
+            "写作素材通过 ArtifactReader 工具读取：调用 ArtifactReader(\"research_pack\") 与 "
+            "ArtifactReader(\"analysis_pack\") 获取上游真实内容（若未读到内容，必须明确写入"
+            "数据限制章节，不得编造）。\n"
+            "要求：每个事实带 citation key，区分事实/分析/风险/数据限制，"
+            "包含非投资建议声明与数据截止日。"
         ),
         expected_output="一个可被 ReportDraft 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,
@@ -154,8 +182,13 @@ def build_writer_pair(
     config: LLMConfig,
     fake: AnyLLM,
     profile: ResearchProfile | None = None,
+    artifact_loader: ArtifactLoader | None = None,
 ) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
-    agent = build_writer_agent(config, fake=fake, profile=profile)
-    task = build_writer_task(config, fake=fake, agent=agent, profile=profile)
+    agent = build_writer_agent(
+        config, fake=fake, profile=profile, artifact_loader=artifact_loader
+    )
+    task = build_writer_task(
+        config, fake=fake, agent=agent, profile=profile, artifact_loader=artifact_loader
+    )
     return agent, task
