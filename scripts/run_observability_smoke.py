@@ -46,6 +46,7 @@ def _request(
     if data is not None:
         body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -205,9 +206,10 @@ def _run(args: argparse.Namespace) -> int:
     c2, b2 = _request(f"{api}/v1/research-jobs", method="POST", data=base_payload,
                       headers={"Idempotency-Key": idem_key})
     idem_reuse = c1 == 202 and c2 == 200 and b1.get("job_id") == b2.get("job_id")
-    if idem_reuse:
-        # 幂等复用的 job 也要跟踪到终态（同一 job 只执行一次）
-        created.append({"index": -1, "profile": "fast", "job_id": b1.get("job_id")})
+    if idem_reuse and b1.get("job_id"):
+        # 幂等复用：首次创建已进入 created（由 _create 收集），这里只记录场景结论
+        # （复用返回同一 job_id，不重复加入 created，避免同一 job 等待两次）
+        pass
 
     conflict = dict(base_payload, input_company=base_payload["input_company"] + "-conflict")
     c3, _ = _request(f"{api}/v1/research-jobs", method="POST", data=conflict,
@@ -260,7 +262,11 @@ def _run(args: argparse.Namespace) -> int:
         "grafana": grafana,
     }
     if args.report:
-        with open(args.report, "w", encoding="utf-8") as fh:
+        from pathlib import Path
+
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as fh:
             json.dump(results, fh, ensure_ascii=False, indent=2)
         print(f"[obs-smoke] 报告已写入 {args.report}")
 

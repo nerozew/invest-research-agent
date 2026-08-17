@@ -21,11 +21,29 @@ from prometheus_client import REGISTRY
 os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
 from invest_research.infrastructure.observability import metrics  # noqa: E402
 from invest_research.infrastructure.observability.metrics_events import (  # noqa: E402
+    count_agent_run,
+    count_analysis_completeness,
+    count_failure,
+    count_http_requests,
+    count_llm_request,
+    count_llm_tokens,
+    count_llm_usage_missing,
+    count_pack_validation,
     count_quality_gate_failure,
     count_research_job,
+    count_schema_repair,
     count_step_terminal,
+    count_tool_cache,
     count_tool_call,
     count_tool_retry,
+    label_provider_model,
+    observe_agent_duration,
+    observe_http_request,
+    observe_llm_duration,
+    observe_research_job,
+    observe_tool_duration,
+    set_http_in_progress,
+    set_research_job_in_progress,
     set_stale_running_steps,
 )
 from invest_research.infrastructure.observability.worker_metrics_server import (  # noqa: E402
@@ -229,3 +247,230 @@ def test_install_worker_signals_registers_handlers() -> None:
     install_worker_signals(app)
     # 信号已通过 weak=False 注册；再次调用不重复导致异常。
     install_worker_signals(app)
+
+
+# ---------------------------------------------------------------------------
+# P06-09C：HTTP RED / Job 转换 / Agent Histogram / Pack / 工具缓存 / LLM usage
+# ---------------------------------------------------------------------------
+
+
+def test_http_red_metrics() -> None:
+    """HTTP RED：请求计数按状态分类、耗时 observe、进行中 Gauge 增减。"""
+    count_http_requests("POST", "/v1/research-jobs", 202)
+    count_http_requests("GET", "/health", 500)
+    assert (REGISTRY.get_sample_value(
+        "http_requests_total", {"method": "POST", "route": "/v1/research-jobs",
+                                "status_class": "2xx"}) or 0) >= 1
+    # 500 → 5xx 分类
+    assert (REGISTRY.get_sample_value(
+        "http_requests_total", {"method": "GET", "route": "/health",
+                                "status_class": "5xx"}) or 0) >= 1
+
+    before_count = REGISTRY.get_sample_value(
+        "http_request_duration_seconds_count",
+        {"method": "GET", "route": "/health"}) or 0
+    before_sum = REGISTRY.get_sample_value(
+        "http_request_duration_seconds_sum",
+        {"method": "GET", "route": "/health"}) or 0
+    observe_http_request("GET", "/health", 0.05)
+    assert (REGISTRY.get_sample_value(
+        "http_request_duration_seconds_count",
+        {"method": "GET", "route": "/health"}) or 0) >= before_count + 1
+    assert (REGISTRY.get_sample_value(
+        "http_request_duration_seconds_sum",
+        {"method": "GET", "route": "/health"}) or 0) >= before_sum + 0.05
+
+    set_http_in_progress("GET", "/health", 1)
+    set_http_in_progress("GET", "/health", -1)
+    # 净增 0：Gauge 回到原值（不影响业务）
+    assert REGISTRY.get_sample_value(
+        "http_requests_in_progress", {"method": "GET", "route": "/health"}) in (None, 0)
+
+
+def test_research_job_conversion_metrics() -> None:
+    """Job 终态转换：observe 耗时 + 执行中 Gauge + 失败分类。"""
+    observe_research_job("fast", "succeeded", 3.5)
+    before_count = REGISTRY.get_sample_value(
+        "research_job_duration_seconds_count",
+        {"profile": "fast", "status": "succeeded"}) or 0
+    before_sum = REGISTRY.get_sample_value(
+        "research_job_duration_seconds_sum",
+        {"profile": "fast", "status": "succeeded"}) or 0
+    observe_research_job("fast", "succeeded", 3.5)
+    assert (REGISTRY.get_sample_value(
+        "research_job_duration_seconds_count",
+        {"profile": "fast", "status": "succeeded"}) or 0) >= before_count + 1
+    assert (REGISTRY.get_sample_value(
+        "research_job_duration_seconds_sum",
+        {"profile": "fast", "status": "succeeded"}) or 0) >= before_sum + 3.5
+
+    set_research_job_in_progress("deep", 1)
+    set_research_job_in_progress("deep", -1)
+    assert REGISTRY.get_sample_value(
+        "research_jobs_in_progress", {"profile": "deep"}) in (None, 0)
+
+    count_failure("04_analysis", "SCHEMA_INVALID")
+    assert (REGISTRY.get_sample_value(
+        "failure_total",
+        {"stage": "04_analysis", "error_code": "SCHEMA_INVALID"}) or 0) >= 1
+
+
+def test_agent_run_and_duration_histogram() -> None:
+    """Agent 完成计数（role 白名单）+ 耗时 Histogram。"""
+    count_agent_run("research", "fast", "qwen", "qwen-max", "success")
+    before_count = REGISTRY.get_sample_value(
+        "agent_duration_seconds_count",
+        {"role": "research", "profile": "fast", "provider": "qwen",
+         "model": "qwen-max", "status": "success"}) or 0
+    before_bucket = REGISTRY.get_sample_value(
+        "agent_duration_seconds_bucket",
+        {"role": "research", "profile": "fast", "provider": "qwen",
+         "model": "qwen-max", "status": "success", "le": "1.0"}) or 0
+    observe_agent_duration("research", "fast", "qwen", "qwen-max", "success", 0.8)
+    assert (REGISTRY.get_sample_value(
+        "agent_duration_seconds_count",
+        {"role": "research", "profile": "fast", "provider": "qwen",
+         "model": "qwen-max", "status": "success"}) or 0) >= before_count + 1
+    assert (REGISTRY.get_sample_value(
+        "agent_duration_seconds_bucket",
+        {"role": "research", "profile": "fast", "provider": "qwen",
+         "model": "qwen-max", "status": "success", "le": "1.0"}) or 0) >= before_bucket + 1
+
+
+def test_agent_role_whitelist_rejected() -> None:
+    """非白名单 role 不写指标（避免意外高基数）。"""
+    before = REGISTRY.get_sample_value(
+        "agent_runs_total",
+        {"role": "unknown_role", "profile": "fast", "provider": "qwen",
+         "model": "m", "status": "success"}) or 0
+    count_agent_run("unknown_role", "fast", "qwen", "m", "success")
+    after = REGISTRY.get_sample_value(
+        "agent_runs_total",
+        {"role": "unknown_role", "profile": "fast", "provider": "qwen",
+         "model": "m", "status": "success"}) or 0
+    assert after == before
+
+
+def test_pack_validation_and_repair_and_completeness() -> None:
+    """PackBoundary 校验结果 / schema 修复 / completeness。"""
+    count_pack_validation("04_analysis", "FinancialAnalysisPack", "success", "NONE")
+    count_pack_validation("04_analysis", "FinancialAnalysisPack", "failed", "SCHEMA_INVALID")
+    assert (REGISTRY.get_sample_value(
+        "pack_validation_total",
+        {"stage": "04_analysis", "pack_type": "FinancialAnalysisPack",
+         "result": "success", "error_code": "NONE"}) or 0) >= 1
+    assert (REGISTRY.get_sample_value(
+        "pack_validation_total",
+        {"stage": "04_analysis", "pack_type": "FinancialAnalysisPack",
+         "result": "failed", "error_code": "SCHEMA_INVALID"}) or 0) >= 1
+
+    count_schema_repair("04_analysis", "FinancialAnalysisPack", "repaired")
+    assert (REGISTRY.get_sample_value(
+        "schema_repair_total",
+        {"stage": "04_analysis", "pack_type": "FinancialAnalysisPack",
+         "result": "repaired"}) or 0) >= 1
+
+    count_analysis_completeness("partial")
+    assert (REGISTRY.get_sample_value(
+        "analysis_completeness_total", {"status": "partial"}) or 0) >= 1
+
+
+def test_tool_cache_and_duration() -> None:
+    """工具缓存 hit/miss + 工具耗时 Histogram。"""
+    count_tool_cache("sec_submissions", "hit")
+    assert (REGISTRY.get_sample_value(
+        "tool_cache_total", {"tool": "sec_submissions", "result": "hit"}) or 0) >= 1
+
+    before_bucket = REGISTRY.get_sample_value(
+        "tool_duration_seconds_bucket",
+        {"tool": "sec_submissions", "status": "success", "le": "0.1"}) or 0
+    observe_tool_duration("sec_submissions", "success", 0.05)
+    assert (REGISTRY.get_sample_value(
+        "tool_duration_seconds_bucket",
+        {"tool": "sec_submissions", "status": "success", "le": "0.1"}) or 0) >= before_bucket + 1
+
+
+def test_llm_usage_present_and_missing() -> None:
+    """LLM：usage 存在时按类型计数；缺失时记录 usage_missing 且不伪造 0。"""
+    before_input = REGISTRY.get_sample_value(
+        "llm_tokens_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "research", "type": "input"}) or 0
+    count_llm_tokens("qwen", "qwen-max", "research", "input", 120)
+    assert (REGISTRY.get_sample_value(
+        "llm_tokens_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "research", "type": "input"}) or 0) \
+        >= before_input + 120
+
+    before_missing = REGISTRY.get_sample_value(
+        "llm_usage_missing_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "writer"}) or 0
+    count_llm_usage_missing("qwen", "qwen-max", "writer")
+    assert (REGISTRY.get_sample_value(
+        "llm_usage_missing_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "writer"}) or 0) >= before_missing + 1
+
+    # usage 缺失时不写 tokens（type 白名单非法值被拒绝）
+    before_bad = REGISTRY.get_sample_value(
+        "llm_tokens_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "writer", "type": "cached_input"}) or 0
+    count_llm_tokens("qwen", "qwen-max", "writer", "cached_input", -5)
+    assert (REGISTRY.get_sample_value(
+        "llm_tokens_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "writer", "type": "cached_input"}) or 0) \
+        == before_bad
+
+    # LLM 请求计数与耗时
+    count_llm_request("qwen", "qwen-max", "research", "success")
+    llm_req_value = REGISTRY.get_sample_value(
+        "llm_requests_total",
+        {"provider": "qwen", "model": "qwen-max", "role": "research", "status": "success"},
+    ) or 0
+    assert llm_req_value >= 1
+    before_llm_dur = REGISTRY.get_sample_value(
+        "llm_request_duration_seconds_count",
+        {"provider": "qwen", "model": "qwen-max", "role": "research", "status": "success"}) or 0
+    observe_llm_duration("qwen", "qwen-max", "research", "success", 2.0)
+    assert (REGISTRY.get_sample_value(
+        "llm_request_duration_seconds_count",
+        {"provider": "qwen", "model": "qwen-max", "role": "research", "status": "success"}) or 0) \
+        >= before_llm_dur + 1
+
+
+def test_label_provider_model_maps_base_url_to_provider() -> None:
+    """base_url 脱敏：dashscope→qwen、deepseek→deepseek、其它→openai_compatible。"""
+    assert label_provider_model("https://dashscope.aliyuncs.com/compatible-mode/v1",
+                                "Qwen-Max") == ("qwen", "qwen-max")
+    assert label_provider_model("https://api.deepseek.com/v1", "deepseek-chat") == (
+        "deepseek", "deepseek-chat")
+    assert label_provider_model("https://unknown.example/v1", "gpt-4o") == (
+        "openai_compatible", "gpt-4o")
+
+
+def test_no_high_cardinality_labels_p06_09c() -> None:
+    """P06-09C 新增指标同样不得含 job_id/company/error_message 高基数 label。"""
+    p06_09c_metrics = (
+        metrics.http_requests_total,
+        metrics.http_request_duration_seconds,
+        metrics.http_requests_in_progress,
+        metrics.research_job_duration_seconds,
+        metrics.research_jobs_in_progress,
+        metrics.stale_recovery_total,
+        metrics.failure_total,
+        metrics.agent_runs_total,
+        metrics.agent_duration_seconds,
+        metrics.pack_validation_total,
+        metrics.schema_repair_total,
+        metrics.analysis_completeness_total,
+        metrics.tool_duration_seconds,
+        metrics.tool_cache_total,
+        metrics.llm_requests_total,
+        metrics.llm_request_duration_seconds,
+        metrics.llm_tokens_total,
+        metrics.llm_usage_missing_total,
+    )
+    for metric in p06_09c_metrics:
+        for label in metric._labelnames:  # noqa: SLF001 - 测试访问内部 label 列表
+            assert "job_id" not in label, f"{metric._name} label {label} job_id"
+            assert "company" not in label, f"{metric._name} label {label} company"
+            assert "error_message" not in label, f"{metric._name} label {label} error_message"
+            assert "url" not in label, f"{metric._name} label {label} url"
