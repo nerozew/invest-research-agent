@@ -122,7 +122,7 @@ def build_writer_agent(
     - 只注入 ArtifactReader + CitationVerifier + TemplateGuide；
     - ``artifact_loader``：可选注入上游工件读取器（生产从 Task 输出读取真实 pack）；
       未注入时 ArtifactReader 用占位实现（向后兼容 fake 测试）；
-    - backstory 使用 writer_prompt_v1（明确禁止引入新事实）；
+    - backstory 使用 writer_prompt_v2（P06-09A：按 completeness 如实组织报告）；
     - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.WRITER)
@@ -165,10 +165,13 @@ def build_writer_task(
     return Task(
         description=(
             "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
-            "按 writer_prompt_v1 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
+            "按 writer_prompt_v2 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
             "写作素材通过 ArtifactReader 工具读取：调用 ArtifactReader(\"research_pack\") 与 "
             "ArtifactReader(\"analysis_pack\") 获取上游真实内容（若未读到内容，必须明确写入"
             "数据限制章节，不得编造）。\n"
+            "必须读取 analysis_pack.completeness 并按状态组织报告：complete 正常撰写财务表现；"
+            "partial 把 limitations 中的缺失数据及原因写入数据限制章节；unavailable 在财务/"
+            "指标章节仅说明数据不可用（引用 unavailable_reason），不得推断或编造财务数据。\n"
             "要求：每个事实带 citation key，区分事实/分析/风险/数据限制，"
             "包含非投资建议声明与数据截止日。"
         ),

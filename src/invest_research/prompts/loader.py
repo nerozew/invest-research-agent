@@ -21,15 +21,15 @@ class PromptName(StrEnum):
     """运行时 Agent 提示词文件名（不带 .md 后缀）。"""
 
     RESEARCH = "research_prompt_v1"
-    ANALYSIS = "analysis_prompt_v1"  # P03-03 创建
-    WRITER = "writer_prompt_v1"  # P03-04 创建
+    ANALYSIS = "analysis_prompt_v2"  # P06-09A：输出契约加入 completeness 三态
+    WRITER = "writer_prompt_v2"  # P06-09A：按 completeness 如实组织报告
 
 
 # 与提示词文件内 `> 版本：` 声明保持一致的版本标识（manifest 记录用）。
 PROMPT_VERSION: dict[PromptName, str] = {
     PromptName.RESEARCH: "research_prompt_v1",
-    PromptName.ANALYSIS: "analysis_prompt_v1",
-    PromptName.WRITER: "writer_prompt_v1",
+    PromptName.ANALYSIS: "analysis_prompt_v2",
+    PromptName.WRITER: "writer_prompt_v2",
 }
 
 

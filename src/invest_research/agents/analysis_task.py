@@ -176,7 +176,7 @@ def build_analysis_agent(
     """构建财报分析 Agent（统一 LLM 接口）。
 
     - 只注入 FinancialFactQuery + FinancialCalculator（不给搜索/下载工具）；
-    - backstory 使用 analysis_prompt_v1（明确禁止 LLM 算术）；
+    - backstory 使用 analysis_prompt_v2（P06-09A：明确禁止 LLM 算术 + completeness 三态）；
     - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.ANALYSIS)
@@ -218,12 +218,16 @@ def build_analysis_task(
             "{financial_facts}\n"
             "只允许使用该 JSON 中的 value/unit/period/concept/locator 生成 facts；"
             "禁止从模型知识、新闻摘要或推测填数。\n"
-            "如果 financial_facts 是空数组 []：必须输出 facts=[]、metrics=[]，并在 "
-            "limitations 中说明未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的"
-            "工具错误结构，也不得把该 JSON 当作文本原样输出。\n"
+            "如果 financial_facts 是空数组 []：必须输出 schema_version=analysis_pack_v2、"
+            "completeness=unavailable、facts=[]、metrics=[]，并在 unavailable_reason 中说明"
+            "未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的工具错误结构，也不得把"
+            "该 JSON 当作文本原样输出。\n"
+            "若只有部分可用事实或指标口径缺失：completeness=partial 并在 limitations 说明"
+            "缺哪些数据及原因；不得把缺失伪装成 complete。\n"
             "基于上游 ResearchPack 与上述 FinancialFact，选择可比期间与 concept，"
             "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
-            "产出可被 FinancialAnalysisPack 校验通过的结构化对象（只含合法字段）。"
+            "产出可被 FinancialAnalysisPack(schema v2) 校验通过的结构化对象（只含合法字段）"
+            "；completeness=unavailable 是合法业务结果，不是系统异常。"
         ),
         expected_output="一个可被 FinancialAnalysisPack 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,

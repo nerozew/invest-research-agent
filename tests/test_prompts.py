@@ -86,12 +86,16 @@ def test_research_prompt_version_consistent() -> None:
 
 
 def test_analysis_prompt_file_exists_and_loads() -> None:
-    """P03-03：财报分析提示词存在且可加载，含核心禁止 LLM 算术约束。"""
+    """P03-03 / P06-09A：财报分析提示词 v2 存在且可加载，含核心禁止 LLM 算术约束。"""
     text = load_prompt(PromptName.ANALYSIS)
     assert text.strip()
-    assert "# 财报分析 Agent 提示词 v1" in text
+    assert "# 财报分析 Agent 提示词 v2" in text
     assert "FinancialAnalysisPack" in text
-    assert "analysis_pack_v1" in text
+    assert "schema_version" in text
+    assert "analysis_pack_v2" in text
+    # P06-09A：completeness 三态契约
+    assert "completeness" in text
+    assert "unavailable" in text
     assert "FinancialCalculator" in text
     # 红线：禁止 LLM 算术
     assert "禁止 LLM 算术" in text or "所有算术必须调用 FinancialCalculator" in text
@@ -101,13 +105,24 @@ def test_analysis_prompt_file_exists_and_loads() -> None:
     assert "FinancialCalculator" in text
 
 
+def test_analysis_prompt_version_consistent() -> None:
+    """PromptName / PROMPT_VERSION / 文件内版本声明三方一致（P06-09A）。"""
+    assert PromptName.ANALYSIS.value == "analysis_prompt_v2"
+    assert PROMPT_VERSION[PromptName.ANALYSIS] == "analysis_prompt_v2"
+    assert "> 版本：`analysis_prompt_v2`" in load_prompt(PromptName.ANALYSIS)
+
+
 def test_writer_prompt_file_exists_and_loads() -> None:
-    """P03-04：报告撰写提示词存在且可加载，含 grounded generation 约束。"""
+    """P03-04 / P06-09A：报告撰写提示词 v2 存在且可加载，含 grounded generation 约束。"""
     text = load_prompt(PromptName.WRITER)
     assert text.strip()
-    assert "# 报告撰写 Agent 提示词 v1" in text
+    assert "# 报告撰写 Agent 提示词 v2" in text
     assert "ReportDraft" in text
     assert "report_draft_v1" in text
+    # P06-09A：按 completeness 状态组织报告（partial/unavailable 不编造）
+    assert "completeness" in text
+    assert "unavailable" in text
+    assert "不得推断或编造任何财务数据" in text
     # 唯一输入：只有上游两个 pack
     assert "research_pack" in text
     assert "analysis_pack" in text
@@ -119,6 +134,13 @@ def test_writer_prompt_file_exists_and_loads() -> None:
     assert "TemplateGuide" in text
     # 必备声明
     assert "非投资建议" in text
+
+
+def test_writer_prompt_version_consistent() -> None:
+    """PromptName / PROMPT_VERSION / 文件内版本声明三方一致（P06-09A）。"""
+    assert PromptName.WRITER.value == "writer_prompt_v2"
+    assert PROMPT_VERSION[PromptName.WRITER] == "writer_prompt_v2"
+    assert "> 版本：`writer_prompt_v2`" in load_prompt(PromptName.WRITER)
 
 
 def test_prompt_sha256_is_stable_and_content_sensitive() -> None:

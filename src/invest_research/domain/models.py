@@ -350,12 +350,36 @@ class ResearchPack(BaseModel):
     conflicts: list[str] = Field(default_factory=list)  # 发现的矛盾/冲突
 
 
+class AnalysisCompleteness(StrEnum):
+    """分析结果完整性状态（P06-09A）。
+
+    - ``COMPLETE``：分析数据完整，关键分析结果（facts 或 metrics）非空；
+    - ``PARTIAL``：只有部分可用结果，必须用 ``limitations`` 说明缺哪些数据及原因；
+    - ``UNAVAILABLE``：没有可用分析结果，必须提供 ``unavailable_reason``，
+      不得伪造财务指标（facts/metrics 必须为空）。
+    """
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
 class FinancialAnalysisPack(BaseModel):
-    """财报分析 Agent 的输出（workflow 步骤 04）。"""
+    """财报分析 Agent 的输出（workflow 步骤 04，schema v2）。
+
+    P06-09A 引入 ``completeness`` 三态（complete/partial/unavailable）：
+    - 旧版 ``version="analysis_pack_v1"`` 工件按宽松模式读取（兼容历史数据，不强行
+      套用新状态校验）；
+    - 新版 ``schema_version="analysis_pack_v2"`` 严格校验状态与内容是否一致；
+    - ``unavailable`` 是合法业务结果，不是系统异常：Writer 只报告数据不可用，
+      不得推断不存在的数据。
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    version: str = Field(min_length=1)  # 例如 "analysis_pack_v1"
+    version: str = Field(min_length=1)  # 例如 "analysis_pack_v2"
+    # P06-09A：显式 schema 版本标识（区别于旧 version 自由文本，供兼容读取分支判断）
+    schema_version: str = Field(default="analysis_pack_v2")
     period_end: date
     # P05.5-deploy-fix：允许空 facts——无可用财务事实时如实为空（报告据实标注数据限制），
     # 而不是让整个流水线崩溃（LLM 输出空 facts 是真实边界情况）
@@ -363,6 +387,57 @@ class FinancialAnalysisPack(BaseModel):
     metrics: list[MetricResult] = Field(default_factory=list)
     analysis_notes: str | None = None
     limitations: list[str] = Field(default_factory=list)
+    # P06-09A：结果完整性状态；默认 partial 保持旧语义（允许空 facts+limitations）
+    completeness: AnalysisCompleteness = AnalysisCompleteness.PARTIAL
+    # P06-09A：unavailable 时必须提供的不可用原因；其它状态必须为空
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_schema_version(cls, data: object) -> object:
+        """旧版 ``version="analysis_pack_v1"`` 工件自动标记 schema_version=v1。
+
+        v1 无 ``completeness``/``schema_version`` 字段；读取历史工件时按旧语义
+        标记为 v1（宽松校验分支），不强行套用新状态规则。
+        """
+        if isinstance(data, dict):
+            if "schema_version" in data:
+                return data
+            version = data.get("version")
+            if isinstance(version, str) and version.endswith("_v1"):
+                data = {**data, "schema_version": "analysis_pack_v1"}
+        return data
+
+    @model_validator(mode="after")
+    def _validate_completeness(self) -> "FinancialAnalysisPack":
+        """跨字段校验：状态与内容必须一致（仅 v2 严格；v1 旧版宽松）。
+
+        - complete：关键分析结果（facts 或 metrics）不得为空；unavailable_reason 为空；
+        - partial：必须明确 limitations（说明缺哪些数据及原因）；unavailable_reason 为空；
+        - unavailable：必须提供 unavailable_reason；facts/metrics 必须为空（不得伪造指标）。
+        """
+        # v1 旧版工件：保持旧语义，不做新状态强制校验（兼容历史数据读取）。
+        if self.schema_version == "analysis_pack_v1":
+            return self
+
+        if self.completeness == AnalysisCompleteness.COMPLETE:
+            if not self.facts and not self.metrics:
+                raise ValueError("completeness=complete 时 facts 或 metrics 至少一项非空")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=complete 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.PARTIAL:
+            if not self.limitations:
+                raise ValueError("completeness=partial 时必须提供 limitations（缺失数据及原因）")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=partial 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.UNAVAILABLE:
+            if not self.unavailable_reason:
+                raise ValueError("completeness=unavailable 时必须提供 unavailable_reason")
+            if self.facts or self.metrics:
+                raise ValueError(
+                    "completeness=unavailable 时 facts/metrics 必须为空（不得伪造指标）"
+                )
+        return self
 
 
 class ReportDraft(BaseModel):

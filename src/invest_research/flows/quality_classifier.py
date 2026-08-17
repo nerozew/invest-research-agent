@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from invest_research.domain.models import AnalysisCompleteness
 from invest_research.domain.quality import (
     QualityAction,
     QualityIssue,
@@ -57,6 +58,23 @@ def classify_state(state: ResearchFlowState) -> list[QualityIssue]:
                 QualitySeverity.CRITICAL,
                 "analysis",
                 "缺少 analysis_pack",
+                QualityAction.REJECT,
+            )
+        )
+    # P06-09A：unavailable 状态不得包含任何财务数据（防御直接构造 state 绕过
+    # Pydantic 校验的路径；正常解析已由模型层保证）。
+    if (
+        state.analysis_pack is not None
+        and getattr(state.analysis_pack, "schema_version", None) == "analysis_pack_v2"
+        and state.analysis_pack.completeness == AnalysisCompleteness.UNAVAILABLE
+        and (state.analysis_pack.facts or state.analysis_pack.metrics)
+    ):
+        issues.append(
+            _issue(
+                "unavailable_with_content",
+                QualitySeverity.CRITICAL,
+                "analysis",
+                "completeness=unavailable 但包含 facts/metrics（不得伪造财务数据）",
                 QualityAction.REJECT,
             )
         )
