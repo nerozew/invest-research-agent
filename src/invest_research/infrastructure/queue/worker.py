@@ -24,6 +24,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+# P06-09C-fix：必须在任何可能触发 prometheus_client/metrics 导入的代码之前设置，
+# 否则 metrics.py 模块导入时 PROMETHEUS_MULTIPROC_DIR 为 None → prometheus_client
+# 走单进程模式，Celery 子进程不写 .db 文件，父进程 9101 聚合端点拿不到业务指标。
+os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus_metrics")
+
 from celery import Celery  # type: ignore[import-untyped]  # celery 无 mypy stub
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -413,7 +418,6 @@ def _build_celery_app() -> Celery:
     保证历史卡 running 的任务被收口到 failed，不再留在 running。
     """
     _run_stale_job_recovery()
-    os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus_metrics")
     broker = os.environ.get("BROKER_URL", "memory://")
     _setup_otel_from_env()
     app = create_celery_app(broker_url=broker)
