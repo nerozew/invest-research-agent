@@ -218,32 +218,43 @@ def create_app(
         )
         from invest_research.infrastructure.observability.tracing import span
 
+        # P06-09C-fix：Starlette 的 HTTP middleware 在路由匹配之前执行，
+        # scope["route"] 此时尚未填充 → 直接读取会落为 "<unknown>"。
+        # call_next 返回后路由已匹配完成。处理策略：
+        # - in_progress Gauge 的 +1/-1 必须使用同一个 route label（进入时的初始
+        #   值），避免同一请求在两个 label 上各留一次增量导致 Gauge 失衡；
+        # - span.http.route 与 Counter/Histogram 使用匹配后的真实路由模板
+        #   （发生在响应阶段，此时 scope["route"] 已填充）。
         route = request.scope.get("route")
-        route_path = getattr(route, "path", "<unknown>")
+        gauge_route = getattr(route, "path", "<unknown>")
         method = request.method
         started = time.perf_counter()
-        set_http_in_progress(method, route_path, 1)
+        set_http_in_progress(method, gauge_route, 1)
         with span(
             "api.request",
             {
                 "http.method": method,
-                "http.route": route_path,
+                "http.route": gauge_route,
                 "http.target": request.url.path,
             },
-        ):
+        ) as current_span:
             try:
                 response = await call_next(request)
             except Exception:
                 # 异常路径：中间件异常由外层转 500；按 5xx 归类计数。
                 duration = time.perf_counter() - started
-                set_http_in_progress(method, route_path, -1)
-                observe_http_request(method, route_path, duration)
-                count_http_requests(method, route_path, 500)
+                set_http_in_progress(method, gauge_route, -1)
+                observe_http_request(method, gauge_route, duration)
+                count_http_requests(method, gauge_route, 500)
                 raise
+            # 路由匹配完成：scope["route"] 已填充，修正 span 属性的路由模板。
+            matched_route = request.scope.get("route")
+            metric_route = getattr(matched_route, "path", gauge_route)
+            current_span.set_attribute("http.route", metric_route)
             duration = time.perf_counter() - started
-            set_http_in_progress(method, route_path, -1)
-            observe_http_request(method, route_path, duration)
-            count_http_requests(method, route_path, response.status_code)
+            set_http_in_progress(method, gauge_route, -1)
+            observe_http_request(method, metric_route, duration)
+            count_http_requests(method, metric_route, response.status_code)
             return response
 
     app.state.health_checker = checker
