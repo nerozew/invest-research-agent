@@ -80,6 +80,8 @@ class ResearchJob(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P06-09：失败发生阶段（如 04_analysis / 05_writer / report_publish）
+    failure_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

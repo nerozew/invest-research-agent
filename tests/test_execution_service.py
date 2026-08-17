@@ -38,8 +38,18 @@ class FakeWriter:
     def mark_succeeded(self, job_id: uuid.UUID) -> None:
         self.marked_succeeded.append(job_id)
 
-    def mark_failed(self, job_id: uuid.UUID) -> None:
+    def mark_failed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error_code: str = "INTERNAL_BUG",
+        error_message: str = "",
+        failure_stage: str | None = None,
+    ) -> None:
         self.marked_failed.append(job_id)
+        self.last_error_code = error_code
+        self.last_error_message = error_message
+        self.last_failure_stage = failure_stage
 
 
 class FakeLoader:

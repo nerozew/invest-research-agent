@@ -166,6 +166,7 @@ class SqlJobQueryStore:
             research_profile=job.research_profile,
             error_code=job.error_code,
             error_message=job.error_message,
+            failure_stage=job.failure_stage,
             started_at=job.started_at,
             completed_at=job.completed_at,
             steps=step_snapshots,

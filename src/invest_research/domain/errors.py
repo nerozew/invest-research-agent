@@ -20,6 +20,7 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     NETWORK_TRANSIENT = "NETWORK_TRANSIENT"
     UPSTREAM_5XX = "UPSTREAM_5XX"
+    TIMEOUT = "TIMEOUT"
     DOCUMENT_UNSUPPORTED = "DOCUMENT_UNSUPPORTED"
     SCHEMA_INVALID = "SCHEMA_INVALID"
     DATA_AMBIGUOUS = "DATA_AMBIGUOUS"
@@ -40,6 +41,7 @@ _RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         ErrorCode.RATE_LIMITED,
         ErrorCode.NETWORK_TRANSIENT,
         ErrorCode.UPSTREAM_5XX,
+        ErrorCode.TIMEOUT,  # P06-09：超时是显式可重试的上游失败（有上限重试）
         ErrorCode.SCHEMA_INVALID,  # 限定次数修复（guardrail 反馈后重试）
     }
 )

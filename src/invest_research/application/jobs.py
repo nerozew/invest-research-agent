@@ -106,6 +106,8 @@ class JobSnapshot(BaseModel):
     research_profile: str = "deep"
     error_code: str | None = None
     error_message: str | None = None
+    # P06-09：失败发生阶段（如 04_analysis / 05_writer / report_publish）
+    failure_stage: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_seconds: float | None = None
@@ -121,6 +123,7 @@ class JobSnapshot(BaseModel):
         research_profile: str = "deep",
         error_code: str | None = None,
         error_message: str | None = None,
+        failure_stage: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
         steps: tuple[StepSnapshot, ...] = (),
@@ -132,6 +135,7 @@ class JobSnapshot(BaseModel):
             research_profile=research_profile,
             error_code=error_code,
             error_message=error_message,
+            failure_stage=failure_stage,
             started_at=started_at,
             completed_at=completed_at,
             duration_seconds=compute_duration_seconds(started_at, completed_at),

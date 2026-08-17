@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 import uuid
 from datetime import date
@@ -39,10 +38,14 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from crewai.crew import Crew
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
+from invest_research.agents.pack_parsing import (
+    PackParseError,
+    parse_pack_output,
+)
 from invest_research.application.progress import ProgressSink
 from invest_research.domain.models import (
     CompanyIdentity,
@@ -83,54 +86,57 @@ _AGENT_ROLE_TO_STEP = {
     "writer": "05_writer",
 }
 
-# 从 LLM 原始文本中提取 JSON 对象（贪婪匹配第一个 { 到最后一个 }，兼容围栏/前后缀）
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 class LiveFlowExecutionError(RuntimeError):
     """live 模式执行失败（上游/质量门禁不可恢复）。
 
     语义：live 失败后不得降级为 fake——抛此异常向 Worker/调用方表示真实失败。
+    P06-09：携带 ``error_code`` 与 ``failure_stage``，供 Worker 保存稳定错误分类。
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "INTERNAL_BUG",
+        failure_stage: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.failure_stage = failure_stage
 
 
 _PackModel = TypeVar("_PackModel", bound=BaseModel)
 
 
 def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
-    """从 Crew 输出对象解析为对应 pack（成功对象 / 字典 / JSON 文本）。
+    """从 Crew 输出对象解析为对应 pack（P06-09 统一边界解析）。
 
-    Pydantic 校验失败（如 Action Input 被当成输出）统一转为 LiveFlowExecutionError；
-    LLM 原始文本带围栏/前后缀时尝试提取 JSON 对象（research 任务已不绑 output_pydantic）。
+    - 复用 ``pack_parsing.parse_pack_output``（成功对象 / 字典 / JSON 文本 /
+      代码围栏一致性处理）；
+    - Pydantic 校验失败统一转 ``LiveFlowExecutionError``（映射 SCHEMA_INVALID，
+      带 failure_stage 供 Worker 保存失败阶段）；LLM 原始文本带围栏/前后缀
+      时尝试提取 JSON 对象（research 任务已不绑 output_pydantic）。
     """
-    if isinstance(obj, model):
-        return obj
-    json_dict = getattr(obj, "json_dict", None) or getattr(obj, "exported_output", None)
     try:
-        if isinstance(json_dict, dict):
-            return model.model_validate(json_dict)
-        raw = getattr(obj, "raw", None)
-        if isinstance(raw, str):
-            return _validate_json_text(raw, model)
-        if isinstance(obj, dict):
-            return model.model_validate(obj)
-    except ValidationError as exc:
+        return parse_pack_output(obj, model)
+    except PackParseError as exc:
         raise LiveFlowExecutionError(
-            f"无法解析 {model.__name__} 输出：输出不是合法结构化对象"
-            "（Action/Action Input 是工具调用过程，不是最终答案）"
+            str(exc),
+            error_code=getattr(exc, "error_code", "INTERNAL_BUG"),
+            failure_stage=_stage_for_model(model),
         ) from exc
-    raise LiveFlowExecutionError(f"无法解析 {model.__name__} 输出：无法识别的输出类型")
 
 
-def _validate_json_text(raw: str, model: type[_PackModel]) -> _PackModel:
-    """解析 LLM 原始文本为模型；失败时尝试从文本中提取 JSON 对象。"""
-    try:
-        return model.model_validate_json(raw)
-    except ValidationError:
-        match = _JSON_OBJECT_RE.search(raw)
-        if match is not None:
-            return model.model_validate_json(match.group())
-        raise
+def _stage_for_model(model: type[_PackModel]) -> str:
+    """按 pack 模型映射失败阶段（供 SCHEMA_INVALID 分类展示）。"""
+    name = getattr(model, "__name__", "")
+    if name == "ResearchPack":
+        return "02_research"
+    if name == "FinancialAnalysisPack":
+        return "04_analysis"
+    if name == "ReportDraft":
+        return "05_writer"
+    return "flow"
 
 
 def _is_sec_source(src: Source) -> bool:

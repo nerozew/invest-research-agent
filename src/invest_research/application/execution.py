@@ -19,6 +19,10 @@ P06-07 前置修复：最终报告发布（ReportArtifactPublisher）在 Worker 
 Flow state 后、``mark_succeeded`` **之前**执行。发布失败（缺少草稿 /
 Markdown/PDF 渲染失败）走 ``mark_failed`` 并向上传播——任务状态反映真实
 发布结果，绝不把"报告渲染失败"误报成"完整发布成功"。
+
+P06-09：mark_failed 携带脱敏 error_code / error_message / failure_stage，
+经 ``failure_classifier`` 统一分类稳定错误码（SCHEMA_INVALID / TIMEOUT /
+NETWORK_TRANSIENT / RATE_LIMITED / UPSTREAM_5XX / AUTH_ERROR / INTERNAL_BUG）。
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from __future__ import annotations
 import uuid
 from typing import Protocol
 
+from invest_research.application.failure_classifier import FailureInfo, classify_failure
 from invest_research.domain.models import ResearchRequest
 from invest_research.flows.state import ResearchFlowState
 
@@ -45,11 +50,22 @@ class JobRequestLoader(Protocol):
 
 
 class ExecutionStatusWriter(Protocol):
-    """把任务状态推进到终态的条件更新端口。"""
+    """把任务状态推进到终态的条件更新端口。
+
+    P06-09：``mark_failed`` 携带脱敏错误信息（error_code / error_message /
+    failure_stage），供 failed Job 展示与审计；调用方必须传脱敏后的文本。
+    """
 
     def mark_running(self, job_id: uuid.UUID) -> bool: ...
     def mark_succeeded(self, job_id: uuid.UUID) -> None: ...
-    def mark_failed(self, job_id: uuid.UUID) -> None: ...
+    def mark_failed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error_code: str = "INTERNAL_BUG",
+        error_message: str = "",
+        failure_stage: str | None = None,
+    ) -> None: ...
 
 
 class FlowRunner(Protocol):
@@ -72,6 +88,12 @@ class ReportPublisher(Protocol):
     def publish(self, job_id: uuid.UUID, state: ResearchFlowState) -> list[dict[str, object]]: ...
 
 
+def _classify_for_job(exc: Exception, *, fallback_stage: str | None = None) -> FailureInfo:
+    """把异常分类为 Job 失败三元组；优先取异常自带的 stage，否则用回退 stage。"""
+    stage = getattr(exc, "failure_stage", None) or fallback_stage
+    return classify_failure(exc, stage=stage)
+
+
 class ExecuteResearchJobService:
     """执行一个投研任务的用例（P04-07）。
 
@@ -79,7 +101,8 @@ class ExecuteResearchJobService:
     1. mark_running 失败（任务不是 pending，可能已被其他 worker 处理/已终态）
        → 直接返回，绝不重复执行；
     2. 加载请求失败（任务已删除）→ 直接返回；
-    3. 调用 Flow 运行；运行抛异常 → mark_failed 后向上传播；
+    3. 调用 Flow 运行；运行抛异常 → mark_failed(error_code/error_message/
+       failure_stage) 后向上传播（P06-09 稳定错误分类）；
     4. Flow 成功后发布最终报告（可选注入 publisher）；发布失败 → mark_failed
        并向上传播（真实发布结果，不误报完整发布成功）；
     5. 全部成功 → mark_succeeded（进入终态）。
@@ -107,15 +130,29 @@ class ExecuteResearchJobService:
             return
         try:
             state = self._flow_runner.run(request)
-        except Exception:
-            self._writer.mark_failed(job_id)
+        except Exception as exc:
+            # P06-09：统一异常分类（SCHEMA_INVALID/TIMEOUT/NETWORK_TRANSIENT/...）
+            # + failure_stage（异常可能带 stage 属性，见 LiveFlowExecutionError）。
+            failure = _classify_for_job(exc)
+            self._writer.mark_failed(
+                job_id,
+                error_code=failure.error_code,
+                error_message=failure.error_message,
+                failure_stage=failure.failure_stage,
+            )
             raise
         # P06-07 前置修复：最终报告发布必须先于 mark_succeeded。
         # 发布失败（缺少草稿/渲染失败）→ mark_failed，不误报完整发布成功。
         if self._report_publisher is not None:
             try:
                 self._report_publisher.publish(job_id, state)
-            except Exception:
-                self._writer.mark_failed(job_id)
+            except Exception as exc:
+                failure = _classify_for_job(exc, fallback_stage="report_publish")
+                self._writer.mark_failed(
+                    job_id,
+                    error_code=failure.error_code,
+                    error_message=failure.error_message,
+                    failure_stage=failure.failure_stage,
+                )
                 raise
         self._writer.mark_succeeded(job_id)

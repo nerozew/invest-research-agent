@@ -8,6 +8,8 @@
   flow_runner 用 ``ResearchFlowRunner``（fake 逻辑 Flow，P03 已验证 00-07 全链）。
 - P06-06B：Worker 开始处理 Job 时幂等创建 00-07 步骤并标记实时进度；
   Job 失败时收口 running 步骤，终态清空 current_step。
+- P06-09：Worker 启动时收口历史 stale running Job（不删除记录/工件），
+  并让 mark_failed 保存稳定 error_code/error_message/failure_stage。
 
 模块导入零 DB/Redis 连接：engine/session 在 ``process`` 首次调用时
 才由 ``_session_factory()`` 惰性创建。
@@ -249,8 +251,17 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
 
             count_research_job("succeeded")
 
-        def mark_failed(self, job_id: uuid.UUID) -> None:
+        def mark_failed(
+            self,
+            job_id: uuid.UUID,
+            *,
+            error_code: str = "INTERNAL_BUG",
+            error_message: str = "",
+            failure_stage: str | None = None,
+        ) -> None:
             # P05.5-deploy-fix：Flow 异常 → running → failed（防止任务永久卡 running）
+            # P06-09：保存稳定错误码/脱敏消息/失败阶段，供 failed Job 展示与审计。
+            sanitized_message = (error_message or "")[:500]
             with session_factory() as session:
                 row = session.get(ResearchJobORM, job_id)
                 if row is None:
@@ -258,13 +269,16 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row.status = JobStatus.FAILED.value
                 row.completed_at = datetime.now(timezone.utc)
                 row.current_step = None  # P06-06B：终态清空 current_step
+                row.error_code = error_code
+                row.error_message = sanitized_message or None
+                row.failure_stage = failure_stage
                 session.commit()
             # P06-06B：收口所有仍为 running 的步骤为 failed_terminal（不留虚假 running）
             try:
                 progress.fail_all_running_steps(
                     job_id,
-                    error_code="FLOW_EXECUTION_FAILED",
-                    error_message="任务执行失败，流程异常终止",
+                    error_code=error_code,
+                    error_message=sanitized_message or "任务执行失败，流程异常终止",
                 )
             except StepRecordError as exc:
                 _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
@@ -314,14 +328,58 @@ def _setup_otel_from_env() -> None:
     )
 
 
+def _run_stale_job_recovery() -> None:
+    """Worker 启动时收口历史 stale running Job（P06-09）。
+
+    语义（不删除记录/工件）：
+    - 把所有仍为 ``running`` 的 Job 条件更新为 ``failed``，并记录
+      error_code=STALE_RUNNING_RECOVERED（脱敏消息 + failure_stage=startup_recovery）；
+    - 对每个被收口的 Job，调用 SqlProgressSink.fail_all_running_steps 把步骤
+      收口为 failed_terminal（不留虚假 running）；
+    - 只在 DB 可用时执行；任何失败只告警，不影响 worker 启动。
+    """
+    try:
+        from sqlalchemy import select
+
+        session_factory = _build_session_factory()
+        with session_factory() as session:
+            stale = (
+                session.execute(
+                    select(ResearchJobORM).where(ResearchJobORM.status == JobStatus.RUNNING.value)
+                )
+                .scalars()
+                .all()
+            )
+            now = datetime.now(timezone.utc)
+            for job in stale:
+                job.status = JobStatus.FAILED.value
+                job.completed_at = now
+                job.current_step = None
+                job.error_code = "STALE_RUNNING_RECOVERED"
+                job.error_message = "任务在 Worker 重启时仍处于 running，已由启动恢复收口为 failed"
+                job.failure_stage = "startup_recovery"
+            session.commit()
+        progress = SqlProgressSink(_build_session_factory())
+        for job in stale:
+            try:
+                progress.fail_all_running_steps(
+                    job.id,
+                    error_code="STALE_RUNNING_RECOVERED",
+                    error_message="任务在 Worker 重启时仍处于 running，已由启动恢复收口为 failed",
+                )
+            except StepRecordError as exc:
+                _progress_logger().warning("启动恢复收口步骤失败 job=%s: %s", job.id, exc)
+    except Exception:  # noqa: BLE001 - 恢复尽力而为，不阻塞 worker 启动
+        _progress_logger().warning("启动 stale running Job 恢复失败（继续启动）", exc_info=True)
+
+
 def _build_celery_app() -> Celery:
     """构建 Celery app：broker 取环境变量 BROKER_URL，缺省 memory://。
 
-    P06-06C：prometheus_client 多进程模式要求在任何 prometheus_client 使用
-    之前设置 PROMETHEUS_MULTIPROC_DIR。此处先于所有 metrics 模块（延迟导入）
-    设置环境变量，fork 的子进程继承该值，各自写独立 pid_*.db；API 进程不设置
-    此变量，保持默认单进程 REGISTRY，物理隔离两个容器的指标。
+    P06-09：构建前先执行一次 stale running Job 启动恢复（不删除记录/工件），
+    保证历史卡 running 的任务被收口到 failed，不再留在 running。
     """
+    _run_stale_job_recovery()
     os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus_metrics")
     broker = os.environ.get("BROKER_URL", "memory://")
     _setup_otel_from_env()
