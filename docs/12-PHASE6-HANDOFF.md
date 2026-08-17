@@ -6,7 +6,9 @@
 ## 1. 当前状态总览
 
 - **分支**：`agent/m2-deterministic-tools`（本地 commit，**未 push**）
-- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅；P06-06C ✅**；P06-07~14 未开始。
+- **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅；P06-06C ✅**；P06-07 ✅；P06-08 ✅；P06-09 ✅；**P06-09A ✅；P06-09B ✅；P06-09C ✅**；P06-10~14 未开始。
+- **P06-09C**：Prometheus + Grafana + Jaeger 可观测性增强已完成（18 新指标 + 7 Row dashboard + 隔离 fake 栈 smoke PASS + worker 多进程指标修复）。
+- **P06-09C 未 push**；P06-10（100 次基准）为下一候选任务，未开始。
 - **P06-06**：完整本地 Docker Compose observability profile（Prometheus / Grafana / OTel Collector / Jaeger）已真实启动并通过健康检查。
 - **P06-06A**：每任务 fast/deep 研究档位（前端单选 + 0007 迁移 + Worker 路由 + fast 关闭思考模式）。
 - **P06-06B**：ProgressSink 实时步骤状态（幂等创建 00-07、合法状态转换、失败收口 running、终态清空 current_step、前端阶段中文映射）。
@@ -129,6 +131,23 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 - 测试：`tests/test_pack_boundary.py` 18 用例；受影响模块回归 71 passed，ruff/mypy 通过。
 - commit：`06c91d1`。
 
+## P06-09C：Prometheus + Grafana + Jaeger 可观测性增强（✅ 已完成）
+
+- `infrastructure/observability/metrics.py` + `metrics_events.py`：新增 18 个指标
+  （HTTP RED / Job+profile / stale_recovery / failure / agent / pack / tool-cache / llm）。
+- `api/app.py` HTTP RED 中间件；`worker.py` Job 终态/耗时/Gauge/failure 分类 +
+  **P06-09C-fix**（PROMETHEUS_MULTIPROC_DIR 提前到模块导入最前，修复 Celery 子进程不写
+  .db 导致 9101 聚不到业务指标）；`flow_wiring.py` agent 子 span + pack span；
+  `execution.py` job_flow_succeeded/failed 结构化日志（trace_id/span_id 关联 Jaeger）；
+  `logging.py` 合并 P05-05 脱敏 + P06-09C structured_extra。
+- Grafana dashboard 重构为 7 Row（系统健康/HTTP RED/任务与步骤/Agent/PackBoundary/
+  工具与缓存/LLM），全部 histogram_quantile、无高基数 label。
+- 验证：`tests/test_grafana_dashboard.py` + `test_metrics_events.py` +
+  `test_prometheus_labels.py` + `test_execution_service.py` 41 passed；ruff/mypy 全绿；
+  隔离 fake 栈 smoke PASS（20 job 终态、Prometheus/Jaeger/Grafana 全绿、
+  worker 无 sec.gov/serper.dev/chat/completions）。详见 `docs/18-P06-09C-VALIDATION.md`。
+- 本地 commit（均未 push）：`76d0ab6`、`4a20e06`、`70a65b4`、`7874f7b`、`7785663`。
+
 ## 阶段级 Checkpoint：deferred（后续可选升级）
 
 - 本轮**不实施**阶段级 Checkpoint；不增加专门的校验 Agent；不把现有工作流改为多个
@@ -136,3 +155,4 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 - 已知限制（不宣称已解决）：当前失败后仍可能重新执行整个 Crew（research/analysis/writer
   三 Agent 从头跑），无阶段级中间断点续跑。稳定性优化可后续评估 Checkpoint 是否纳入
   P06-10 基准之后的升级计划。
+- **P06-09C 未 push；P06-10（100 次基准）为下一候选任务，未开始。**

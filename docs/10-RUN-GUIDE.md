@@ -137,3 +137,50 @@ uv run python -c "from invest_research.settings import Settings; s = Settings(_e
 # 3) 确认仓库不含密钥
 git status --porcelain | grep -i env   # 应只出现 .env.example
 ```
+
+## 8. 可观测性（P06-06 / P06-09C）
+
+### 8.1 启用 observability profile
+
+```bash
+# 基础服务 + Prometheus/Grafana/OTel Collector/Jaeger（观测组件按需启动）
+docker compose --profile observability up -d
+```
+
+| 服务 | 地址 | 说明 |
+|---|---|---|
+| Prometheus | http://localhost:9090 | targets：api:8000 与 worker:9101（白名单指标） |
+| Grafana | http://localhost:3000 | admin/admin；预置 `invest-research-red` dashboard（7 Row） |
+| Jaeger | http://localhost:16686 | 本地 trace 查看（内存存储，重启丢失） |
+| OTel Collector | localhost:4318 | 应用 OTLP HTTP 导出端点 |
+
+### 8.2 隔离 fake 栈 observability smoke（P06-09C，可重复）
+
+> 不触碰正在运行的栈：独立 project `obs-smoke`、独立端口/卷/网络，
+> FLOW_MODE=fake、key 全为占位符，不调真实 SEC/Serper/LLM，不删 volume、不 down -v。
+
+```bash
+# 1) 构建最新镜像（含 P06-09C 代码）
+docker build -t invest-research:phase5 .
+
+# 2) 启动隔离 fake 栈（api 18000 / prometheus 19090 / grafana 13000 / jaeger 16687）
+docker compose -p obs-smoke -f deploy/compose.observability-smoke.yml \
+  --profile observability up -d
+
+# 3) 运行 smoke（20 个 fake job + 幂等复用/冲突/取消 + 三大件数据链验证）
+python scripts/run_observability_smoke.py \
+  --api-base http://localhost:18000 \
+  --prometheus http://localhost:19090 \
+  --jaeger http://localhost:16687 \
+  --grafana http://localhost:13000 \
+  --report reports/obs-smoke.json
+
+# 4) 清理（保留数据卷）
+docker compose -p obs-smoke -f deploy/compose.observability-smoke.yml \
+  --profile observability down
+```
+
+预期：输出 `总体结果：PASS`，报告写入 `reports/obs-smoke.json`；
+Prometheus 关键指标（research_jobs_total / http_requests_total / workflow_steps_total）
+非空、Jaeger 出现 invest-research-api/worker 服务、Grafana 已加载 invest-research-red dashboard；
+worker 日志无 sec.gov/serper.dev/chat/completions 真实外部调用。

@@ -2388,3 +2388,27 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - flow_wiring 的 _to_packed 以 max_repairs=0（确定性 parse）接入，未注入 LLM fixer；调用方可按需注入一次修复回调，框架已限制至多一次且不可调外部工具。
 - PackBoundary 为单一入口；parse_pack_output/dump_task_output 保留（同一读取顺序），公共 API 未删。
 - 未 push；阶段级 Checkpoint 记录为 deferred/后续可选升级，不实施。
+
+---
+
+## P06-09C：Prometheus + Grafana + Jaeger 可观测性增强（✅ 已完成）
+
+**产物**：metrics.py/metrics_events.py 18 个新指标 + api/worker/flow_wiring/execution 接线 + logging.py（P05-05 脱敏 + P06-09C trace 关联）+ 7 组 Grafana dashboard + scripts/run_observability_smoke.py + deploy/compose.observability-smoke.yml + docs/18-P06-09C-VALIDATION.md。
+
+### 3 个知识点
+
+1. **prometheus_client 多进程模式的时序关键点**：`PROMETHEUS_MULTIPROC_DIR` 必须在任何 prometheus_client/metrics 导入**之前**设置。若 worker.py 里的 setdefault 晚于 metrics.py 的模块导入，prometheus_client 落单进程模式、Celery 子进程不写 pid_*.db，父进程 9101 的 MultiProcessCollector 就聚不到业务指标——本次 smoke 实测在 Prometheus 看到 pending/cancelled 却缺 succeeded/failed，正是这个根因；把 setdefault 移到 worker.py 模块最顶、所有 import 之前即修复。
+2. **trace 与日志通过 trace_id/span_id 关联**：execution._log_job_event 在 job_flow_succeeded/job_flow_failed 事件上带 trace_id/span_id（从当前 OTel span context 读），Jaeger 链路与日志同 id 可 join；agent span 用 `get_tracer("agent").start_as_current_span("agent.{role}")` 而非独立 start_span，才真正成为 flow.run 的子 span（父 span 上下文必须作为 current 才自动继承）。
+3. **Grafana dashboard 要可测、Histogram 必须用 _bucket**：把 dashboard JSON 写测试（7 Row 顺序、datasource uid、timezone、refresh、PromQL 指标名/`histogram_quantile`/无 job_id/company/error_message label），避免"肉眼看"；histogram_quantile 只能对 `_bucket` 序列计算，Prometheus 白名单 regex 必须显式列出 `_bucket/_sum/_count` 后缀，否则面板无数据。
+
+### 检查问题（请用自己的话回答）
+
+为什么"环境变量必须在 prometheus_client 导入前设置"是一个**进程/导入顺序**问题而非"A 代码写错"？如果 Worker 换成 threads 或 threads 模式（不 prefork），这个问题还会以同样方式出现吗（提示：MultiProcessCollector 针对 fork；单进程模式时指标落在进程内是可见的）？
+
+### 已知限制与风险
+
+- smoke 的"故障注入（schema 错误 / Pack 修复成功/失败）"在 fake flow 无注入路径，经 `--include-component-scenarios` 开关默认关闭；组件级场景由 tests/test_pack_contracts.py 单独覆盖。
+- 取消场景存在竞态：任务可能在取消前已被 worker 消费完成，终态为 succeeded 而非 cancelled；smoke 只断言 DELETE 返回 200。
+- Jaeger 为 all-in-one 内存存储，重启丢失链路（仅本地查看）。
+- 本机未跑全量 pytest（与 live Docker testcontainers 冲突超时）；CI 覆盖（SKIP_DB_TESTS=1 893 passed 基线）。
+- 未 push 任一 P06-09C commit；Checkpoint 记录 deferred；P06-10（100 次基准）未开始。

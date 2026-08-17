@@ -1,0 +1,216 @@
+# P06-09C：隔离 fake env observability smoke（独立 compose 文件，不继承 compose.yml 的 ports）
+#
+# 用法（不触碰正在运行的 live 栈）：
+#   docker compose -p obs-smoke -f deploy/compose.observability-smoke.yml \
+#     --profile observability up -d
+#
+# 约束：
+# - FLOW_MODE=fake：worker 使用 ResearchFlowRunner，不调 SEC/Serper/LLM；
+# - LLM/SERPER key 只用占位符（不读真实 .env 中的 key）；
+# - 端口全部避开 live 栈（8000/9090/3000/16686/4318/4317/13133）：
+#   api 18000 / prometheus 19090 / grafana 13000 / jaeger 16687+4319 /
+#   streamlit 18501 / otel-collector 14318+14319；
+# - 独立 volume（*_smoke），不共享、不删除 live 栈数据；
+# - 验收后清理：docker compose -p obs-smoke -f deploy/compose.observability-smoke.yml down
+#   （不带 -v，保留数据卷；如需彻底清空用 down -v，但默认不执行）。
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+  REDIS_URL: redis://redis:6379/0
+  BROKER_URL: redis://redis:6379/0
+  ARTIFACT_ROOT: /app/artifacts
+  SEC_USER_AGENT_CONTACT: smoke@example.com
+  HTTP_USER_AGENT: invest-research-smoke/0.1 (+smoke@example.com)
+  LLM_API_KEY: placeholder-llm-key-for-smoke
+  LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+  LLM_MODEL_RESEARCH: qwen-max
+  LLM_MODEL_ANALYSIS: qwen-max
+  LLM_MODEL_WRITER: qwen-max
+  FLOW_MODE: fake
+  RESEARCH_PROFILE: deep
+  LLM_ENABLE_THINKING: "false"
+  SERPER_API_KEY: placeholder-serper-key-for-smoke
+  SERPER_ENDPOINT: https://google.serper.dev/search
+  API_BASE_URL: http://api:8000
+  PYTHONPATH: /app/src
+  HOME: /tmp
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: invest
+      POSTGRES_PASSWORD: invest
+      POSTGRES_DB: invest
+    volumes:
+      - postgres_data_smoke:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invest -d invest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data_smoke:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: invest-research:phase5
+    command: sh -c "alembic upgrade head"
+    environment:
+      DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+      PYTHONPATH: /app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: invest-research:phase5
+    command: sh -c "uvicorn invest_research.infrastructure.wiring:create_production_app_factory --factory --host 0.0.0.0 --port 8000"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "18000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    volumes:
+      - artifacts_data_smoke:/app/artifacts
+
+  worker:
+    image: invest-research:phase5
+    command: sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app worker --loglevel=info --queues=research-jobs"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - artifacts_data_smoke:/app/artifacts
+
+  streamlit:
+    image: invest-research:phase5
+    command: sh -c "streamlit run frontend/Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true"
+    environment:
+      API_BASE_URL: http://api:8000
+      API_TIMEOUT: "30"
+      PYTHONPATH: /app/src
+      HOME: /tmp
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "18501:8501"
+
+  # ---- observability profile ----
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data_smoke:/prometheus
+    ports:
+      - "19090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana_data_smoke:/var/lib/grafana
+    ports:
+      - "13000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.113.0
+    profiles: ["observability"]
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "14318:4318"
+      - "14319:13133"
+    healthcheck:
+      test: ["CMD", "/otelcol", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16687:16686"
+      - "4319:4317"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:16686/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  postgres_data_smoke:
+  redis_data_smoke:
+  artifacts_data_smoke:
+  prometheus_data_smoke:
+  grafana_data_smoke:
