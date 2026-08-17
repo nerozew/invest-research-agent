@@ -11,8 +11,10 @@ LLM_MODEL_RESEARCH=qwen3.5-flash、LLM_BASE_URL 指向专属 workspace）。
 from __future__ import annotations
 
 import contextlib
+import os
 import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,52 @@ def _redirect_crewai_user_data_dir(
     root = Path(tempfile.gettempdir()) / f"crewai-data-{uuid.uuid4().hex}"
     root.mkdir(parents=True, exist_ok=True)
     return str(root)
+
+
+def _docker_available() -> bool:
+    """探测 Docker 是否可用（避免 testcontainers 启动失败抛异常）。"""
+    try:
+        from docker import from_env  # type: ignore[import-untyped]
+
+        client = from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
+
+
+def db_integration_enabled() -> bool:
+    """DB 集成测试是否应实际运行。
+
+    - ``SKIP_DB_TESTS=1``：显式跳过（离线单测 job 使用）；
+    - 存在 ``TEST_DATABASE_URL``：GitHub Actions service PostgreSQL，直接运行；
+    - 否则：需要本地 Docker（testcontainers），无 Docker 则跳过。
+    """
+    if os.environ.get("SKIP_DB_TESTS") == "1":
+        return False
+    if os.environ.get("TEST_DATABASE_URL"):
+        return True
+    return _docker_available()
+
+
+@pytest.fixture(scope="session")
+def pg_container() -> Iterator[str]:
+    """DB 集成测试共享的 PostgreSQL 连接 URL。
+
+    优先使用 GitHub Actions CI 注入的 ``TEST_DATABASE_URL``（service 容器，
+    无需 Docker）；本地无该变量时 fallback 到 testcontainers 自动拉起
+    ``postgres:16-alpine`` 容器。测试文件只依赖原始 schema URL，由各自的
+    ``_norm`` 统一把 ``psycopg2`` 驱动前缀规范为 ``psycopg``。
+    """
+    external_url = os.environ.get("TEST_DATABASE_URL")
+    if external_url:
+        yield external_url
+        return
+
+    from testcontainers.community.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        yield postgres.get_connection_url()
 
 
 # 在 conftest 加载期替换 appdirs.user_data_dir：CrewAI 通过模块引用调用，

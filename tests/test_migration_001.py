@@ -6,44 +6,22 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from conftest import db_integration_enabled
 from sqlalchemy import inspect, text
+
+pytestmark = pytest.mark.skipif(
+    not db_integration_enabled(),
+    reason="需要运行时 Docker（testcontainers）或 TEST_DATABASE_URL",
+)
 
 
 def _normalize_psycopg(url: str) -> str:
     """Testcontainers 默认返回 psycopg2 驱动前缀；本项目用 psycopg3，需规范化。"""
     return url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
-
-
-def _docker_available() -> bool:
-    try:
-        from docker import from_env  # type: ignore[import-untyped]
-
-        client = from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _docker_available() or os.environ.get("SKIP_DB_TESTS") == "1",
-    reason="需要运行时 Docker（testcontainers）",
-)
-
-
-@pytest.fixture(scope="module")
-def pg_container() -> Iterator[str]:
-    """启动 PostgreSQL 测试容器并返回连接 URL。"""
-    # testcontainers 社区入口（官方主包已弃用 testcontainers.postgres）
-    from testcontainers.community.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as postgres:
-        yield postgres.get_connection_url()
 
 
 def _alembic_cfg(url: str) -> Config:
@@ -90,7 +68,7 @@ def test_upgrade_downgrade_upgrade(pg_container: str) -> None:
 
 
 def test_migration_version_table(pg_container: str) -> None:
-    """Alembic version 表存在且记录 0001。"""
+    """Alembic version 表存在且记录当前 head（0008）。"""
     cfg = _alembic_cfg(pg_container)
     command.upgrade(cfg, "head")
 
@@ -99,4 +77,4 @@ def test_migration_version_table(pg_container: str) -> None:
     engine = create_engine(_normalize_psycopg(pg_container))
     with engine.connect() as conn:
         version_num = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert version_num == "0001"
+    assert version_num == "0008"

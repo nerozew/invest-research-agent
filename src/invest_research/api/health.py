@@ -138,14 +138,21 @@ def build_health_checker(settings: Settings) -> DependencyHealthChecker:
     engine/redis 的关闭由 application factory 的 lifespan 负责。
     """
     from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
 
-    db_engine = create_engine(
-        settings.database_url,
-        pool_pre_ping=True,
-        future=True,
-        pool_timeout=settings.readiness_db_connect_timeout,
-        connect_args={"connect_timeout": int(settings.readiness_db_connect_timeout)},
-    )
+    # SQLite（离线测试/本地内存库）的 SingletonThreadPool 不支持 pool_timeout 与
+    # connect_timeout 参数；PostgreSQL 等网络数据库才需要显式连接超时。
+    url = make_url(settings.database_url)
+    engine_kwargs: dict[str, object] = {
+        "pool_pre_ping": True,
+        "future": True,
+    }
+    if url.get_backend_name() != "sqlite":
+        engine_kwargs["pool_timeout"] = settings.readiness_db_connect_timeout
+        engine_kwargs["connect_args"] = {
+            "connect_timeout": int(settings.readiness_db_connect_timeout)
+        }
+    db_engine = create_engine(settings.database_url, **engine_kwargs)
     redis_client = Redis.from_url(
         settings.redis_url,
         socket_connect_timeout=settings.readiness_redis_connect_timeout,
