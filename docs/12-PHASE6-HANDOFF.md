@@ -5,10 +5,11 @@
 
 ## 1. 当前状态总览
 
-- **分支**：`agent/m2-deterministic-tools`（本地 commit，**未 push**）
+- **分支**：`agent/m2-deterministic-tools`（已 push，CI 全绿）
 - **Phase 6 状态**：P06-01~05 ✅；P06-05A ✅；P06-06 ✅；**P06-06A ✅；P06-06B ✅；P06-06C ✅**；P06-07 ✅；P06-08 ✅；P06-09 ✅；**P06-09A ✅；P06-09B ✅；P06-09C ✅**；P06-10~14 未开始。
-- **P06-09C**：Prometheus + Grafana + Jaeger 可观测性增强已完成（18 新指标 + 7 Row dashboard + 隔离 fake 栈 smoke PASS + worker 多进程指标修复）。
-- **P06-09C 未 push**；P06-10（100 次基准）为下一候选任务，未开始。
+- **P06-09C**：Prometheus + Grafana + Jaeger 可观测性增强已完成（18 新指标 + 7 Row dashboard + 隔离 fake 栈 smoke PASS + worker 多进程指标修复），已 push 并 4 job CI 全绿。
+- **P06-09C CI**：https://github.com/nerozew/invest-research-agent/actions/runs/32046783336
+- **P06-10（100 次基准）尚未开始**；下一候选任务，未开始。
 - **P06-06**：完整本地 Docker Compose observability profile（Prometheus / Grafana / OTel Collector / Jaeger）已真实启动并通过健康检查。
 - **P06-06A**：每任务 fast/deep 研究档位（前端单选 + 0007 迁移 + Worker 路由 + fast 关闭思考模式）。
 - **P06-06B**：ProgressSink 实时步骤状态（幂等创建 00-07、合法状态转换、失败收口 running、终态清空 current_step、前端阶段中文映射）。
@@ -146,7 +147,56 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
   `test_prometheus_labels.py` + `test_execution_service.py` 41 passed；ruff/mypy 全绿；
   隔离 fake 栈 smoke PASS（20 job 终态、Prometheus/Jaeger/Grafana 全绿、
   worker 无 sec.gov/serper.dev/chat/completions）。详见 `docs/18-P06-09C-VALIDATION.md`。
-- 本地 commit（均未 push）：`76d0ab6`、`4a20e06`、`70a65b4`、`7874f7b`、`7785663`。
+- 已 push：`4c7b948`、`76d0ab6`、`4a20e06`、`70a65b4`、`7874f7b`、`7785663`、`bc7fd6c`。
+
+### P06-09C Git 检查点与 CI 验收（2026-08-18 ✅）
+
+- **CI run**：https://github.com/nerozew/invest-research-agent/actions/runs/32046783336
+  （commit `6c055fd`，P06-09C 最后一个修复 commit）
+- **四个 job 结果**：
+  - ruff (lint + format)：✅ success
+  - mypy (type check src)：✅ success
+  - pytest (offline unit)：✅ success（首次运行失败 → 修复后通过）
+  - migration + db integration (postgres)：✅ success
+- **修复 commit**：`6c055fd`（fix(p06-09c): resolve http.route from matched route
+  after middleware call_next）— 修复 Starlette HTTP middleware 在路由匹配前读取
+  scope["route"] 得 "<unknown>" 的问题，改为 call_next 返回后补读匹配路由。
+- **P06-10（100 次基准）尚未开始**；阶段级 Checkpoint 仍为 deferred。
+
+### 审计结论（P06-09C 验收，未开始 P06-10）
+
+#### 审计 1：Prometheus multiprocess *.db 清理（结论：已覆盖，机制完整）
+
+- Worker 子进程 .db 清理已有三层防护：
+  1. `worker_metrics_server.py::cleanup_multiproc_dir()`：`worker_init` 启动
+     metrics server 前清空 `PROMETHEUS_MULTIPROC_DIR`（默认 /tmp/prometheus_metrics）
+     下所有 `.db`（孤儿 pid 不会残留污染）；
+  2. `mark_worker_process_dead(pid)`：`worker_process_shutdown` 信号对每个退出的
+     子进程调用 prometheus_client `mark_process_dead`，删除对应 pid_*.db；
+  3. 容器重建时 /tmp 自动清空（worker 容器内目录非持久卷）。
+- 结论：Worker 重启与下一次基准之间不会复用旧指标；每次新基准前 worker_init
+  已清空目录，Gauge/Counter 从 0 起算。无需额外改动。
+- 注意：若多次基准在**同一个**长期 worker 进程内先后执行（不重启 worker），
+  Counter 会跨基准累加——但这是 Counter 语义，新基准对比应使用
+  `increase()` / `delta` 或按时间切分，不构成 .db 污染。
+
+#### 审计 2：observability smoke 统计口径（结论：口径未分开，需 P06-10 前明确）
+
+- `scripts/run_observability_smoke.py` 中 `_NUM_JOBS = 20` 只覆盖"20 个主任务"
+  （fast 10 + deep 10），但：
+  - 幂等复用场景：首次创建已计入 `created`（复用返回同一 job_id 不再加入），
+    不影响总数；
+  - **取消测试任务**：`cancel_payload` 创建后 `created.append(..., index=-2)` 会
+    把第 21 个 job 加入 `created`，因此 `terminal_counts` 与 `created_count`
+    实际统计 21 个 job（20 主 + 1 取消）；
+  - 输出中 `fast_count/deep_count` 用 `profile` 统计正是 10/10，但
+    `created_count` / `terminal_distribution` 含取消任务未单独标注。
+- 结论：**"20 个主任务 + 1 个取消测试任务"的统计口径未明确分开**——报告字段
+  `created_count=21` 会让人误以为创建了 21 个主任务。P06-10 开始前应明确：
+  （a）`created_count` 改名 `jobs_created_total`（含取消）并额外输出
+  `main_jobs_created=20`、`cancel_test_jobs=1`；
+  （b）或在结果中单独加 `cancel_test_count` 字段并把 `created_count` 限制为 20。
+  本次仅审计不修改（遵守"不开始 P06-10"限制）。
 
 ## 阶段级 Checkpoint：deferred（后续可选升级）
 
@@ -155,4 +205,5 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 - 已知限制（不宣称已解决）：当前失败后仍可能重新执行整个 Crew（research/analysis/writer
   三 Agent 从头跑），无阶段级中间断点续跑。稳定性优化可后续评估 Checkpoint 是否纳入
   P06-10 基准之后的升级计划。
-- **P06-09C 未 push；P06-10（100 次基准）为下一候选任务，未开始。**
+- **P06-09C 已 push（CI 4 job 全绿）；P06-10（100 次基准）尚未开始，为下一候选任务。**
+- **阶段级 Checkpoint 仍 deferred**（后续可选升级）。
