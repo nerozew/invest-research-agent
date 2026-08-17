@@ -2412,3 +2412,8 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - Jaeger 为 all-in-one 内存存储，重启丢失链路（仅本地查看）。
 - 本机未跑全量 pytest（与 live Docker testcontainers 冲突超时）；CI 覆盖（SKIP_DB_TESTS=1 893 passed 基线）。
 - 未 push 任一 P06-09C commit；Checkpoint 记录 deferred；P06-10（100 次基准）未开始。
+
+## P06-10A: benchmark framework & calibration (2026-08-18)
+- Learning: e2e HTTP benchmark vs in-process; denominator isolation; binary PDF download
+- Question: why not claim workflow_success_rate as live_agent_success_rate?
+- Limits: prometheus snapshot not queried yet; control scenarios only cancel

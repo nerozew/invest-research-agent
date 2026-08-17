@@ -186,7 +186,9 @@ def _run(args: argparse.Namespace) -> int:
                               data=_job_payload(index, profile))
         if code != 202:
             raise RuntimeError(f"创建失败 index={index} code={code} body={body}")
-        created.append({"index": index, "profile": profile, "job_id": body["job_id"]})
+        # P06-10A：kind 标记主测试任务（main），用于与取消/其他控制任务分开统计分母。
+        created.append({"index": index, "profile": profile, "job_id": body["job_id"],
+                        "kind": "main"})
 
     specs = [(i, "fast" if i < 10 else "deep") for i in range(_NUM_JOBS)]
     random.Random(7).shuffle(specs)
@@ -194,11 +196,13 @@ def _run(args: argparse.Namespace) -> int:
         for _ in pool.map(_create, specs):
             pass
 
-    fast = sum(1 for c in created if c["profile"] == "fast")
-    deep = sum(1 for c in created if c["profile"] == "deep")
-    print(f"[obs-smoke] 已创建 {len(created)} 个 job（fast={fast}，deep={deep}）")
+    main_created = [c for c in created if c.get("kind") == "main"]
+    fast = sum(1 for c in main_created if c["profile"] == "fast")
+    deep = sum(1 for c in main_created if c["profile"] == "deep")
+    print(f"[obs-smoke] 已创建 {len(main_created)} 个主任务（fast={fast}，deep={deep}）")
 
     # 场景：幂等复用 / 幂等冲突 / 取消
+    # P06-10A：控制场景（幂等复用/冲突/取消）单独统计，不进入主任务成功率分母。
     idem_key = f"obs-smoke-{uuid.uuid4()}"
     base_payload = _job_payload(0, "fast")
     c1, b1 = _request(f"{api}/v1/research-jobs", method="POST", data=base_payload,
@@ -206,10 +210,10 @@ def _run(args: argparse.Namespace) -> int:
     c2, b2 = _request(f"{api}/v1/research-jobs", method="POST", data=base_payload,
                       headers={"Idempotency-Key": idem_key})
     idem_reuse = c1 == 202 and c2 == 200 and b1.get("job_id") == b2.get("job_id")
-    if idem_reuse and b1.get("job_id"):
-        # 幂等复用：首次创建已进入 created（由 _create 收集），这里只记录场景结论
-        # （复用返回同一 job_id，不重复加入 created，避免同一 job 等待两次）
-        pass
+    # 幂等首建是独立控制任务（不复用主任务）→ 标记为 control（不含在主任务分母中）。
+    if c1 == 202 and b1.get("job_id"):
+        created.append({"job_id": b1["job_id"], "profile": "fast", "index": -1,
+                        "kind": "control", "control_scenario": "idempotent_reuse"})
 
     conflict = dict(base_payload, input_company=base_payload["input_company"] + "-conflict")
     c3, _ = _request(f"{api}/v1/research-jobs", method="POST", data=conflict,
@@ -222,21 +226,27 @@ def _run(args: argparse.Namespace) -> int:
     c5, _ = _request(f"{api}/v1/research-jobs/{cancel_id}", method="DELETE")
     cancel_ok = c5 == 200
     created.append({"job_id": cancel_id, "profile": "deep", "payload": cancel_payload,
-                    "index": -2})
+                    "index": -2, "kind": "control", "control_scenario": "cancel"})
 
     print(f"[obs-smoke] 幂等复用={'OK' if idem_reuse else 'FAIL'} | "
           f"幂等冲突={'OK' if idem_conflict else 'FAIL'} | "
           f"取消={'OK' if cancel_ok else 'FAIL'}")
 
-    # 等待终态
-    terminal_counts: dict[str, int] = {}
+    # P06-10A：等待终态时分主任务/控制任务统计，禁止把取消测试任务混入主任务分母。
+    main_terminal_counts: dict[str, int] = {}
+    control_terminal_counts: dict[str, int] = {}
     for entry in created:
         snap = _wait_terminal(api, entry["job_id"])
         status = snap.get("status", "unknown")
-        terminal_counts[status] = terminal_counts.get(status, 0) + 1
         entry["final_status"] = status
-    dist_text = json.dumps(terminal_counts, ensure_ascii=False, sort_keys=True)
-    print(f"[obs-smoke] 终态分布：{dist_text}")
+        if entry.get("kind") == "main":
+            main_terminal_counts[status] = main_terminal_counts.get(status, 0) + 1
+        else:
+            control_terminal_counts[status] = control_terminal_counts.get(status, 0) + 1
+    main_dist_text = json.dumps(main_terminal_counts, ensure_ascii=False, sort_keys=True)
+    control_dist_text = json.dumps(control_terminal_counts, ensure_ascii=False, sort_keys=True)
+    print(f"[obs-smoke] 主任务终态分布：{main_dist_text}")
+    print(f"[obs-smoke] 控制任务终态分布：{control_dist_text}")
 
     # 管线验证
     time.sleep(3)
@@ -248,19 +258,40 @@ def _run(args: argparse.Namespace) -> int:
     print(f"[obs-smoke] Grafana ds={grafana.get('datasources')} "
           f"uids={grafana.get('dashboard_uids')} ok={grafana.get('ok')}")
 
-    fast = sum(1 for c in created if c["profile"] == "fast")
-    deep = sum(1 for c in created if c["profile"] == "deep")
+    main_jobs = [c for c in created if c.get("kind") == "main"]
+    control_jobs = [c for c in created if c.get("kind") == "control"]
+    fast = sum(1 for c in main_jobs if c["profile"] == "fast")
+    deep = sum(1 for c in main_jobs if c["profile"] == "deep")
+    # P06-10A：统计口径明确分开——
+    #   main_jobs_created          主测试任务数（成功率分母）；
+    #   cancel_test_jobs           取消场景任务数（控制场景，不进入主成功率分母）；
+    #   control_jobs_created       全部控制场景任务数（取消 + 幂等首建等）；
+    #   jobs_created_total         全部创建任务数（= main + control）。
+    no_cancel_jobs = [c for c in control_jobs
+                      if c.get("control_scenario") != "cancel"]
     results = {
-        "created_count": len(created),
+        "main_jobs_created": len(main_jobs),
+        "cancel_test_jobs": sum(1 for c in control_jobs
+                                if c.get("control_scenario") == "cancel"),
+        "control_jobs_created": len(control_jobs),
+        "jobs_created_total": len(created),
+        "idempotent_first_create_included_in_control": len(no_cancel_jobs),
         "fast_count": fast,
         "deep_count": deep,
-        "terminal_distribution": terminal_counts,
+        "main_terminal_distribution": main_terminal_counts,
+        "control_terminal_distribution": control_terminal_counts,
+        "main_success_denominator": len(main_jobs),
         "scenarios": {"idempotent_reuse": idem_reuse, "idempotent_conflict": idem_conflict,
                       "cancel": cancel_ok},
         "prometheus": prom,
         "jaeger": jaeger,
         "grafana": grafana,
     }
+    # 成功判定：主任务终态必须全部为 succeeded（fake 模式确定性全链）。
+    # 控制任务（取消等）不进入成功率分母。
+    ok = (idem_reuse and idem_conflict and cancel_ok
+          and main_terminal_counts.get("succeeded", 0) == len(main_jobs)
+          and prom["ok"] and jaeger.get("ok") and grafana.get("ok"))
     if args.report:
         from pathlib import Path
 
@@ -270,9 +301,6 @@ def _run(args: argparse.Namespace) -> int:
             json.dump(results, fh, ensure_ascii=False, indent=2)
         print(f"[obs-smoke] 报告已写入 {args.report}")
 
-    ok = (idem_reuse and idem_conflict and cancel_ok
-          and terminal_counts.get("succeeded", 0) >= 1
-          and prom["ok"] and jaeger.get("ok") and grafana.get("ok"))
     print(f"[obs-smoke] 总体结果：{'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 

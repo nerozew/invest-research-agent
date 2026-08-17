@@ -207,3 +207,9 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
   P06-10 基准之后的升级计划。
 - **P06-09C 已 push（CI 4 job 全绿）；P06-10（100 次基准）尚未开始，为下一候选任务。**
 - **阶段级 Checkpoint 仍 deferred**（后续可选升级）。
+
+## P06-10A: 100 x benchmark framework + 10 calibration (DONE, P06-10 not started)
+- scripts/run_phase6_benchmark.py: e2e HTTP benchmark
+- deploy/compose.benchmark.yml: isolated project
+- calibrate run_id=7b17ca17a109: 10/10 = 100%, P50=0.334s P95=0.393s
+- P06-10 official 100 runs NOT executed (await approval)
