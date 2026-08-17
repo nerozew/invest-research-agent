@@ -43,8 +43,7 @@ from pydantic import BaseModel
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
 from invest_research.agents.pack_parsing import (
-    PackParseError,
-    parse_pack_output,
+    PackBoundary,
 )
 from invest_research.application.progress import ProgressSink
 from invest_research.domain.models import (
@@ -109,22 +108,26 @@ _PackModel = TypeVar("_PackModel", bound=BaseModel)
 
 
 def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
-    """从 Crew 输出对象解析为对应 pack（P06-09 统一边界解析）。
+    """从 Crew 输出对象解析为对应 pack（P06-09B 统一 PackBoundary）。
 
-    - 复用 ``pack_parsing.parse_pack_output``（成功对象 / 字典 / JSON 文本 /
-      代码围栏一致性处理）；
-    - Pydantic 校验失败统一转 ``LiveFlowExecutionError``（映射 SCHEMA_INVALID，
-      带 failure_stage 供 Worker 保存失败阶段）；LLM 原始文本带围栏/前后缀
-      时尝试提取 JSON 对象（research 任务已不绑 output_pydantic）。
+    - 复用 ``pack_parsing.PackBoundary``（提取 → 来源分类 → 分层校验），
+      **单一读取顺序**（pydantic → json_dict/exported → raw），与 ArtifactReader
+      /dump_task_output 保持一致，禁止另起第二套读取路径；
+    - Action Input / 工具调用参数 / 纯文本被 PackBoundary 拒绝（不是最终 Pack）；
+    - 解析失败统一转 ``LiveFlowExecutionError``（error_code 取首个结构化错误码，
+      failure_stage 供 Worker 保存失败阶段）；不注入 fixer（确定性 parse，
+      提示词已约束 schema；有需要时调用方按需注入一次修复器）。
     """
-    try:
-        return parse_pack_output(obj, model)
-    except PackParseError as exc:
-        raise LiveFlowExecutionError(
-            str(exc),
-            error_code=getattr(exc, "error_code", "INTERNAL_BUG"),
-            failure_stage=_stage_for_model(model),
-        ) from exc
+    boundary = PackBoundary(max_repairs=0)
+    pack, errors = boundary.parse(obj, model, stage=_stage_for_model(model))
+    if pack is not None:
+        return pack
+    first = errors[0] if errors else None
+    raise LiveFlowExecutionError(
+        (first.detail if first is not None else None) or "无法解析 pack",
+        error_code=first.error_code if first is not None else "SCHEMA_INVALID",
+        failure_stage=_stage_for_model(model),
+    )
 
 
 def _stage_for_model(model: type[_PackModel]) -> str:
