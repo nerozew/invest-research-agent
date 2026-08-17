@@ -2324,3 +2324,24 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - 备份为手动触发（无 cron 定时）；RPO 取决于备份频率，RTO 实测秒级（dump 52KB + 工件 1.7MB）。
 - 全库 `pg_restore --clean` 会先 DROP 再 CREATE，只适合演练/灾难恢复场景；单 job 级恢复只覆盖工件，不覆盖 DB 行（需配 `--restore-db`）。
 - `backup/` 目录已被 `.gitignore` 排除，快照内容不入库；恢复脚本 `--restore-artifacts` 只动目标 job，不影响其他 job。
+
+---
+
+## P06-09：Pack 交接收口 + 统一 schema 解析/错误分类 + GitHub Actions CI（✅ 已完成）
+
+**产物**：`agents/pack_parsing.py`（统一边界解析）、`application/failure_classifier.py`（稳定错误分类）、`migrations/versions/0008_failure_stage.py`（research_jobs.failure_stage）、`.github/workflows/ci.yml`（独立 CI，不把 docker-image 当 CI）、`tests/test_pack_contracts.py`（离线契约测试 ×20）
+
+### 3 个知识点
+
+1. **"不只依赖提示词保证 schema" = 把解析做成确定性契约**：LLM 输出可以是 CrewAI TaskOutput（pydantic 已绑模型）、dict、JSON 文本、带 ```json 代码围栏的文本；统一 `parse_pack_output` 按固定顺序（pydantic → json_dict/exported → raw → str）读取，`_reject_extra_fields` 在 Pydantic 默认 `extra=ignore` 之外显式拒绝多余字段。解析侧（flow_wiring）与 Writer 的 ArtifactReader loader 共用同一读取顺序——保证"解析到的 pack"与"Writer 工具读到的 pack"完全一致，任务要求中 Writer 读上游真实 pack（非 readable 占位符）由此落地。
+2. **失败必须映射为稳定 error_code + 脱敏消息 + failure_stage，且不能只靠异常类型猜**：`classify_failure` 按异常类型/消息关键词分类（TIMEOUT / RATE_LIMITED / NETWORK_TRANSIENT / UPSTREAM_5XX / AUTH_ERROR / SCHEMA_INVALID / INTERNAL_BUG 兜底），消息用 `sanitize_message` 截断 500 字符并隐藏 sk-/api_key/路径；`LiveFlowExecutionError` 携带 error_code/failure_stage 传播到 Worker，`mark_failed` 落库 `research_jobs.error_code/error_message/failure_stage`——任务"失败任务展示"与"历史 stale running 收口"都能定位到具体阶段。
+3. **CI 是"可重复的质量门禁"，不是"构建镜像"**：独立 workflow 把 Ruff、mypy src、离线 pytest（`SKIP_DB_TESTS=1`，跳过 testcontainers 的 DB 测试）、迁移+DB 集成（GitHub Actions `services.postgres` 真实 PostgreSQL）拆成 4 个 job；全部 job `FLOW_MODE=fake` 禁止真实出网调用，不 resolve 任何 secrets；`concurrency.cancel-in-progress` + `timeout-minutes` 让失败按 job 名可直接定位。本地验证命令与 CI 完全一致（`ruff check src tests migrations scripts` + `mypy src` + `FLOW_MODE=fake SKIP_DB_TESTS=1 pytest` → 893 passed, 19 skipped）。
+
+### 检查问题（请用自己的话回答）
+
+为什么 Writer 侧必须用"可注入的 ArtifactReader loader"（从上游 Task 的 output 读 pack）而不是直接相信提示词"上游 pack 已在 context 里"？ArtifactReader 读到 content 与 not_found 两种结果分别给 Writer 什么指导？
+
+### 已知限制与风险
+- 本机完整 pytest 的 DB 集成测试（test_db_base/test_job_repository/test_migration_*.py）因 testcontainers 网络无法连 registry-1.docker.io 而报错，与 docs/16 既有记录一致；CI 的 migrations job 在 GitHub Actions 内置 PostgreSQL 上覆盖此部分（需 push 后在 Actions 内验证）。
+- stale running Job 恢复在 worker 启动时执行（`_run_stale_job_recovery`），用 `research_jobs.status='running'` 全量扫描；worker 重启真实执行验证留待 CI/部署环境确认（离线测试覆盖逻辑分支）。
+- 本任务按 .clinerules 只做 05 路线图中的一个 ID（P06-09）；P06-10（100 次基准）为下一候选任务，未开始。

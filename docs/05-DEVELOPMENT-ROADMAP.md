@@ -225,9 +225,9 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P06-06A ✅ | 每任务 fast/deep 研究档位 | ResearchProfileMode + 0007 迁移 + 前端档位单选/徽章 | 前端显式传 research_profile；旧请求默认 deep 兼容；列表/详情显示档位；迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过 | per-job budget、UI/domain 默认分离 |
 | P06-06B ✅ | 实时步骤状态与最小前端进度 | ProgressSink 协议 + SqlProgressSink + Flow/Worker 步骤标记 + 前端阶段中文映射 | Worker 幂等创建 00-07；合法状态转换；失败不留虚假 running；终态清空 current_step；前端当前阶段；旧任务 steps=[] 兼容 | 真实步骤边界、短事务、幂等创建 |
 | P06-06C ✅ | 接通 Prometheus 业务指标与 Jaeger 真实 trace 数据链 | OTLP endpoint 规范化 + 业务指标事件 + Worker 多进程指标端点 + Prometheus/Grafana 修复 | 离线 48+48 passed、Ruff/mypy 全绿；Docker fake 验收：Prometheus 两 target up、research_jobs_total 与 Histogram bucket/sum/count 非空、Jaeger 出现 api/worker 服务且 trace 跨 Outbox/Celery 关联、无 OTLP 404、无真实外部调用 | 多进程 Registry、OTLP 路径规范化、事件语义防重复计数 |
-| P06-07 | 执行本地部署 smoke test | scripts/docs | health、任务执行、报告下载、指标和链路查询通过 | deployment verification |
+| P06-07 ✅ | 执行本地部署 smoke test | scripts/docs（docs/17-P06-07-VALIDATION.md） | health、任务执行、报告下载、指标和链路查询通过（真实 live 任务 succeeded、8 工件齐全、Prometheus 三状态计数、Jaeger 双服务 span 落库） | deployment verification |
 | P06-08 ✅ | 实现 PostgreSQL 与工件备份恢复演练 | scripts + runbook | 从备份恢复一个完整 job、步骤和报告 | RPO/RTO、recovery |
-| P06-09 | 建 GitHub Actions CI | workflow | lint、type、unit、integration 通过 | CI quality gate |
+| P06-09 ✅ | 建 GitHub Actions CI | workflow（.github/workflows/ci.yml） | lint、type、unit、integration 通过（Ruff / mypy src / 离线 pytest SKIP_DB_TESTS=1 893 passed / migration+DB 集成用真实 PostgreSQL） | CI quality gate |
 | P06-10 | 执行 100 次基准并归因失败 | versioned eval report | 成功率结论有原始 run 支撑 | evidence-based resume |
 | P06-11 | 做 10 家公司效率对照实验 | efficiency report | XX% 有原始时间记录 | ROI measurement |
 | P06-12 | 完善 README 演示、架构图和限制 | portfolio README | 新用户可按步骤复现 | 技术表达 |
