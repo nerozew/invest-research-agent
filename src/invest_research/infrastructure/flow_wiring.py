@@ -475,7 +475,7 @@ class LiveResearchFlowRunner:
                 prefetch_result.financial_facts_summary
                 if prefetch_result is not None
                 and prefetch_result.financial_facts_summary is not None
-                else '{"ok": false, "facts": [], "message": "未预取到 SEC Company Facts"}'
+                else "[]"
             ),
         }
         if prefetch_result is not None and prefetch_result.company_identity is not None:

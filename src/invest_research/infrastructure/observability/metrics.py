@@ -19,7 +19,18 @@ P06-06C 事件语义（见 docs/04 §8.2 + 本任务计划）：
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from prometheus_client import Counter, Gauge, Histogram
+
+# P06-09 fix（live 直接运行/测试路径）：prometheus_client 多进程模式要求
+# PROMETHEUS_MULTIPROC_DIR 目录在首次写 mmap .db 文件前已存在。
+# Worker 启动时 `worker.py` 会设置该环境变量；此处无论谁先 import，
+# 都保证目录存在（exist_ok=True 幂等，不影响 worker 路径）。
+_multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+if _multiproc_dir:
+    Path(_multiproc_dir).mkdir(parents=True, exist_ok=True)
 
 __all__ = [
     "research_jobs_total",

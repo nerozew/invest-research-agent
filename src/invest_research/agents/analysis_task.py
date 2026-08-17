@@ -213,14 +213,17 @@ def build_analysis_task(
     return Task(
         description=(
             "分析任务输入：input_company={input_company}，as_of_date={as_of_date}，requested_forms={requested_forms}。\n"
-            "以下 financial_facts 是确定性预取并按 as_of_date 截断的 SEC XBRL JSON：\n"
+            "以下 financial_facts 是确定性预取并按 as_of_date 截断的 SEC XBRL JSON（可能是 "
+            "合法 JSON 数组，也可能是空数组 [] 表示未取到任何事实）：\n"
             "{financial_facts}\n"
             "只允许使用该 JSON 中的 value/unit/period/concept/locator 生成 facts；"
-            "禁止从模型知识、新闻摘要或推测填数。"
-            "缺少数据时 facts/metrics 留空并写入 limitations。\n"
+            "禁止从模型知识、新闻摘要或推测填数。\n"
+            "如果 financial_facts 是空数组 []：必须输出 facts=[]、metrics=[]，并在 "
+            "limitations 中说明未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的"
+            "工具错误结构，也不得把该 JSON 当作文本原样输出。\n"
             "基于上游 ResearchPack 与上述 FinancialFact，选择可比期间与 concept，"
             "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
-            "产出符合 FinancialAnalysisPack 契约的结构化分析包。"
+            "产出可被 FinancialAnalysisPack 校验通过的结构化对象（只含合法字段）。"
         ),
         expected_output="一个可被 FinancialAnalysisPack 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,
