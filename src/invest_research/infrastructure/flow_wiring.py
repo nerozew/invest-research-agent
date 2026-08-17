@@ -118,8 +118,12 @@ def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
       failure_stage 供 Worker 保存失败阶段）；不注入 fixer（确定性 parse，
       提示词已约束 schema；有需要时调用方按需注入一次修复器）。
     """
+    from invest_research.infrastructure.observability.tracing import span as _span
+
     boundary = PackBoundary(max_repairs=0)
-    pack, errors = boundary.parse(obj, model, stage=_stage_for_model(model))
+    stage = _stage_for_model(model)
+    with _span(f"pack.boundary.{model.__name__}", {"pack.stage": stage}):
+        pack, errors = boundary.parse(obj, model, stage=stage)
     if pack is not None:
         # P06-09C：PackBoundary 校验成功（尽力而为）
         try:
@@ -555,9 +559,11 @@ class LiveResearchFlowRunner:
                 label_provider_model,
                 observe_agent_duration,
             )
+            from invest_research.infrastructure.observability.tracing import get_tracer
 
             profile = getattr(self._current_profile, "mode", "deep")
             tasks = getattr(crew, "tasks", None) or []
+            agent_tracer = get_tracer("agent")
             for role, task in zip(_AGENT_ROLE_ORDER, tasks):
                 try:
                     role_enum = LLMRole(role)
@@ -571,10 +577,22 @@ class LiveResearchFlowRunner:
                 end = getattr(task, "end_time", None)
                 if start is not None and end is not None:
                     duration_s = max((end - start).total_seconds(), 0.0)
-                    count_agent_run(role, profile, provider, model_lbl, "success")
-                    observe_agent_duration(
-                        role, profile, provider, model_lbl, "success", duration_s
-                    )
+                    # P06-09C：agent span 作为 flow.run 的子 span（start_as_current_span），
+                    # 属性只放低基数/非敏感字段（role/profile/provider/model）。
+                    with agent_tracer.start_as_current_span(
+                        f"agent.{role}",
+                        attributes={
+                            "agent.role": role,
+                            "agent.profile": profile,
+                            "llm.provider": provider,
+                            "llm.model": model_lbl,
+                            "agent.duration_s": duration_s,
+                        },
+                    ):
+                        count_agent_run(role, profile, provider, model_lbl, "success")
+                        observe_agent_duration(
+                            role, profile, provider, model_lbl, "success", duration_s
+                        )
 
             # LLM token usage：只从真实模型响应 usage 提取（与 _record_performance 一致）
             usage = extract_token_usage(getattr(result, "token_usage", None))

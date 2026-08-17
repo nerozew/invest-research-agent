@@ -94,6 +94,39 @@ def _classify_for_job(exc: Exception, *, fallback_stage: str | None = None) -> F
     return classify_failure(exc, stage=stage)
 
 
+def _log_job_event(
+    event: str,
+    job_id: uuid.UUID,
+    error_code: str | None,
+    stage: str | None,
+) -> None:
+    """P06-09C：Job 生命周期结构化日志事件。
+
+    - 函数内 lazy import（保持依赖方向 infrastructure -> application 不被破坏）；
+    - extra 只含低基数/非敏感字段（job_id/stage/error_code/trace_id/span_id）；
+    - trace_id/span_id 取自当前 OTel span context（无则被 structured_extra 剔除）。
+    """
+    import logging
+
+    from invest_research.infrastructure.observability.logging import (
+        span_id_from_context,
+        structured_extra,
+    )
+    from invest_research.infrastructure.observability.tracing import trace_id_from_context
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        event,
+        extra=structured_extra(
+            job_id=str(job_id),
+            stage=stage,
+            error_code=error_code,
+            trace_id=trace_id_from_context(),
+            span_id=span_id_from_context(),
+        ),
+    )
+
+
 class ExecuteResearchJobService:
     """执行一个投研任务的用例（P04-07）。
 
@@ -140,6 +173,8 @@ class ExecuteResearchJobService:
                 error_message=failure.error_message,
                 failure_stage=failure.failure_stage,
             )
+            # P06-09C：结构化失败日志事件（trace_id 关联 Jaeger 链路；无则 None）
+            _log_job_event("job_flow_failed", job_id, failure.error_code, failure.failure_stage)
             raise
         # P06-07 前置修复：最终报告发布必须先于 mark_succeeded。
         # 发布失败（缺少草稿/渲染失败）→ mark_failed，不误报完整发布成功。
@@ -154,5 +189,8 @@ class ExecuteResearchJobService:
                     error_message=failure.error_message,
                     failure_stage=failure.failure_stage,
                 )
+                _log_job_event("job_flow_failed", job_id, failure.error_code, failure.failure_stage)
                 raise
         self._writer.mark_succeeded(job_id)
+        # P06-09C：结构化成功日志事件（trace_id 关联 Jaeger 链路）
+        _log_job_event("job_flow_succeeded", job_id, None, None)
