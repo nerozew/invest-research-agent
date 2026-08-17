@@ -99,3 +99,40 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 > Ruff/mypy 全绿；完整 Docker Compose observability profile 已真实启动（10 服务健康）。
 > 下一步是 P06-07（本地部署 smoke test：health、任务执行、报告下载、指标和链路查询），
 > 需用户授权切到该任务；未经授权不 push、不 live API、不 SSH。
+
+---
+
+## P06-09A：FinancialAnalysisPack 结果完整性状态（✅ 已完成）
+
+- `domain/models.py`：新增 `AnalysisCompleteness`（complete/partial/unavailable）StrEnum +
+  `schema_version=analysis_pack_v2` + `unavailable_reason` + 跨字段 `model_validator`；
+  旧版 `version="analysis_pack_v1"` 工件经 `model_validator(mode="before")` 自动标记 v1
+  走宽松兼容分支（不强行套新状态）。
+- 提示词：`analysis_prompt_v2.md` / `writer_prompt_v2.md`（loader `PromptName.ANALYSIS/WRITER`
+  切到 v2）；Analysis/Writer task description 同步 completeness 语义。
+- 质量门禁：`quality_classifier` 增加 `unavailable_with_content` CRITICAL 兜底
+  （防御绕过 Pydantic 直接构造 state 的路径）。
+- 测试：`tests/test_analysis_completeness.py` 18 用例（三态合法/矛盾被拒/v1 兼容/
+  partial、unavailable 不崩溃/门禁兜底）；受影响模块回归 85 passed，ruff/mypy 通过。
+- commit：`0bcb303`。
+
+## P06-09B：统一 PackBoundary（✅ 已完成）
+
+- `agents/pack_parsing.py`：新增 `PackSourceKind`（final_answer/tool_params/action_input/
+  plain_text）、`BoundaryError`（error_code/stage/field/expected/actual/脱敏 detail）、
+  `PackBoundary`（提取 → 来源分类 → JSON/结构 → 多余字段 → schema → 语义跨字段分层校验）。
+- 规则：Action Input / 工具调用参数被拒为 NOT_A_PACK；仅 schema 阶段结构错误允许至多一次
+  修复（`max_repairs=1`）；semantics（业务跨字段矛盾，如 completeness 与内容冲突）不进入
+  格式修复；修复失败返回原始稳定错误分类；`_sanitize` 截断 + 去绝对路径 + 打码密钥字段。
+- 接入：`flow_wiring._to_packed` 统一换用 `PackBoundary`（确定性 parse，max_repairs=0），
+  单一读取顺序（pydantic → json_dict/exported → raw）与 ArtifactReader/dump_task_output 一致。
+- 测试：`tests/test_pack_boundary.py` 18 用例；受影响模块回归 71 passed，ruff/mypy 通过。
+- commit：`06c91d1`。
+
+## 阶段级 Checkpoint：deferred（后续可选升级）
+
+- 本轮**不实施**阶段级 Checkpoint；不增加专门的校验 Agent；不把现有工作流改为多个
+  独立 Flow。
+- 已知限制（不宣称已解决）：当前失败后仍可能重新执行整个 Crew（research/analysis/writer
+  三 Agent 从头跑），无阶段级中间断点续跑。稳定性优化可后续评估 Checkpoint 是否纳入
+  P06-10 基准之后的升级计划。

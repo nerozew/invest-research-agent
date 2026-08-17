@@ -2345,3 +2345,46 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - 本机完整 pytest 的 DB 集成测试（test_db_base/test_job_repository/test_migration_*.py）因 testcontainers 网络无法连 registry-1.docker.io 而报错，与 docs/16 既有记录一致；CI 的 migrations job 在 GitHub Actions 内置 PostgreSQL 上覆盖此部分（需 push 后在 Actions 内验证）。
 - stale running Job 恢复在 worker 启动时执行（`_run_stale_job_recovery`），用 `research_jobs.status='running'` 全量扫描；worker 重启真实执行验证留待 CI/部署环境确认（离线测试覆盖逻辑分支）。
 - 本任务按 .clinerules 只做 05 路线图中的一个 ID（P06-09）；P06-10（100 次基准）为下一候选任务，未开始。
+
+
+---
+
+## P06-09A：FinancialAnalysisPack 结果完整性状态（✅ 已完成）
+
+**产物**：domain/models.py（AnalysisCompleteness StrEnum + schema_version=v2 + unavailable_reason + 跨字段 validator + v1 兼容读取）、prompts/analysis_prompt_v2.md / writer_prompt_v2.md、prompts/loader.py（v2 切换）、agents/analysis_task.py / writer_task.py（description 同步）、flows/quality_classifier.py（unavailable 含内容兜底）、tests/test_analysis_completeness.py。
+
+### 3 个知识点
+
+1. **业务语义用 StrEnum + 跨字段 validator 表达，而不是散落的 if**：complete 须有 facts/metrics、partial 须有 limitations、unavailable 须有 reason 且不得含数据；缺字段/多余字段/状态矛盾在 Pydantic 层统一收敛为 SCHEMA_INVALID。
+2. **向后兼容读取 = 宽进严出**：model_validator(mode="before") 把缺 schema_version 且 version 以 _v1 结尾的输入标记为 v1 走宽松分支；新 schema_version=analysis_pack_v2 才严格校验——42 处 analysis_pack_v1 构造与历史工件全部兼容。
+3. **unavailable 是合法业务结果，不是系统异常**：Writer 只允许说明数据不可用、禁止推断数字；质量门禁加 unavailable_with_content CRITICAL 兜底，双层保障不得伪造指标。
+
+### 检查问题（请用自己的话回答）
+
+为什么 completeness=partial 必须强制 limitations 非空？如果允许 partial 且无说明，下游 Writer 会怎样错误组织报告？
+
+### 已知限制与风险
+- 只升级 FinancialAnalysisPack；ResearchPack/ReportDraft 未加状态字段（任务范围约束）。
+- 提示词切到 v2（analysis_prompt_v2 / writer_prompt_v2）；manifest 中 prompt hash 变化，触发既有版本化重算语义。
+- 未重新生成历史工件。
+
+---
+
+## P06-09B：统一 PackBoundary（✅ 已完成）
+
+**产物**：agents/pack_parsing.py（PackSourceKind、BoundaryError、identify_source_kind、extract_candidate、PackBoundary）、infrastructure/flow_wiring.py（_to_packed 接入）、tests/test_pack_boundary.py。
+
+### 3 个知识点
+
+1. **边界解析的关键是区分来源类别，而不只是解析格式**：identify_source_kind 分为 final_answer / tool_params / action_input / plain_text；Action Input 与工具参数直接拒为 NOT_A_PACK，解决把工具调用过程当最终答案的故障。
+2. **分层校验顺序决定错误可定位性**：JSON/结构 → 多余字段 → schema → 语义跨字段四层返回 BoundaryError（error_code/stage/field/expected/actual/脱敏 detail）；value_error 标记 semantics 阶段不进入格式修复——业务事实错误禁止修复器发明/改写数据。
+3. **有限修复 = 至多一次、只修结构、失败返回原始错误**：max_repairs=1 且仅 schema 阶段可修复；fixer 只拿到原始文本 + 结构化错误（无法调用 SEC/Serper/文件/计算器）；修复一次仍失败时返回最初的稳定错误分类。_sanitize 截断 + 去绝对路径 + 打码密钥字段。
+
+### 检查问题（请用自己的话回答）
+
+为什么 semantics 错误（业务跨字段矛盾）不允许走一次 LLM 修复，而 JSON_INVALID/EXTRA_FIELD 允许？允许修复器改字段结构，和允许修复器补数据的本质区别是什么？
+
+### 已知限制与风险
+- flow_wiring 的 _to_packed 以 max_repairs=0（确定性 parse）接入，未注入 LLM fixer；调用方可按需注入一次修复回调，框架已限制至多一次且不可调外部工具。
+- PackBoundary 为单一入口；parse_pack_output/dump_task_output 保留（同一读取顺序），公共 API 未删。
+- 未 push；阶段级 Checkpoint 记录为 deferred/后续可选升级，不实施。

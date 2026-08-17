@@ -228,6 +228,8 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P06-07 ✅ | 执行本地部署 smoke test | scripts/docs（docs/17-P06-07-VALIDATION.md） | health、任务执行、报告下载、指标和链路查询通过（真实 live 任务 succeeded、8 工件齐全、Prometheus 三状态计数、Jaeger 双服务 span 落库） | deployment verification |
 | P06-08 ✅ | 实现 PostgreSQL 与工件备份恢复演练 | scripts + runbook | 从备份恢复一个完整 job、步骤和报告 | RPO/RTO、recovery |
 | P06-09 ✅ | 建 GitHub Actions CI | workflow（.github/workflows/ci.yml） | lint、type、unit、integration 通过（Ruff / mypy src / 离线 pytest SKIP_DB_TESTS=1 893 passed / migration+DB 集成用真实 PostgreSQL） | CI quality gate |
+| P06-09A ✅ | FinancialAnalysisPack 结果完整性状态 | domain/models（AnalysisCompleteness + schema_version v2 + unavailable_reason）+ 提示词 v2 + quality 兜底 | complete/partial/unavailable 三态合法构造与矛盾被拒；v1 旧工件兼容读取；partial/unavailable 不崩溃（tests/test_analysis_completeness.py 18 用例，回归 85 passed） | pack 语义、跨字段校验 |
+| P06-09B ✅ | 统一 PackBoundary | agents/pack_parsing（PackBoundary）+ flow_wiring 接入 | 提取→来源分类→分层校验→限 1 次修复；Action Input/工具参数拒绝；错误脱敏；修复失败返原错误（tests/test_pack_boundary.py 18 用例，回归 71 passed，ruff/mypy 通过） | 边界解析、有限修复 |
 | P06-10 | 执行 100 次基准并归因失败 | versioned eval report | 成功率结论有原始 run 支撑 | evidence-based resume |
 | P06-11 | 做 10 家公司效率对照实验 | efficiency report | XX% 有原始时间记录 | ROI measurement |
 | P06-12 | 完善 README 演示、架构图和限制 | portfolio README | 新用户可按步骤复现 | 技术表达 |
