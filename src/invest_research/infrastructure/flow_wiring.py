@@ -121,8 +121,31 @@ def _to_packed(obj: Any, model: type[_PackModel]) -> _PackModel:
     boundary = PackBoundary(max_repairs=0)
     pack, errors = boundary.parse(obj, model, stage=_stage_for_model(model))
     if pack is not None:
+        # P06-09C：PackBoundary 校验成功（尽力而为）
+        try:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_pack_validation,
+            )
+
+            count_pack_validation(_stage_for_model(model), model.__name__, "success", "NONE")
+        except Exception:  # noqa: BLE001 - 指标写入尽力而为
+            pass
         return pack
     first = errors[0] if errors else None
+    # P06-09C：PackBoundary 校验失败（尽力而为）
+    try:
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_pack_validation,
+        )
+
+        count_pack_validation(
+            _stage_for_model(model),
+            model.__name__,
+            "failed",
+            first.error_code if first is not None else "SCHEMA_INVALID",
+        )
+    except Exception:  # noqa: BLE001 - 指标写入尽力而为
+        pass
     raise LiveFlowExecutionError(
         (first.detail if first is not None else None) or "无法解析 pack",
         error_code=first.error_code if first is not None else "SCHEMA_INVALID",
@@ -339,6 +362,9 @@ class LiveResearchFlowRunner:
         if scope is not None:
             scope.__exit__(None, None, None)
 
+        # P06-09C：Agent 耗时 + LLM token usage 指标（尽力而为，不改变业务结果）
+        self._record_agent_metrics(crew, result)
+
         # P06-06B：03_documents 在 Research Task 完成后由本 runner 标记
         # （Research 行为内含文档处理，Crew 内无独立 documents Task）。
         self._mark("03_documents", "succeeded")
@@ -512,6 +538,74 @@ class LiveResearchFlowRunner:
         usage = getattr(result, "token_usage", None)
         self._recorder.set_token_usage(extract_token_usage(usage))
 
+    def _record_agent_metrics(self, crew: Any, result: Any) -> None:
+        """Agent 耗时 + LLM token usage Prometheus 指标（P06-09C，尽力而为）。
+
+        - role 白名单（research/analysis/writer）由 metrics_events 过滤；
+        - provider/model 用脱敏配置名（label_provider_model），绝不暴露 base_url；
+        - token 只来自真实模型响应 usage；缺失时记录 usage_missing，不伪造 0。
+        """
+        try:
+            from invest_research.agents.llm_factory import LLMRole
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_agent_run,
+                count_llm_request,
+                count_llm_tokens,
+                count_llm_usage_missing,
+                label_provider_model,
+                observe_agent_duration,
+            )
+
+            profile = getattr(self._current_profile, "mode", "deep")
+            tasks = getattr(crew, "tasks", None) or []
+            for role, task in zip(_AGENT_ROLE_ORDER, tasks):
+                try:
+                    role_enum = LLMRole(role)
+                except ValueError:
+                    role_enum = None
+                model = (
+                    self._config.model_for(role_enum) if role_enum is not None else str(role)
+                )
+                provider, model_lbl = label_provider_model(self._config.base_url, model)
+                start = getattr(task, "start_time", None)
+                end = getattr(task, "end_time", None)
+                if start is not None and end is not None:
+                    duration_s = max((end - start).total_seconds(), 0.0)
+                    count_agent_run(role, profile, provider, model_lbl, "success")
+                    observe_agent_duration(
+                        role, profile, provider, model_lbl, "success", duration_s
+                    )
+
+            # LLM token usage：只从真实模型响应 usage 提取（与 _record_performance 一致）
+            usage = extract_token_usage(getattr(result, "token_usage", None))
+            for role in _AGENT_ROLE_ORDER:
+                try:
+                    role_enum = LLMRole(role)
+                except ValueError:
+                    role_enum = None
+                model = (
+                    self._config.model_for(role_enum) if role_enum is not None else str(role)
+                )
+                provider, model_lbl = label_provider_model(self._config.base_url, model)
+                if usage:
+                    count_llm_request(provider, model_lbl, role, "success")
+                    count_llm_tokens(
+                        provider, model_lbl, role, "input",
+                        int(usage.get("prompt_tokens", 0) or 0),
+                    )
+                    count_llm_tokens(
+                        provider, model_lbl, role, "output",
+                        int(usage.get("completion_tokens", 0) or 0),
+                    )
+                    count_llm_tokens(
+                        provider, model_lbl, role, "cached_input",
+                        int(usage.get("cached_prompt_tokens", 0) or 0),
+                    )
+                else:
+                    count_llm_usage_missing(provider, model_lbl, role)
+        except Exception:  # noqa: BLE001 - 指标写入尽力而为
+            _LOGGER.warning("agent/llm metrics recording skipped")
+
     def _extract_packs(self, result: Any, request: ResearchRequest) -> ResearchFlowState:
         """从 Crew 结果解析三个 pack 到 state。
 
@@ -531,6 +625,17 @@ class LiveResearchFlowRunner:
             state.research_pack = self._extract_research_pack(outputs[0], request)
         if len(outputs) >= 2:
             state.analysis_pack = _to_packed(outputs[1], FinancialAnalysisPack)
+            # P06-09C：Analysis pack 完整性分布（尽力而为）
+            try:
+                from invest_research.infrastructure.observability.metrics_events import (
+                    count_analysis_completeness,
+                )
+
+                completeness = getattr(state.analysis_pack, "completeness", None)
+                if completeness is not None:
+                    count_analysis_completeness(str(completeness))
+            except Exception:  # noqa: BLE001 - 指标写入尽力而为
+                pass
         if len(outputs) >= 3:
             state.report_draft = _to_packed(outputs[2], ReportDraft)
 

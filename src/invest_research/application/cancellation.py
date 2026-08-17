@@ -80,10 +80,22 @@ class CancelResearchJobService:
         # pending → cancelled（第一个安全点：任务尚未开始执行）
         if self._writer.cancel_from_pending(job_id):
             self._cleanup_steps(job_id)
+            # P06-09C：真正取消成功（pending→cancelled）才计数
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("cancelled")
             return (True, False)
         # running → cancelled（第二个安全点：任务执行中被协作式停止）
         if self._writer.cancel_from_running(job_id):
             self._cleanup_steps(job_id)
+            # P06-09C：真正取消成功（running→cancelled）才计数
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_research_job,
+            )
+
+            count_research_job("cancelled")
             return (True, False)
         # 两个前置状态都不匹配 → 终态（含已 cancelled）：幂等，无变化
         return (False, True)

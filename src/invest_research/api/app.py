@@ -202,24 +202,49 @@ def create_app(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        """P06-05：每个 HTTP 请求开一个 ``api.request`` span（链路起点）。
+        """P06-05 + P06-09C：HTTP 请求 OTel span + Prometheus RED 指标（链路起点）。
 
-        属性只放低基数/非敏感字段（method/route/path）；不记录查询参数与请求体。
-        未 setup_tracing 时 OTel no-op，零开销。
+        - OTel span 属性只放低基数/非敏感字段（method/route/path）；
+        - P06-09C：route 使用 FastAPI 路由模板（``route.path``），禁止把真实
+          URL/job_id 放进 label；状态码按 2xx/4xx/5xx 归类；
+        - 指标写入尽力而为（不影响响应）。
         """
+        import time
+
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_http_requests,
+            observe_http_request,
+            set_http_in_progress,
+        )
         from invest_research.infrastructure.observability.tracing import span
 
         route = request.scope.get("route")
-        route_path = getattr(route, "path", request.url.path)
+        route_path = getattr(route, "path", "<unknown>")
+        method = request.method
+        started = time.perf_counter()
+        set_http_in_progress(method, route_path, 1)
         with span(
             "api.request",
             {
-                "http.method": request.method,
+                "http.method": method,
                 "http.route": route_path,
                 "http.target": request.url.path,
             },
         ):
-            return await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception:
+                # 异常路径：中间件异常由外层转 500；按 5xx 归类计数。
+                duration = time.perf_counter() - started
+                set_http_in_progress(method, route_path, -1)
+                observe_http_request(method, route_path, duration)
+                count_http_requests(method, route_path, 500)
+                raise
+            duration = time.perf_counter() - started
+            set_http_in_progress(method, route_path, -1)
+            observe_http_request(method, route_path, duration)
+            count_http_requests(method, route_path, response.status_code)
+            return response
 
     app.state.health_checker = checker
     app.state.job_service = job_service

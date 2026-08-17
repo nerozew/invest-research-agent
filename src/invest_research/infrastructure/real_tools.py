@@ -196,19 +196,33 @@ def _count(stats: dict[str, int] | None, key: str) -> None:
 
 @contextmanager
 def _timed(recorder: PerformanceRecorder | None, tool_name: str) -> Iterator[None]:
-    """工具执行上下文：性能计时（可选）+ OTel span（P06-05）。
+    """工具执行上下文：性能计时（可选）+ OTel span（P06-05）+ 工具耗时指标（P06-09C）。
 
     - recorder 为 None 时跳过计时（零额外开销）；
     - OTel span 始终开启（未 setup_tracing 时是 no-op provider，零开销）；
+    - P06-09C：工具完成后按成功/失败写 tool_duration_seconds（尽力而为）；
     - span 属性只放工具名（低基数），不放参数/结果/密钥。
     """
+    import time as _time_mod
+
+    from invest_research.infrastructure.observability.metrics_events import (
+        observe_tool_duration,
+    )
     from invest_research.infrastructure.observability.tracing import span as _otel_span
 
+    started = _time_mod.perf_counter()
+    outcome: str = "success"
     with ExitStack() as stack:
         if recorder is not None:
             stack.enter_context(recorder.timed_tool(tool_name))
         stack.enter_context(_otel_span(f"tool.{tool_name}", {"tool.name": tool_name}))
-        yield
+        try:
+            yield
+        except Exception:
+            outcome = "failure"
+            raise
+        finally:
+            observe_tool_duration(tool_name, outcome, _time_mod.perf_counter() - started)
 
 
 def _budget_exhausted(budget: ToolBudget | None, tool_name: str) -> str | None:
@@ -232,10 +246,18 @@ def _cached_lookup(
     """查缓存：返回 (cached_text, key)；未命中时 cached_text 为 None。"""
     if cache is None:
         return None, None
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_tool_cache,
+    )
+
     key = cache.key(tool_name, params)
     cached: str | None = cache.get(key)
-    if cached is not None and recorder is not None:
-        recorder.record_cache_hit(tool_name)
+    if cached is not None:
+        count_tool_cache(tool_name, "hit")
+        if recorder is not None:
+            recorder.record_cache_hit(tool_name)
+    else:
+        count_tool_cache(tool_name, "miss")
     return cached, key
 
 

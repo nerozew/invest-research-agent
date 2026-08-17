@@ -218,6 +218,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row = session.get(ResearchJobORM, job_id)
                 if row is None or row.status != JobStatus.PENDING.value:
                     return False
+                profile = row.research_profile or "deep"
                 row.status = JobStatus.RUNNING.value
                 row.started_at = datetime.now(timezone.utc)
                 session.commit()
@@ -230,9 +231,12 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             # P06-06C：条件转换成功（返回 True）才计数 running（重复投递不会重复计数）
             from invest_research.infrastructure.observability.metrics_events import (
                 count_research_job,
+                set_research_job_in_progress,
             )
 
             count_research_job("running")
+            # P06-09C：只在条件转换成功后按档位设置执行中 Gauge（重复投递不重复增减）
+            set_research_job_in_progress(profile, 1)
             return True
 
         def mark_succeeded(self, job_id: uuid.UUID) -> None:
@@ -240,6 +244,8 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row = session.get(ResearchJobORM, job_id)
                 if row is None:
                     return
+                profile = row.research_profile or "deep"
+                started_at = row.started_at
                 row.status = JobStatus.SUCCEEDED.value
                 row.completed_at = datetime.now(timezone.utc)
                 row.current_step = None  # P06-06B：终态清空 current_step
@@ -247,9 +253,18 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             # P06-06C：真实到达终态才计数 succeeded（重复投递不重复计数）
             from invest_research.infrastructure.observability.metrics_events import (
                 count_research_job,
+                observe_research_job,
+                set_research_job_in_progress,
             )
 
             count_research_job("succeeded")
+            # P06-09C：成功终态记录真实总耗时 + 释放执行中 Gauge
+            if started_at is not None:
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                duration = max((datetime.now(timezone.utc) - started_at).total_seconds(), 0.0)
+                observe_research_job(profile, "succeeded", duration)
+            set_research_job_in_progress(profile, -1)
 
         def mark_failed(
             self,
@@ -266,6 +281,8 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row = session.get(ResearchJobORM, job_id)
                 if row is None:
                     return
+                profile = row.research_profile or "deep"
+                started_at = row.started_at
                 row.status = JobStatus.FAILED.value
                 row.completed_at = datetime.now(timezone.utc)
                 row.current_step = None  # P06-06B：终态清空 current_step
@@ -284,10 +301,21 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
             # P06-06C：真实到达终态才计数 failed（重复执行不会重复计数）
             from invest_research.infrastructure.observability.metrics_events import (
+                count_failure,
                 count_research_job,
+                observe_research_job,
+                set_research_job_in_progress,
             )
 
             count_research_job("failed")
+            # P06-09C：失败终态记录真实总耗时 + 释放执行中 Gauge + 失败分类
+            if started_at is not None:
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                duration = max((datetime.now(timezone.utc) - started_at).total_seconds(), 0.0)
+                observe_research_job(profile, "failed", duration)
+            set_research_job_in_progress(profile, -1)
+            count_failure(failure_stage or "unknown", error_code)
 
     runner = flow_runner if flow_runner is not None else _default_flow_runner()
     # P06-07 前置修复：Worker 成功获得 Flow state 后发布最终报告
@@ -359,6 +387,11 @@ def _run_stale_job_recovery() -> None:
                 job.error_message = "任务在 Worker 重启时仍处于 running，已由启动恢复收口为 failed"
                 job.failure_stage = "startup_recovery"
             session.commit()
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_stale_recovery,
+        )
+
+        count_stale_recovery("recovered" if stale else "none")
         progress = SqlProgressSink(_build_session_factory())
         for job in stale:
             try:
