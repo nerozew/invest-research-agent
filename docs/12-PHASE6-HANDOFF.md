@@ -343,3 +343,57 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
   未运行 100 次基准；未进入下一任务。
 - **下一候选任务**：受控 live 验证 DeepSeek 输出 Draft 能被本地 Assembler 组装；
   随后 `P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。
+
+## P06-11E：DeepSeek 原生 JSON Finalizer + 三阶段执行拆分（✅ 已完成 2026-08-19）
+
+**任务目标**：不增加 Agent；为 DeepSeek 建立供应商原生结构化输出层——
+普通 Agent 工具循环 → 独立 JSON Finalizer → BoundaryCanonicalizer → Pydantic →
+确定性 PackAssembler；并把一次 kickoff 拆为 Research/Analysis/Writer 三阶段短路执行。
+
+**新增文件**：
+- `application/structured_finalizer.py`：`StructuredFinalizer` 供应商无关端口（Protocol[T]）+
+  `FinalizerError`（稳定 error_code）。输入原始 Agent 输出 + 目标草稿类型，输出本地
+  Pydantic 校验草稿；不执行工具、不修改原始事实、最多一次格式修复、状态限定当前 Job。
+- `infrastructure/finalizers/deepseek_json_object_finalizer.py`：
+  `DeepSeekJsonObjectFinalizer`——普通 `chat.completions.create` +
+  `response_format={"type":"json_object"}`；`tools=[]`、`thinking=false`（deepseek
+  `extra_body`）；检查 `finish_reason`（length 稳定失败）、空 content 稳定失败；
+  `json.loads` → BoundaryCanonicalizer → Pydantic；第一次 Schema 失败只修复一次，
+  第二次失败立即终止；可注入 mock client（零真实网络）。
+- `application/boundary_canonicalizer.py`：仅语义等价规范化（""→None、strip、
+  不修改数字/枚举、不补 company_id/source_id、unavailable+空原因仍失败）；
+  白名单只覆盖 AnalysisSelectionDraft/FinancialAnalysisPack 的
+  unavailable_reason/analysis_notes/limitations。
+- `application/research_assembler.py`：`ResearchPackAssembler`——LLM 只选 URL，
+  本地从可信 SEC 申报记录构造 Source（canonical_url 必须命中 primary_document_url）；
+  无来源 → ResearchAssemblerError（禁止伪造 ResearchPack）。
+- `tests/test_p06_11e_deepseek_json_finalizer.py`：22 用例，覆盖 20 项契约。
+
+**修改**：`domain/models.py`（`ResearchSelectionDraft`）、`infrastructure/flow_wiring.py`
+（`_RunContext` 每次 run 独立：finalization_count/prefetch_result/analysis_facts 限定当前
+Job——修复 `_finalize_used` 跨 Job 泄漏；生产路径三阶段 `_run_staged` 短路，前序成功才
+执行下一步；注入 fake crew 保持一次 kickoff 兼容；`_staged_artifact_loader` 让 Writer
+只读已组装 pack）。
+
+**验证**：22 新测试全绿；Ruff 全绿；mypy 7 个源文件全绿；回归 `tests/test_flow_wiring.py`
+25 passed。测试覆盖：请求体含 json_object、绝不含 json_schema、仅 create 不触发
+beta.chat.completions.parse、tools=[]、thinking=false、合法 JSON、普通文本经一次
+Finalizer、""→None、unavailable 空原因失败、finish_reason=length/空 content 失败、
+一次修复成功、第二次失败终止、Research 失败跳过 Analysis、Analysis 失败跳过 Writer、
+Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E、Mock client
+零真实网络。
+
+**commits（本地，未 push）**：
+- `63e1f7f` P06-11E1：StructuredFinalizer 端口 + DeepSeekJsonObjectFinalizer +
+  BoundaryCanonicalizer + _RunContext 修复
+- `ceabd60` P06-11E2：ResearchSelectionDraft/ResearchPackAssembler + 三阶段执行拆分
+- `fdd1b8f` test(P06-11E)：22 项契约测试
+- `5fc3267` docs(P06-11E)：路线图标记 ✅
+- `62addc2` docs(P06-11E)：学习日志
+
+**限制**：Finalizer 修复未携带结构化字段错误（`_extract_field_errors` 空列表）；分阶段
+生产路径未在真实 DeepSeek 下运行（遵守不 live）；未 push；未启动 Docker；未运行
+100 次基准。
+
+**下一候选任务**：受控 live 验证 Finalizer 转 SelectionDraft 并被本地 Assembler 组装；
+随后 `P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。
