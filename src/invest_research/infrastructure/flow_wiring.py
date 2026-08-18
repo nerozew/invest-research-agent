@@ -352,21 +352,29 @@ class LiveResearchFlowRunner:
         # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）。
         #    P06-06A：按任务档位解析后的有效配置（fast 已关闭思考模式）。
         crew = self._crew_factory(self._effective_config, self._research_tools)
-        #    P06-06B：用 CrewAI TaskStartedEvent 标记 Task 开始（task.py:521 可靠 emit）。
+        #    P06-06B：用 CrewAI TaskStartedEvent 标记 Task 开始（task.py:521 可靠 emit）；
+        #    P06-11A：用 CrewAI LLMCall*Event 记录每次真实模型调用（指标 + Jaeger span）。
         #    scope 在 kickoff 期间保持活跃，结束后显式退出清除本轮 handler。
         scope = self._subscribe_task_progress(crew)
+        llm_scope = self._subscribe_llm_calls(crew)
         try:
             result = crew.kickoff(inputs=inputs)
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
             if scope is not None:
                 scope.__exit__(None, None, None)
+            if llm_scope is not None:
+                llm_scope.__exit__(None, None, None)
             raise LiveFlowExecutionError(
                 f"真实 Crew 执行失败: {type(exc).__name__}: {exc}"
             ) from exc
         if scope is not None:
             scope.__exit__(None, None, None)
+        if llm_scope is not None:
+            llm_scope.__exit__(None, None, None)
 
-        # P06-09C：Agent 耗时 + LLM token usage 指标（尽力而为，不改变业务结果）
+        # P06-09C：Agent 耗时指标（尽力而为，不改变业务结果）。
+        # P06-11A：LLM 每次真实调用的 token/次数/耗时/span 由 LLM 事件观测器负责，
+        # 不再把 Crew 汇总 usage 复制给三个角色（修复三倍计数）。
         self._record_agent_metrics(crew, result)
 
         # P06-06B：03_documents 在 Research Task 完成后由本 runner 标记
@@ -483,6 +491,26 @@ class LiveResearchFlowRunner:
 
             task.callback = _cb
 
+    def _subscribe_llm_calls(self, crew: Crew) -> Any | None:
+        """用 CrewAI LLM 事件总线记录每次真实模型调用（P06-11A）。
+
+        - ``LLMCallStartedEvent`` / ``LLMCallCompletedEvent`` / ``LLMCallFailedEvent``
+          在每次真实模型请求边界 emit（crewai.llm.LLM 官方事件，非 monkey patch）；
+        - 每个模型请求只记录一次（成功或失败互斥），Token 只来自真实响应 usage；
+        - 返回 ``scoped_handlers()`` context manager；调用方必须在 kickoff 完成后
+          退出清理（防止 handler 泄漏到下一个 Job）。
+        """
+        try:
+            from invest_research.infrastructure.observability.llm_call_observer import (
+                LlmCallObserver,
+            )
+        except ImportError:
+            return None
+        try:
+            return LlmCallObserver(self._config).subscribe()
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            return None
+
     @staticmethod
     def _role_to_step(role_name: str | None) -> str | None:
         """把 Agent role 名映射到步骤名（未知 role 返回 None 不标记）。"""
@@ -543,19 +571,16 @@ class LiveResearchFlowRunner:
         self._recorder.set_token_usage(extract_token_usage(usage))
 
     def _record_agent_metrics(self, crew: Any, result: Any) -> None:
-        """Agent 耗时 + LLM token usage Prometheus 指标（P06-09C，尽力而为）。
+        """Agent 耗时 Prometheus 指标（P06-09C，尽力而为）。
 
-        - role 白名单（research/analysis/writer）由 metrics_events 过滤；
-        - provider/model 用脱敏配置名（label_provider_model），绝不暴露 base_url；
-        - token 只来自真实模型响应 usage；缺失时记录 usage_missing，不伪造 0。
+        P06-11A 说明：LLM 每次真实调用的 token/次数/耗时/span 由
+        ``LlmCallObserver``（LLM 事件总线）负责，这里只保留 Agent 级耗时指标，
+        **不再**把 Crew 汇总 usage 复制给三个角色（修复三倍计数问题）。
         """
         try:
             from invest_research.agents.llm_factory import LLMRole
             from invest_research.infrastructure.observability.metrics_events import (
                 count_agent_run,
-                count_llm_request,
-                count_llm_tokens,
-                count_llm_usage_missing,
                 label_provider_model,
                 observe_agent_duration,
             )
@@ -595,36 +620,6 @@ class LiveResearchFlowRunner:
                         observe_agent_duration(
                             role, profile, provider, model_lbl, "success", duration_s
                         )
-
-            # LLM token usage：只从真实模型响应 usage 提取（与 _record_performance 一致）
-            usage = extract_token_usage(getattr(result, "token_usage", None))
-            for role in _AGENT_ROLE_ORDER:
-                try:
-                    role_enum = LLMRole(role)
-                except ValueError:
-                    role_enum = None
-                model = (
-                    self._config.model_for(role_enum) if role_enum is not None else str(role)
-                )
-                provider, model_lbl = label_provider_model(
-                    self._config.vendor, model, base_url=self._config.base_url
-                )
-                if usage:
-                    count_llm_request(provider, model_lbl, role, "success")
-                    count_llm_tokens(
-                        provider, model_lbl, role, "input",
-                        int(usage.get("prompt_tokens", 0) or 0),
-                    )
-                    count_llm_tokens(
-                        provider, model_lbl, role, "output",
-                        int(usage.get("completion_tokens", 0) or 0),
-                    )
-                    count_llm_tokens(
-                        provider, model_lbl, role, "cached_input",
-                        int(usage.get("cached_prompt_tokens", 0) or 0),
-                    )
-                else:
-                    count_llm_usage_missing(provider, model_lbl, role)
         except Exception:  # noqa: BLE001 - 指标写入尽力而为
             _LOGGER.warning("agent/llm metrics recording skipped")
 

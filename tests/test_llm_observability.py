@@ -1,0 +1,417 @@
+"""P06-11A：LLM 调用观测器离线测试（不联网）。
+
+覆盖验收：
+- 一次真实模型调用只计数一次（不三倍）；
+- research/analysis/writer 三角色数据不会重复三倍；
+- 成功/失败均记录调用次数与耗时；
+- 有真实 usage 时正确记录 input/output/cached_input token；
+- 无 usage 时只增加 llm_usage_missing_total（绝不伪造 0）；
+- 事件总线 subscribe/emit 真实触发 handler；
+- label 不包含高基数或敏感信息。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Iterator
+
+import pytest
+from prometheus_client import REGISTRY
+
+from invest_research.agents.llm_factory import LLMConfig
+from invest_research.infrastructure.observability.llm_call_observer import (
+    LlmCallObserver,
+    extract_usage_tokens,
+    has_usage,
+    role_name_to_role,
+)
+
+
+def _make_config() -> LLMConfig:
+    """构造最小 LLMConfig（api_key 为占位 SecretStr，不联网）。"""
+    from pydantic import SecretStr
+
+    return LLMConfig(
+        provider="openai_compatible",
+        vendor="qwen",
+        base_url="https://dashscope.example.invalid",
+        api_key=SecretStr("test-placeholder-key"),
+        model_research="qwen-test",
+        model_analysis="qwen-test",
+        model_writer="qwen-test",
+    )
+
+
+@pytest.fixture()
+def llm_config() -> LLMConfig:
+    return _make_config()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_metrics() -> Iterator[None]:
+    """每个测试前后清理 llm_ 指标，避免跨测试污染。"""
+    yield
+    _unregister_llm_metrics()
+
+
+def _unregister_llm_metrics() -> None:
+    """从 REGISTRY 注销 llm_ 指标（幂等）。"""
+    for collector in list(REGISTRY._collector_to_names):  # noqa: SLF001
+        names = REGISTRY._collector_to_names[collector]  # noqa: SLF001
+        if isinstance(names, (list, tuple, set)) and any(
+            "llm_" in name for name in names
+        ):
+            try:
+                REGISTRY.unregister(collector)
+            except (ValueError, KeyError):
+                pass
+            continue
+        if "llm_" in names:
+            try:
+                REGISTRY.unregister(collector)
+            except (ValueError, KeyError):
+                pass
+
+
+def _samples() -> list[tuple[str, dict[str, str], float]]:
+    """收集当前 REGISTRY 中 llm_ 指标样本。"""
+    result: list[tuple[str, dict[str, str], float]] = []
+    for family in REGISTRY.collect():
+        for sample in family.samples:
+            if sample.name.startswith("llm_"):
+                result.append((sample.name, dict(sample.labels), float(sample.value)))
+    return result
+
+
+class _FakeAgent:
+    """伪造 Agent：LLMEventBase.__init__ 读取 id/role 转 agent_role。"""
+
+    def __init__(self, role: str) -> None:
+        self.id = f"agent-{role}"
+        self.role = role
+
+
+def _make_started_event(role: str, model: str) -> Any:
+    """构造 LLMCallStartedEvent（与 CrewAI 1.6.1 字段一致）。"""
+    from crewai.events.types.llm_events import LLMCallStartedEvent
+
+    return LLMCallStartedEvent(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        from_task=None,
+        from_agent=_FakeAgent(role),
+        timestamp=0.0,
+    )
+
+
+def _make_completed_event(
+    role: str,
+    model: str,
+    *,
+    usage: dict[str, Any] | None = None,
+    duration: float = 1.5,
+) -> Any:
+    """构造 LLMCallCompletedEvent（usage/duration 走 extra=allow）。"""
+    from crewai.events.types.llm_events import LLMCallCompletedEvent, LLMCallType
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "response": "ok",
+        "call_type": LLMCallType.LLM_CALL,
+        "from_task": None,
+        "from_agent": _FakeAgent(role),
+        "duration": duration,
+    }
+    if usage is not None:
+        kwargs["usage"] = usage
+    return LLMCallCompletedEvent(**kwargs)
+
+
+def _make_failed_event(role: str) -> Any:
+    """构造 LLMCallFailedEvent（CrewAI 1.6.1 无 model/duration 字段）。"""
+    from crewai.events.types.llm_events import LLMCallFailedEvent
+
+    return LLMCallFailedEvent(
+        error="boom",
+        from_task=None,
+        from_agent=_FakeAgent(role),
+    )
+
+
+def _drive(observer: LlmCallObserver, *events: Any) -> None:
+    """按顺序驱动 handler（模拟事件总线 emit 的同步调用）。"""
+    for event in events:
+        if type(event).__name__ == "LLMCallStartedEvent":
+            observer._on_started(None, event)
+        elif type(event).__name__ == "LLMCallCompletedEvent":
+            observer._on_completed(None, event)
+        elif type(event).__name__ == "LLMCallFailedEvent":
+            observer._on_failed(None, event)
+
+
+# ---------------------------------------------------------------------------
+# 角色映射与 usage 提取（纯函数）
+# ---------------------------------------------------------------------------
+
+
+def test_role_name_to_role_maps_readable_names() -> None:
+    assert role_name_to_role("Research Analyst") == "research"
+    assert role_name_to_role("Financial Analyst") == "analysis"
+    assert role_name_to_role("Report Writer") == "writer"
+    assert role_name_to_role("Unknown Role") is None
+    assert role_name_to_role(None) is None
+    assert role_name_to_role("") is None
+
+
+def test_extract_usage_tokens_dict_and_object() -> None:
+    usage_dict = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 20},
+    }
+    tokens = extract_usage_tokens(usage_dict)
+    assert tokens == {"input": 100, "output": 50, "cached_input": 20}
+    assert has_usage(usage_dict) is True
+
+
+def test_has_usage_false_when_empty_or_none() -> None:
+    assert has_usage(None) is False
+    assert has_usage({}) is False
+    assert has_usage({"prompt_tokens": 0, "completion_tokens": 0}) is False
+
+
+# ---------------------------------------------------------------------------
+# 计数正确性（一次调用只计一次、三角色不三倍）
+# ---------------------------------------------------------------------------
+
+
+def test_single_call_counts_once(llm_config: LLMConfig) -> None:
+    """一次成功调用 → success=1（不三倍）。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Research Analyst", "qwen-test"),
+        _make_completed_event(
+            "Research Analyst",
+            "qwen-test",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        ),
+    )
+
+    requests = [s for s in _samples() if s[0] == "llm_requests_total"]
+    success = [s for s in requests if s[2]["status"] == "success"]
+    # 恰好一条 success 序列，值为 1
+    assert len(success) == 1, f"期望 1 条 success 序列，实际 {success}"
+    assert success[0][2] == 1.0
+
+
+def test_three_roles_not_tripled(llm_config: LLMConfig) -> None:
+    """三个角色各一次调用 → 每个角色 success=1（不是 3）。"""
+    observer = LlmCallObserver(llm_config)
+    for role_name in ("Research Analyst", "Financial Analyst", "Report Writer"):
+        _drive(
+            observer,
+            _make_started_event(role_name, "qwen-test"),
+            _make_completed_event(
+                role_name,
+                "qwen-test",
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            ),
+        )
+
+    requests = [
+        s
+        for s in _samples()
+        if s[0] == "llm_requests_total" and s[2]["status"] == "success"
+    ]
+    by_role: dict[str, float] = {}
+    for _, labels, value in requests:
+        role = labels["role"]
+        by_role[role] = by_role.get(role, 0.0) + value
+    assert by_role == {"research": 1.0, "analysis": 1.0, "writer": 1.0}
+
+
+# ---------------------------------------------------------------------------
+# 成功/失败与耗时
+# ---------------------------------------------------------------------------
+
+
+def test_success_records_duration(llm_config: LLMConfig) -> None:
+    """成功调用记录耗时（duration observe）。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Research Analyst", "qwen-test"),
+        _make_completed_event(
+            "Research Analyst",
+            "qwen-test",
+            duration=2.5,
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
+        ),
+    )
+
+    count_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_count"]
+    sum_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_sum"]
+    assert any(s[2] == 1.0 for s in count_s)
+    assert any(abs(s[2] - 2.5) < 1e-6 for s in sum_s)
+
+
+def test_failure_records_count_and_duration(llm_config: LLMConfig) -> None:
+    """失败调用记录 failure 次数与耗时。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Research Analyst", "qwen-test"),
+        _make_failed_event("Research Analyst"),
+    )
+
+    requests = [s for s in _samples() if s[0] == "llm_requests_total"]
+    failures = [s for s in requests if s[2]["status"] == "failure"]
+    assert len(failures) == 1
+    assert failures[0][2] == 1.0
+    # 失败也有 duration count（本地起止时间实测 >= 0）
+    count_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_count"]
+    assert any(s[2] == 1.0 for s in count_s)
+
+
+def test_failure_does_not_count_missing(llm_config: LLMConfig) -> None:
+    """失败不产生 usage missing（missing=有响应但无 usage）。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Research Analyst", "qwen-test"),
+        _make_failed_event("Research Analyst"),
+    )
+    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
+    assert missing == []
+
+
+# ---------------------------------------------------------------------------
+# Token / usage missing
+# ---------------------------------------------------------------------------
+
+
+def test_usage_token_recorded_correctly(llm_config: LLMConfig) -> None:
+    """有真实 usage → input/output/cached_input 正确计数。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Financial Analyst", "qwen-test"),
+        _make_completed_event(
+            "Financial Analyst",
+            "qwen-test",
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "prompt_tokens_details": {"cached_tokens": 20},
+            },
+        ),
+    )
+
+    tokens = [s for s in _samples() if s[0] == "llm_tokens_total"]
+    by_type = {s[2]["type"]: s[2] for s in tokens}
+    assert by_type["input"] == 100.0
+    assert by_type["output"] == 50.0
+    assert by_type["cached_input"] == 20.0
+    # 有 usage 时不记 missing
+    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
+    assert missing == []
+
+
+def test_missing_usage_only_increments_missing(llm_config: LLMConfig) -> None:
+    """无 usage → 只增加 missing，不写 token，也不伪造 0。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Report Writer", "qwen-test"),
+        _make_completed_event("Report Writer", "qwen-test"),  # 无 usage
+    )
+
+    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
+    assert len(missing) == 1
+    assert missing[0][2] == 1.0
+    tokens = [s for s in _samples() if s[0] == "llm_tokens_total"]
+    assert tokens == [], "无 usage 时不得写入 token 序列"
+
+
+# ---------------------------------------------------------------------------
+# 事件总线真实 emit 触发
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_and_event_bus_emit(llm_config: LLMConfig) -> None:
+    """subscribe() 注册 handler 后，crewai_event_bus.emit 真实触发计数。"""
+    from crewai.events.event_bus import crewai_event_bus
+
+    observer = LlmCallObserver(llm_config)
+    scope = observer.subscribe()
+    assert scope is not None
+    try:
+        crewai_event_bus.emit(
+            None,
+            event=_make_started_event("Research Analyst", "qwen-test"),
+        )
+        crewai_event_bus.emit(
+            None,
+            event=_make_completed_event(
+                "Research Analyst",
+                "qwen-test",
+                usage={"prompt_tokens": 5, "completion_tokens": 3},
+            ),
+        )
+    finally:
+        scope.__exit__(None, None, None)
+
+    success = [
+        s
+        for s in _samples()
+        if s[0] == "llm_requests_total" and s[2]["status"] == "success"
+    ]
+    assert len(success) == 1
+    assert success[0][2] == 1.0
+
+
+def test_subscribe_returns_none_when_no_event_bus(
+    llm_config: LLMConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """事件总线不可用时 subscribe 返回 None（静默降级）。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "crewai.events.event_bus":
+            raise ImportError("no event bus")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    observer = LlmCallObserver(llm_config)
+    assert observer.subscribe() is None
+
+
+# ---------------------------------------------------------------------------
+# label 安全性
+# ---------------------------------------------------------------------------
+
+
+def test_labels_no_sensitive_or_high_cardinality(llm_config: LLMConfig) -> None:
+    """指标 label 不包含 URL/公司/job_id/api_key 等高基数或敏感信息。"""
+    observer = LlmCallObserver(llm_config)
+    _drive(
+        observer,
+        _make_started_event("Research Analyst", "qwen-test"),
+        _make_completed_event(
+            "Research Analyst",
+            "qwen-test",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        ),
+    )
+    for _, labels, _ in _samples():
+        assert not any(
+            k in labels
+            for k in ("url", "job_id", "company", "api_key", "authorization", "prompt")
+        )
+        for value in labels.values():
+            assert "http://" not in value and "sk-" not in value, (
+                f"label 泄漏敏感信息: {value}"
+            )
