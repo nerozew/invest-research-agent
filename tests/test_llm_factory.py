@@ -61,6 +61,14 @@ def test_default_provider_is_openai_compatible() -> None:
     assert config.provider == "openai_compatible"
 
 
+def test_default_vendor_is_qwen() -> None:
+    """P06-11：默认 vendor=qwen（向后兼容，与原 enable_thinking 行为一致）。"""
+    settings = _settings()
+    assert settings.llm_vendor == "qwen"
+    config = LLMConfig.from_settings(settings)
+    assert config.vendor == "qwen"
+
+
 def test_default_models_are_qwen_max() -> None:
     settings = _settings()
     assert settings.llm_model_research == "qwen-max"
@@ -237,6 +245,81 @@ def test_enable_thinking_maps_from_settings() -> None:
     assert _config().enable_thinking is None
     assert _config(llm_enable_thinking=False).enable_thinking is False
     assert _config(llm_enable_thinking=True).enable_thinking is True
+
+
+# ---- P06-11：vendor 决定 thinking 供应商专用参数格式 ----
+def test_qwen_vendor_uses_enable_thinking() -> None:
+    """qwen（默认）：false→enable_thinking=false；None→不传。"""
+    config = _config(llm_vendor="qwen", llm_enable_thinking=False)
+    params = getattr(build_real_llm(config, LLMRole.RESEARCH), "additional_params", {}) or {}
+    assert params.get("extra_body") == {"enable_thinking": False}
+
+    config_none = _config(llm_vendor="qwen")  # enable_thinking=None
+    params_none = (
+        getattr(build_real_llm(config_none, LLMRole.RESEARCH), "additional_params", {}) or {}
+    )
+    assert "extra_body" not in params_none
+
+
+def test_deepseek_vendor_uses_thinking_type() -> None:
+    """deepseek：true→thinking.type=enabled；false→disabled；None→不传。"""
+    config_true = _config(llm_vendor="deepseek", llm_enable_thinking=True)
+    params_true = (
+        getattr(build_real_llm(config_true, LLMRole.ANALYSIS), "additional_params", {}) or {}
+    )
+    assert params_true.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+    config_false = _config(llm_vendor="deepseek", llm_enable_thinking=False)
+    params_false = (
+        getattr(build_real_llm(config_false, LLMRole.WRITER), "additional_params", {}) or {}
+    )
+    assert params_false.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+    config_none = _config(llm_vendor="deepseek")  # enable_thinking=None
+    params_none = (
+        getattr(build_real_llm(config_none, LLMRole.RESEARCH), "additional_params", {}) or {}
+    )
+    assert "extra_body" not in params_none
+    assert "thinking" not in params_none
+
+
+def test_generic_vendor_never_passes_vendor_params() -> None:
+    """generic：无论 enable_thinking 为何都不传供应商专用参数（不静默误传）。"""
+    config_none = _config(llm_vendor="generic")  # enable_thinking=None
+    params_none = (
+        getattr(build_real_llm(config_none, LLMRole.RESEARCH), "additional_params", {}) or {}
+    )
+    assert "extra_body" not in params_none
+
+    # 显式设置 enable_thinking 时给出清晰告警且仍不传供应商专用参数。
+    config_true = _config(llm_vendor="generic", llm_enable_thinking=True)
+    with pytest.warns(UserWarning, match="generic 不支持 enable_thinking"):
+        llm = build_real_llm(config_true, LLMRole.ANALYSIS)
+    params_true = getattr(llm, "additional_params", {}) or {}
+    assert "extra_body" not in params_true
+    assert "thinking" not in params_true
+
+    config_false = _config(llm_vendor="generic", llm_enable_thinking=False)
+    with pytest.warns(UserWarning, match="generic 不支持 enable_thinking"):
+        llm_false = build_real_llm(config_false, LLMRole.WRITER)
+    params_false = getattr(llm_false, "additional_params", {}) or {}
+    assert "extra_body" not in params_false
+
+
+def test_vendor_maps_from_settings() -> None:
+    """P06-11：LLM_VENDOR 从 Settings 传递到 LLMConfig。"""
+    assert _config().vendor == "qwen"
+    assert _config(llm_vendor="deepseek").vendor == "deepseek"
+    assert _config(llm_vendor="generic").vendor == "generic"
+
+
+def test_vendor_not_in_secret_outputs() -> None:
+    """P06-11：vendor 翻译过程不泄露 API Key（异常/告警/message 均安全）。"""
+    config = _config(llm_vendor="generic", llm_enable_thinking=True)
+    with pytest.warns(UserWarning) as record:
+        build_real_llm(config, LLMRole.RESEARCH)
+    assert SECRET not in str(record[0].message)
+    assert BASE_URL not in str(record[0].message)
 
 
 # ---- 11. factory 构建不发网络请求 ----

@@ -572,7 +572,9 @@ class LiveResearchFlowRunner:
                 model = (
                     self._config.model_for(role_enum) if role_enum is not None else str(role)
                 )
-                provider, model_lbl = label_provider_model(self._config.base_url, model)
+                provider, model_lbl = label_provider_model(
+                    self._config.vendor, model, base_url=self._config.base_url
+                )
                 start = getattr(task, "start_time", None)
                 end = getattr(task, "end_time", None)
                 if start is not None and end is not None:
@@ -604,7 +606,9 @@ class LiveResearchFlowRunner:
                 model = (
                     self._config.model_for(role_enum) if role_enum is not None else str(role)
                 )
-                provider, model_lbl = label_provider_model(self._config.base_url, model)
+                provider, model_lbl = label_provider_model(
+                    self._config.vendor, model, base_url=self._config.base_url
+                )
                 if usage:
                     count_llm_request(provider, model_lbl, role, "success")
                     count_llm_tokens(

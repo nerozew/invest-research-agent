@@ -17,6 +17,8 @@ x-app-env: &app-env
   # HTTP User-Agent 必须 ASCII（默认值含中文会让 httpx 崩溃）
   HTTP_USER_AGENT: ${HTTP_USER_AGENT:-invest-research/0.1 (+your-email@example.com)}
   LLM_API_KEY: ${LLM_API_KEY:-your-llm-api-key-placeholder}
+  # P06-11：显式供应商（qwen/deepseek/generic），默认 qwen 向后兼容
+  LLM_VENDOR: ${LLM_VENDOR:-qwen}
   LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
   LLM_MODEL_RESEARCH: ${LLM_MODEL_RESEARCH:-qwen-max}
   LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen-max}

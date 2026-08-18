@@ -24,9 +24,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -59,6 +60,9 @@ class LLMConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     provider: str = "openai_compatible"
+    # P06-11：显式供应商标识（qwen/deepseek/generic），决定 thinking 参数格式；
+    # qwen=enable_thinking；deepseek=thinking.type；generic=不传供应商专用参数。
+    vendor: Literal["qwen", "deepseek", "generic"] = "qwen"
     base_url: str = Field(min_length=1)
     api_key: SecretStr
     model_research: str = Field(min_length=1)
@@ -75,6 +79,7 @@ class LLMConfig(BaseModel):
         """从项目 Settings 构造配置（唯一允许触碰 SecretStr 的入口）。"""
         return cls(
             provider=settings.llm_provider,
+            vendor=settings.llm_vendor,
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
             model_research=settings.llm_model_research,
@@ -226,23 +231,52 @@ AnyLLM = FakeLLM | BaseLLM
 LLMBuilder = Callable[[LLMConfig, LLMRole], AnyLLM]
 
 
+def _build_thinking_extra_body(config: LLMConfig) -> dict[str, Any] | None:
+    """按 vendor 把 enable_thinking 翻译为对应的供应商专有参数（P06-11）。
+
+    - qwen：``{"enable_thinking": bool}``；
+    - deepseek：``{"thinking": {"type": "enabled"|"disabled"}}``；
+    - generic 与 enable_thinking=None：返回 None（不传任何供应商专用参数）；
+      generic 且显式设置 enable_thinking 时给出清晰告警（不静默误传）。
+    """
+    if config.enable_thinking is None:
+        return None
+    if config.vendor == "qwen":
+        return {"enable_thinking": config.enable_thinking}
+    if config.vendor == "deepseek":
+        return {
+            "thinking": {
+                "type": "enabled" if config.enable_thinking else "disabled"
+            }
+        }
+    # generic：不传供应商专用参数；显式设置不支持的参数时给出清晰告警。
+    warnings.warn(
+        "LLM_VENDOR=generic 不支持 enable_thinking 供应商专有参数，"
+        f"已忽略 LLM_ENABLE_THINKING={config.enable_thinking}（不会传给供应商）。",
+        UserWarning,
+        stacklevel=2,
+    )
+    return None
+
+
 def build_real_llm(config: LLMConfig, role: LLMRole) -> AnyLLM:
-    """惰性构造真实 OpenAI-compatible LLM 实例（P05-12B 实现）。
+    """惰性构造真实 OpenAI-compatible LLM 实例（P05-12B/ P06-11 实现）。
 
     依据当前安装的 CrewAI 1.6.1 官方 API：
     ``crewai.LLM(model=..., base_url=..., api_key=..., temperature=..., timeout=...)``。
     - API Key 只在构造真实客户端的这一刻解包（``SecretStr.get_secret_value()``），
       之后由 CrewAI 内部持有，不进入本模块的 repr/日志/异常；
     - 构造阶段不发起任何网络请求（CrewAI 1.6.1 实测：仅 model/provider 解析）；
-    - 供应商无关：不做任何 Qwen/DeepSeek 专属业务类，仅透传配置。
+    - 供应商无关：不做任何 Qwen/DeepSeek 专属业务类，仅透传配置；
+    - thinking 供应商专有参数按 config.vendor 翻译（qwen=enable_thinking、
+      deepseek=thinking.type、generic=不传并在显式设置时告警）。
     """
     from crewai import LLM as CrewAILLM
 
     kwargs: dict[str, Any] = {}
-    if config.enable_thinking is not None:
-        # 仅当显式配置时才传供应商专有参数：Qwen3.5 思考模式默认开启导致响应极慢，
-        # enable_thinking=false 显著提速；None 时不传，保持其它 OpenAI-compatible 兼容。
-        kwargs["extra_body"] = {"enable_thinking": config.enable_thinking}
+    extra_body = _build_thinking_extra_body(config)
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
     return CrewAILLM(
         model=config.model_for(role),
         base_url=config.base_url,

@@ -436,14 +436,36 @@ def test_llm_usage_present_and_missing() -> None:
         >= before_llm_dur + 1
 
 
-def test_label_provider_model_maps_base_url_to_provider() -> None:
-    """base_url 脱敏：dashscope→qwen、deepseek→deepseek、其它→openai_compatible。"""
-    assert label_provider_model("https://dashscope.aliyuncs.com/compatible-mode/v1",
-                                "Qwen-Max") == ("qwen", "qwen-max")
-    assert label_provider_model("https://api.deepseek.com/v1", "deepseek-chat") == (
-        "deepseek", "deepseek-chat")
-    assert label_provider_model("https://unknown.example/v1", "gpt-4o") == (
-        "openai_compatible", "gpt-4o")
+def test_label_provider_model_prefers_explicit_vendor() -> None:
+    """P06-11：优先使用显式 vendor（qwen/deepseek/generic），不再依赖 base_url 猜测。"""
+    assert label_provider_model("qwen", "Qwen-Max") == ("qwen", "qwen-max")
+    assert label_provider_model("deepseek", "deepseek-v4-flash") == (
+        "deepseek", "deepseek-v4-flash")
+    # generic 保留为 label（不尝试回退 base_url）
+    assert label_provider_model("generic", "gpt-4o") == ("generic", "gpt-4o")
+
+
+def test_label_provider_model_falls_back_to_base_url() -> None:
+    """vendor 缺失/未知时回退 base_url 识别（dashscope/deepseek/其它）。"""
+    assert label_provider_model(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="Qwen-Max",
+    ) == ("qwen", "qwen-max")
+    assert label_provider_model(
+        vendor="",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-v4-flash",
+    ) == ("deepseek", "deepseek-v4-flash")
+    assert label_provider_model(
+        vendor="unknown-vendor",
+        base_url="https://unknown.example/v1",
+        model="gpt-4o",
+    ) == ("openai_compatible", "gpt-4o")
+    # vendor 为空但 base_url 含 openai → openai
+    assert label_provider_model(
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o",
+    ) == ("openai", "gpt-4o")
 
 
 def test_no_high_cardinality_labels_p06_09c() -> None:

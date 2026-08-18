@@ -24,6 +24,7 @@ import pytest
 # 会影响 Settings 默认值/必需字段的环境变量（真实 .env 可能注入）
 _POLLUTING_ENV: tuple[str, ...] = (
     "LLM_PROVIDER",
+    "LLM_VENDOR",
     "LLM_BASE_URL",
     "LLM_API_KEY",
     "LLM_MODEL_RESEARCH",

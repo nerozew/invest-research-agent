@@ -45,11 +45,14 @@ def _settings(
     flow_mode: str = "fake",
     api_key: str = "sk-test",
     research_profile: str | None = None,
+    llm_vendor: str | None = None,
 ) -> Settings:
-    """构造不读 .env 的 Settings（必需字段 + flow_mode/llm_api_key/research_profile 覆盖）。"""
+    """构造不读 .env 的 Settings（必需字段 + flow_mode/llm_api_key/research_profile/vendor）。"""
     kwargs: dict[str, object] = {"flow_mode": flow_mode}
     if research_profile is not None:
         kwargs["research_profile"] = research_profile
+    if llm_vendor is not None:
+        kwargs["llm_vendor"] = llm_vendor
     return Settings(
         _env_file=None,
         llm_api_key=api_key,
@@ -610,6 +613,27 @@ def test_deep_profile_thinking_follows_env(monkeypatch: pytest.MonkeyPatch) -> N
     runner_true = build_flow_runner(_settings(flow_mode="live", api_key="sk-live"))
     assert isinstance(runner_true, LiveResearchFlowRunner)
     assert runner_true.config.enable_thinking is True
+
+
+def test_live_runner_preserves_vendor() -> None:
+    """P06-11：build_flow_runner 保留显式 vendor（fast 覆盖 enable_thinking 不丢失 vendor）。"""
+    runner = build_flow_runner(
+        _settings(flow_mode="live", api_key="sk-live", llm_vendor="deepseek")
+    )
+    assert isinstance(runner, LiveResearchFlowRunner)
+    assert runner.config.vendor == "deepseek"
+
+    runner_fast = build_flow_runner(
+        _settings(
+            flow_mode="live",
+            api_key="sk-live",
+            llm_vendor="deepseek",
+            research_profile="fast",
+        )
+    )
+    assert isinstance(runner_fast, LiveResearchFlowRunner)
+    assert runner_fast.config.vendor == "deepseek"  # fast 覆盖 enable_thinking 不丢失 vendor
+    assert runner_fast.config.enable_thinking is False
 
 
 def test_research_sec_sources_get_deterministic_locator(

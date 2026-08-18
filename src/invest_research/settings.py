@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     # ---- LLM（OpenAI-compatible，供应商无关；默认阿里云百炼 qwen-max，见架构 §8）----
     # provider 当前仅支持 openai_compatible；未来切换供应商只改 env，不改业务代码。
     llm_provider: Literal["openai_compatible"] = "openai_compatible"
+    # P06-11：显式供应商标识（openai_compatible 协议之下区分具体供应商），
+    # 决定 thinking 参数的供应商专用格式；generic=不传任何供应商专用参数。
+    llm_vendor: Literal["qwen", "deepseek", "generic"] = "qwen"
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_api_key: SecretStr
     llm_model_research: str = "qwen-max"

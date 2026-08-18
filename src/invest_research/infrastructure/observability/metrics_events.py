@@ -162,23 +162,33 @@ _PACK_RESULTS: frozenset[str] = frozenset(
 _LLM_TOKEN_TYPES: frozenset[str] = frozenset({"input", "output", "cached_input"})
 
 
-def label_provider_model(base_url: str, model: str) -> tuple[str, str]:
-    """把 base_url + model 映射为脱敏 provider/model label（不暴露完整 URL）。
+def label_provider_model(
+    vendor: str | None = None,
+    model: str = "",
+    base_url: str | None = None,
+) -> tuple[str, str]:
+    """把 vendor/base_url + model 映射为脱敏 provider/model label（不暴露完整 URL）。
 
-    - base_url 只用于识别供应商（dashscope→qwen、deepseek→deepseek、其它→openai_compatible）；
-    - model 直接使用配置模型名（稳定小基数，如 qwen-max / deepseek-chat）；
+    P06-11：优先使用显式 vendor（qwen/deepseek/generic），不再依赖 base_url 猜测；
+    仅当 vendor 缺失或为 generic 时才回退 base_url 识别（dashscope→qwen、
+    deepseek→deepseek、openai→openai、其它→openai_compatible）。
+    - model 直接使用配置模型名（稳定小基数，如 qwen-max / deepseek-v4-flash）；
     - 绝不把 base_url / api_key 放进任何 label。
     """
-    lowered = (base_url or "").lower()
-    if "dashscope" in lowered:
-        provider = "qwen"
-    elif "deepseek" in lowered:
-        provider = "deepseek"
-    elif "openai" in lowered:
-        provider = "openai"
+    vendor_lbl = (vendor or "").strip().lower()
+    if vendor_lbl in ("qwen", "deepseek", "openai", "generic", "openai_compatible"):
+        provider = vendor_lbl
     else:
-        provider = "openai_compatible"
-    return provider, (model or "unknown").strip().lower() or "unknown"
+        lowered = (base_url or "").lower()
+        if "dashscope" in lowered:
+            provider = "qwen"
+        elif "deepseek" in lowered:
+            provider = "deepseek"
+        elif "openai" in lowered:
+            provider = "openai"
+        else:
+            provider = "openai_compatible"
+    return provider, (model or "").strip().lower() or "unknown"
 
 
 # ---- 一、HTTP RED ----
