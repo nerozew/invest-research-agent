@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,6 +28,131 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import run_phase6_benchmark as bm  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Prometheus 快照（P06-10B）
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    """最小 fake urllib response（支持上下文管理器，.read() 返回 JSON 字节）。"""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def _prom_results(values: dict[str, float]) -> dict[str, dict]:
+    """构造 Prometheus /api/v1/query 成功响应（value=[ts, "数值"]）。"""
+    return {
+        name: {
+            "status": "success",
+            "data": {"resultType": "vector", "result": [
+                {"metric": {}, "value": [1234567890, str(v)]}
+            ]},
+        }
+        for name, v in values.items()
+    }
+
+
+def test_prometheus_snapshot_covers_8_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """快照覆盖 8 类指标（5 Counter + 3 Histogram 的 _count/_sum）。"""
+    import urllib.request
+
+    # 所有查询都成功返回（默认 0 或指定值）。
+    values = {
+        "research_jobs_total": 12.0,
+        "http_requests_total": 34.0,
+        "agent_runs_total": 5.0,
+        "pack_validation_total": 8.0,
+        "tool_cache_total": 21.0,
+        "research_job_duration_seconds_count": 10.0,
+        "research_job_duration_seconds_sum": 3.0,
+        "workflow_step_duration_seconds_count": 80.0,
+        "workflow_step_duration_seconds_sum": 40.0,
+        "http_request_duration_seconds_count": 200.0,
+        "http_request_duration_seconds_sum": 15.0,
+    }
+
+    def _fake_urlopen(req: Any, timeout: float = 0) -> Any:
+        # 从 URL query 中解析 metric 名。
+        from urllib.parse import parse_qs, urlparse
+
+        q = parse_qs(urlparse(req.full_url).query)["query"][0]
+        metric = q[len("sum("):-1]
+        if metric not in values:
+            return _FakeResp({"status": "success", "data": {"result": []}})
+        return _FakeResp(_prom_results({metric: values[metric]})[metric])
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    client = bm.PrometheusClient("http://prom:9090")
+    snap = client.snapshot()
+
+    # 8 类指标 = 5 Counter + 3 Histogram（每 Histogram 含 count/sum 两项）。
+    assert set(snap) == {
+        "research_jobs_total",
+        "http_requests_total",
+        "agent_runs_total",
+        "pack_validation_total",
+        "tool_cache_total",
+        "research_job_duration_seconds_count",
+        "research_job_duration_seconds_sum",
+        "workflow_step_duration_seconds_count",
+        "workflow_step_duration_seconds_sum",
+        "http_request_duration_seconds_count",
+        "http_request_duration_seconds_sum",
+    }
+    assert snap["research_jobs_total"] == 12.0
+    assert snap["research_job_duration_seconds_sum"] == 3.0
+
+
+def test_prometheus_unreachable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prometheus API 不可达必须抛 RuntimeError，禁止空 dict 冒充成功。"""
+    import urllib.error
+    import urllib.request
+
+    def _raise(req: Any, timeout: float = 0) -> Any:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise)
+    client = bm.PrometheusClient("http://prom:9090")
+    with pytest.raises(RuntimeError, match="Prometheus API 不可达"):
+        client.snapshot()
+
+
+def test_prometheus_query_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prometheus 查询失败（status != success）必须抛 RuntimeError。"""
+    import urllib.request
+
+    def _bad(req: Any, timeout: float = 0) -> Any:
+        return _FakeResp({"status": "error", "error": "bad_data", "errorType": "bad_data"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _bad)
+    client = bm.PrometheusClient("http://prom:9090")
+    with pytest.raises(RuntimeError, match="Prometheus 查询失败"):
+        client.snapshot()
+
+
+def test_prometheus_empty_result_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """指标尚无样本时返回 0.0（合法状态，不是失败）。"""
+    import urllib.request
+
+    def _empty(req: Any, timeout: float = 0) -> Any:
+        return _FakeResp({"status": "success", "data": {"result": []}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _empty)
+    client = bm.PrometheusClient("http://prom:9090")
+    snap = client.snapshot()
+    assert snap["research_jobs_total"] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # 分母隔离 / 成功判定

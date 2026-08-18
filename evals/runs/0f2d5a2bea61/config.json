@@ -1,0 +1,13 @@
+{
+  "benchmark_run_id": "0f2d5a2bea61",
+  "jobs": 100,
+  "fast_count": 50,
+  "deep_count": 50,
+  "concurrency": 4,
+  "timeout_seconds": 180,
+  "poll_interval_seconds": 2.0,
+  "seed": 7,
+  "flow_mode": "fake",
+  "api_base": "http://localhost:18080",
+  "as_of_date": "2026-08-17"
+}

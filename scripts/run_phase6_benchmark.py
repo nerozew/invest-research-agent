@@ -138,6 +138,84 @@ class JobRecord:
         return asdict(self)
 
 
+# 8 类 Prometheus 旁证指标（P06-10B）：
+# - Counter 指标直接 sum(metric)；
+# - Histogram 指标需要分别取 _count / _sum 才能反映总量。
+# 这些指标只作旁证，成功率仍以 API/数据库/工件为事实来源。
+_PROMETHEUS_SUM_METRICS = (
+    "research_jobs_total",
+    "http_requests_total",
+    "agent_runs_total",
+    "pack_validation_total",
+    "tool_cache_total",
+)
+_PROMETHEUS_HISTOGRAM_METRICS = (
+    "research_job_duration_seconds",
+    "workflow_step_duration_seconds",
+    "http_request_duration_seconds",
+)
+
+
+class PrometheusClient:
+    """极简 Prometheus HTTP API 客户端（基准前后快照旁证）。
+
+    约束（P06-10B）：
+    - API 不可达或查询失败必须抛 RuntimeError，禁止用空 dict 冒充成功；
+    - 查询显式设置连接/读取超时（urlopen timeout）；
+    - 只查询 8 类白名单指标，不引入 job_id/公司名高基数数据。
+    """
+
+    def __init__(self, base_url: str = "http://localhost:19091", timeout: float = 10.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def _query_sum(self, metric: str) -> float:
+        """执行 ``sum(<metric>)`` 并返回数值；任一失败抛 RuntimeError。"""
+        query = urllib.parse.quote(f"sum({metric})")
+        url = f"{self.base_url}/api/v1/query?query={query}"
+        req = urllib.request.Request(url)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Prometheus API 不可达 {self.base_url}（metric={metric}）: {exc.reason}"
+            ) from exc
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError(
+                f"Prometheus API 响应非 JSON（metric={metric}）: {exc}"
+            ) from exc
+
+        if payload.get("status") != "success":
+            raise RuntimeError(
+                f"Prometheus 查询失败（metric={metric}）: status={payload.get('status')} "
+                f"error={payload.get('error')}"
+            )
+        results = payload.get("data", {}).get("result", [])
+        if not results:
+            # 指标尚未产生样本：视为 0（这是合法状态，不是查询失败）。
+            return 0.0
+        try:
+            return float(results[0]["value"][1])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Prometheus 查询结果无法解析（metric={metric}）: {results}"
+            ) from exc
+
+    def snapshot(self) -> dict[str, float]:
+        """基准前后快照：8 类指标全部查询成功才返回；任一失败抛 RuntimeError。
+
+        注意：调用方必须保存真实查询结果（不能写空 dict 冒充成功）。
+        """
+        snap: dict[str, float] = {}
+        for metric in _PROMETHEUS_SUM_METRICS:
+            snap[metric] = self._query_sum(metric)
+        for metric in _PROMETHEUS_HISTOGRAM_METRICS:
+            snap[f"{metric}_count"] = self._query_sum(f"{metric}_count")
+            snap[f"{metric}_sum"] = self._query_sum(f"{metric}_sum")
+        return snap
+
+
 class ApiClient:
     """极简 HTTP client（显式超时，JSON 错误分类）。"""
 
@@ -275,6 +353,7 @@ class BenchmarkRunner:
         poll_interval: float = 2.0,
         seed: int = 7,
         api_base: str = "http://localhost:8000",
+        prometheus_base: str = "http://localhost:19091",
         output_dir: str | Path | None = None,
     ) -> None:
         self.jobs = jobs
@@ -285,8 +364,10 @@ class BenchmarkRunner:
         self.poll_interval = poll_interval
         self.seed = seed
         self.api_base = api_base
+        self.prometheus_base = prometheus_base
         self.run_id = uuid.uuid4().hex[:12]
         self.client = ApiClient(api_base)
+        self.prometheus = PrometheusClient(prometheus_base)
         out_root = Path(output_dir) if output_dir is not None else _DEFAULT_EVALS_RUNS
         self.run_dir = out_root / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -471,9 +552,9 @@ class BenchmarkRunner:
     def run(self) -> dict[str, Any]:
         self.assert_fake_mode()
 
-        # Prometheus 前后快照（旁证，不用于推导成功率）。
-        before: dict[str, Any] = {}
-        after: dict[str, Any] = {}
+        # 真实 Prometheus before 快照：API 不可达/查询失败必须抛 RuntimeError，
+        # 禁止用空 dict 冒充成功（P06-10B）。
+        before: dict[str, Any] = self.prometheus.snapshot()
 
         main_created = self._create_main_jobs()
         if len(main_created) != self.jobs:
@@ -487,6 +568,10 @@ class BenchmarkRunner:
         # 控制场景（取消）单独统计，不进入主成功率分母。
         control_cancel = self._run_control_cancel()
         control_records: list[JobRecord] = []
+
+        # 真实 Prometheus after 快照：API 不可达/查询失败必须抛 RuntimeError，
+        # 禁止用空 dict 冒充成功（P06-10B）。
+        after: dict[str, Any] = self.prometheus.snapshot()
 
         return self._build_summary(main_records, control_records, before, after,
                                    control_cancel)
@@ -701,6 +786,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="轮询间隔秒数")
     parser.add_argument("--seed", type=int, default=7, help="固定随机种子")
     parser.add_argument("--api-base", default="http://localhost:8000")
+    parser.add_argument("--prometheus-base", default="http://localhost:19091",
+                        help="Prometheus HTTP API 地址（默认 19091，前后快照旁证）")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="输出目录（默认 evals/runs/<run_id>）")
     args = parser.parse_args(argv)
@@ -714,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval=args.poll_interval,
             seed=args.seed,
             api_base=args.api_base,
+            prometheus_base=args.prometheus_base,
             output_dir=args.output_dir,
         )
         summary = runner.run()
