@@ -52,6 +52,10 @@ from invest_research.application.analysis_assembler import (
     parse_fact_records,
 )
 from invest_research.application.progress import ProgressSink
+from invest_research.application.report_draft_assembler import (
+    ReportAssemblerError,
+    ReportDraftAssembler,
+)
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
     AnalysisSelectionDraft,
@@ -906,11 +910,69 @@ class LiveResearchFlowRunner:
             except Exception:  # noqa: BLE001 - 指标写入尽力而为
                 pass
         if len(outputs) >= 3:
-            state.report_draft = _to_packed(outputs[2], ReportDraft)
+            state.report_draft = self._extract_report_draft(outputs[2], request, state)
 
         if state.research_pack is None or state.analysis_pack is None or state.report_draft is None:
             raise LiveFlowExecutionError("Crew 输出不完整：需要 research/analysis/writer 三个 pack")
         return state
+
+    def _extract_report_draft(
+        self,
+        obj: Any,
+        request: ResearchRequest,
+        state: ResearchFlowState,
+    ) -> ReportDraft:
+        """解析 Writer 输出为 ReportDraft（P06-11D 统一供应商路径）。
+
+        数据流：Writer ContextReader → Markdown 报告正文 → ReportDraftAssembler
+        → ReportDraft（确定性生成 version/title/citation_keys）。
+
+        - 已是 ReportDraft 实例（Qwen NATIVE_PYDANTIC 或旧路径）直接复用；
+        - 输出是合法 ReportDraft JSON/dict（历史结构化路径）直接复用；
+        - 否则视为普通 Markdown 报告正文，经 ReportDraftAssembler 确定性组装；
+        - 空文本 / 过短说明 / 工具参数 / 拒绝说明 / 明显截断 / 缺任何必需章节
+          → ReportAssemblerError → LiveFlowExecutionError（稳定错误码）。
+        """
+        if isinstance(obj, ReportDraft):
+            return obj
+        try:
+            candidate = extract_candidate(obj)
+        except Exception:  # noqa: BLE001 - 仅提取失败，回退 Markdown 组装
+            candidate = None
+        if isinstance(candidate, dict):
+            try:
+                return ReportDraft.model_validate(candidate)
+            except Exception:
+                # 不是合法 ReportDraft 结构 → 按普通 Markdown 组装
+                pass
+        raw_text: str = candidate if isinstance(candidate, str) else ""
+        if raw_text:
+            # 历史结构化路径兼容：字符串本身是合法 ReportDraft JSON 时优先解析。
+            try:
+                return ReportDraft.model_validate_json(raw_text)
+            except Exception:
+                pass
+        if not raw_text:
+            raw_obj = getattr(obj, "raw", None)
+            if isinstance(raw_obj, str):
+                raw_text = raw_obj
+            else:
+                raw_text = ""
+        finish_reason = getattr(obj, "finish_reason", None)
+        try:
+            return ReportDraftAssembler().assemble(
+                raw_text,
+                request,
+                state.research_pack,
+                state.analysis_pack,
+                finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+            )
+        except ReportAssemblerError as exc:
+            raise LiveFlowExecutionError(
+                str(exc),
+                error_code=exc.error_code,
+                failure_stage=exc.failure_stage,
+            ) from exc
 
     def _extract_analysis_pack(self, obj: Any) -> FinancialAnalysisPack:
         """解析 Analysis 输出；P06-11C：先检测 SelectionDraft，再走 PackBoundary。

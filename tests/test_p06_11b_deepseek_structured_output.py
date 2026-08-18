@@ -93,7 +93,9 @@ def test_deepseek_writer_task_has_no_native_output_pydantic() -> None:
     task = build_writer_task(config, fake=_fake(config, LLMRole.WRITER))
     assert task.output_pydantic is None
     assert task.output_json is None
-    assert "最终答案只能是一个 JSON object" in task.description
+    # P06-11D：DeepSeek/generic Writer 只输出 Markdown 报告正文（不再要求 JSON 包装）。
+    assert "直接输出一份完整的 Markdown 报告正文" in task.description
+    assert "最终答案只能是一个 JSON object" not in task.description
 
 
 # ---------------------------------------------------------------------------

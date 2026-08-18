@@ -261,6 +261,44 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
   6. Grafana LLM Row 中 Token 1h/24h 面板有非空数据、P50/P95/P99 有曲线、筛选变量可用；
   7. 完成后把结果追加到 docs/18 或本文件（不得自行 push）。
 
+## P06-11D: 修复 DeepSeek Writer 普通文本无法转换 ReportDraft（DONE, not pushed）
+
+- **根因**：P06-11C 之后 writer 第三个输出仍失败——DeepSeek Writer 只通过提示词要求 JSON，
+  没有服务端结构化约束（`response_format=json_object` 未启用），实测返回 12 token 左右
+  简短自然语言说明 → `_to_packed` → `PackBoundary.identify_source_kind` 分类为
+  `PLAIN_TEXT` → `NOT_A_PACK "输出是普通自然语言，不是结构化 Pack"`。
+- **修复（原文透传 + 本地确定性组装）**：
+  - `application/report_draft_assembler.py`（新增）：`ReportDraftAssembler`（确定性组装器，
+    不调用 LLM）——version 代码固定 `report_draft_v1`；title 从
+    `ResearchPack.company_identity.legal_name/ticker` + `as_of_date` 确定性生成；
+    markdown 原文保留（引号/换行/表格无需 JSON 转义）；citation_keys 只从可信候选集合
+    （sources→`src_<hash>`、facts→`fr_<hash>`、传入 claim_keys）∩ 正文实际出现提取，
+    模型无法伪造。拒绝规则：空文本/过短(<200)/拒绝短语/工具 Action/缺任何必需章节 →
+    REPORT_INVALID；finish_reason=length 或末尾未完标志 → REPORT_TRUNCATED。
+  - `agents/writer_task.py`：DeepSeek/generic Writer 提示词改为"直接输出完整 Markdown
+    报告正文"，不再要求 JSON 包装/围栏。
+  - `infrastructure/flow_wiring.py`：新增 `_extract_report_draft` 统一路径——ReportDraft
+    实例/合法 JSON/dict 直接复用（Qwen/历史兼容），否则按 Markdown 交给
+    ReportDraftAssembler；ReportAssemblerError → LiveFlowExecutionError（稳定错误码）。
+  - `domain/errors.py`：新增 `REPORT_INVALID`/`REPORT_TRUNCATED`（均不可重试）。
+  - `tests/test_p06_11d_report_draft_assembler.py`（新增 26 用例，覆盖 20 项契约）。
+- **验证**：`tests/test_p06_11d_report_draft_assembler.py` 26 用例通过（合法 Markdown →
+  ReportDraft、version 由代码固定、title 从可信身份生成、citation_keys 确定性提取且不可
+  伪造、空/过短/Tool Action/Action Input/“无法生成报告”拒绝、finish_reason=length 截断
+  拒绝、缺必要章节拒绝或进入 Quality Gate、Markdown 引号/换行/表格无需 JSON 转义、
+  DeepSeek 不再要求完整 ReportDraft JSON、不触发 beta、Writer 读取组装后
+  FinancialAnalysisPack、Qwen 路径回归、08/09 发布回归、错误消息脱敏、不打印完整报告、
+  REPORT_INVALID/REPORT_TRUNCATED 不可重试、一次 fake 全链产生合法 ReportDraft）；
+  回归 111 passed（p06-11b / p06-11c / pack_boundary / pack_contracts / flow_wiring /
+  research_crew）+ 70 passed 1 skipped（live_e2e / e2e_fake / report_renderer /
+  pdf_renderer / final_report_artifacts / flow_quality / quality_classifier /
+  quality_models）；Ruff 全绿；`mypy src` 118 个源文件全绿。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；未 push；未启动 Docker；
+  未运行 100 次基准；未进入下一任务。
+- **下一候选任务**：受控 live 验证 DeepSeek Writer 输出 Markdown 能被
+  ReportDraftAssembler 组装、质量门禁照常工作；随后 `P06-11`（10 家公司效率对照实验）
+  或 `P06-12`（README 演示）。
+
 ## P06-11C: 修复 DeepSeek 普通 JSON 路径的嵌套 FinancialFact 契约丢失（DONE, not pushed）
 
 - **根因**：P06-11B 让 DeepSeek 走"普通 JSON → PackBoundary 本地校验"，但任务描述仍要求

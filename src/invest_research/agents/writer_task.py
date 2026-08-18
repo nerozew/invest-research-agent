@@ -148,15 +148,20 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
 # 必需章节与 citation_keys 结构检查，修订流程仍可使用 CitationVerifier；
 # 不在此虚构“已实现所有引用语义校验”。
 
-# P06-11B：JSON 文本输出阶段附加约束（只用于 deepseek/generic 本地校验路径）；
-# 不修改金融业务含义，只约束序列化格式。
-_JSON_TEXT_INSTRUCTION = (
+# P06-11D：DeepSeek/generic Writer 只输出 Markdown 报告正文（本地确定性组装）。
+# 不再要求模型把几千字 Markdown 包装成 JSON——普通自然语言正文由
+# ReportDraftAssembler 确定性生成 version/title/citation_keys。
+_MARKDOWN_OUTPUT_INSTRUCTION = (
     "\n"
-    "输出格式严格要求：\n"
-    "1. 最终答案只能是一个 JSON object（可直接被 json.loads 解析）；\n"
-    "2. 不要输出 Markdown 代码围栏（不要使用 ```json 或 ```）；\n"
-    "3. 不要输出任何解释文字、前后缀或自然语言说明；\n"
-    "4. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
+    "输出格式要求：\n"
+    "1. 直接输出一份完整的 Markdown 报告正文（章节标题用 ## 或 ###）；\n"
+    "2. 不要输出 JSON object，不要使用 ```json/```markdown 代码围栏，"
+    "不要把正文包装成任何结构字段；\n"
+    "3. 正文中引用上游来源/财务事实时，直接写出其 citation key"
+    "（src_<hash> / fr_<hash> / 现有 claim key），这些 key 会由本地"
+    "ReportDraftAssembler 从正文中确定性提取；\n"
+    "4. 不要输出任何解释文字、前后缀或自然语言说明——正文本身就是最终答案；\n"
+    "5. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
 )
 
 
@@ -208,8 +213,8 @@ def build_writer_task(
     - qwen（NATIVE_PYDANTIC）：绑定 ``output_pydantic=ReportDraft``，保留原路径；
     - deepseek/generic（JSON_TEXT_LOCAL_VALIDATION）：**不绑定 output_pydantic**
       （也不改用 output_json —— CrewAI 1.6.1 中二者进入同一 ``convert_to_model``），
-      Agent 返回普通 JSON 文本；Crew 完成后由 ``PackBoundary`` 本地解析为
-      ``ReportDraft``。
+      Agent 只输出 Markdown 报告正文；Crew 完成后由 ``ReportDraftAssembler``
+      本地确定性组装为 ``ReportDraft``（P06-11D）。
     """
     task_agent = (
         agent
@@ -233,18 +238,18 @@ def build_writer_task(
     if (
         structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
     ):
-        # P06-11B：deepseek/generic 走 JSON 文本 + 本地校验路径。
-        # 提示词明确要求只输出 JSON object；不触发 CrewAI 远程 Pydantic parse。
-        description = description + _JSON_TEXT_INSTRUCTION
+        # P06-11D：deepseek/generic 只输出 Markdown 报告正文，不触发 CrewAI
+        # 远程 Pydantic parse；由本地 ReportDraftAssembler 确定性组装为 ReportDraft。
+        description = description + _MARKDOWN_OUTPUT_INSTRUCTION
         return Task(
             description=description,
             expected_output=(
-                "一个可被 ReportDraft 校验通过的 JSON object（非自由文本）"
+                "一份完整的 Markdown 报告正文（非 JSON、非自由文本说明）。"
+                "由本地 ReportDraftAssembler 组装为 ReportDraft。"
             ),
             agent=task_agent,
             # 不绑定 output_pydantic：避免 CrewAI 在输出转换阶段调用
             # beta.chat.completions.parse(response_model=...)（DeepSeek HTTP 400）。
-            # 由本地 PackBoundary 解析。
         )
     return Task(
         description=description,

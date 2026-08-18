@@ -2530,3 +2530,39 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 ### 下一任务建议
 
 - 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Analysis 输出 Draft 能被本地 Assembler 正常组装；随后评估 P06-12（README 演示）。
+
+## P06-11D: 修复 DeepSeek Writer 普通文本无法转换 ReportDraft（✅ 已完成 2026-08-18）
+
+**任务目标**：P06-11C 之后 live 仍失败于 Writer 第三个输出——DeepSeek Writer 只通过提示词要求 JSON，没有服务端结构化约束，实测返回 12 token 左右简短自然语言说明，被 PackBoundary 拒绝为 `NOT_A_PACK "输出是普通自然语言，不是结构化 Pack"`。本任务让 DeepSeek/generic Writer **只输出 Markdown 报告正文**，由本地确定性 `ReportDraftAssembler` 生成 version/title/citation_keys，不再要求模型把几千字 Markdown 包装成 JSON。
+
+**根因**：`outputs[2]` 是普通自然语言文本 → `_to_packed` → `PackBoundary.parse` → `identify_source_kind` 返回 `PLAIN_TEXT` → `NOT_A_PACK`；DeepSeek Writer Task 确实没有 output_pydantic/output_json（P06-11B 已禁），且 `build_real_llm` 只传 `extra_body`（thinking）未启用 `response_format=json_object`；`_JSON_TEXT_INSTRUCTION` 只是提示词约束。12 completion tokens 对应"简短说明/拒绝"而非报告正文。
+
+**修改文件**：
+- `application/report_draft_assembler.py`（新增）：`ReportDraftAssembler`（确定性组装器）+ `build_report_title`（legal_name/ticker + as_of_date）+ `_source_citation_key`（src_ + URL sha256 12hex）+ `_extract_cited_keys`（可信候选集合 ∩ 正文实际出现）。拒绝规则：空文本/过短(<200 字)/拒绝短语/工具 Action/缺任何必需章节 → REPORT_INVALID；finish_reason=length 或末尾未完标志 → REPORT_TRUNCATED。不调用 LLM。
+- `agents/writer_task.py`：DeepSeek/generic Writer 提示词改为"直接输出完整 Markdown 报告正文，不要 JSON 包装/围栏"，引用 key 直接写在正文中由本地提取。
+- `infrastructure/flow_wiring.py`：新增 `_extract_report_draft` 统一路径——ReportDraft 实例/合法 JSON/dict 直接复用（Qwen/历史兼容），否则按 Markdown 交给 ReportDraftAssembler；ReportAssemblerError → LiveFlowExecutionError（REPORT_INVALID/REPORT_TRUNCATED，failure_stage=05_writer）。
+- `domain/errors.py`：新增 `REPORT_INVALID`/`REPORT_TRUNCATED`（均不可重试）。
+- `tests/test_p06_11d_report_draft_assembler.py`（新增 26 用例，覆盖 20 项契约）。
+
+**确定性字段来源**：version=代码固定 `report_draft_v1`（禁止模型生成）；title=ResearchPack.company_identity.legal_name/ticker + as_of_date（可信公司身份）；markdown=Writer 输出原文（引号/换行/表格无需 JSON 转义）；citation_keys=可信候选集合（sources→src_<hash>、facts→fr_<hash>、传入 claim_keys）∩ 正文中实际出现的键——模型无法伪造（伪造键不在候选集合）。
+
+### 3 个知识点
+
+1. **服务端结构化约束与"提示词承诺"是两回事**：DeepSeek 普通 Chat Completion 不执行 `response_format=json_object` 时，模型输出 JSON 只是提示词概率行为，返回 12 token 简短说明是合法响应（finish_reason=stop）。PackBoundary 用 `identify_source_kind` 把它正确分类为 `PLAIN_TEXT`→`NOT_A_PACK`，应用侧据此稳定失败，而不是把任意普通文字当合法报告。
+2. **长自由文本适合"原文透传 + 本地确定性包装"**：几千字 Markdown 若要求模型再包一层 JSON（title/markdown/citation_keys 嵌套），模型在长文本生成中会丢字段或截断；改为"Writer 只产正文，version/title/citation_keys 由本地代码生成"后，模型专注写作，字段质量由确定性代码保证。这也与前序 P06-11C"LLM 选择，代码组装"哲学一致。
+3. **"显式拒绝语义"要独立于质量门禁**：空文本/过短/拒绝短语/工具 Action/截断必须在**组装前**确定性拒绝（REPORT_INVALID/REPORT_TRUNCATED），不能等 Quality Gate 用 REVISE 兜底；而"缺完整章节清单"才交给现有 Quality Gate REVISE 处理（assembler 只要求至少一个必需章节），避免把"半成品"与"可修订的完整报告"混为一谈。
+
+### 检查问题（请用自己的话回答）
+
+为什么 `_extract_cited_keys` 必须先构建"可信候选集合"再从正文中匹配，而不是直接解析正文里的 `src_*`/`fr_*` 字符串？提示：这如何防止模型伪造 citation key？如果直接正则提取，伪造键 `src_ffffffffffff` 会通过吗？
+
+### 已知限制与风险
+
+- citation_keys 只做"正文中出现即收录"的子串匹配；若模型把引用键写在不可见 html 注释或截断掉，该键不会被收录（宁可少收，不伪造多收）。
+- `metric_results` 仍沿用 P06-11C 限制（模型在 Draft 中携带），未扩展跨模块指标组装。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；真实 live 行为需受控 smoke 验证。
+- 未 push；未启动 Docker；未运行 100 次基准；未进入下一任务。
+
+### 下一任务建议
+
+- 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Writer 输出 Markdown 能被 ReportDraftAssembler 组装、质量门禁照常工作；随后 P06-11（10 家公司效率对照实验）或 P06-12（README 演示）。

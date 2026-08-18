@@ -39,6 +39,12 @@ class ErrorCode(StrEnum):
     FACT_REFERENCE_AMBIGUOUS = "FACT_REFERENCE_AMBIGUOUS"
     # P06-11C：LLM 试图改写事实来源/数值（如草稿携带事实内容与原始事实不一致）。
     FACT_PROVENANCE_MISMATCH = "FACT_PROVENANCE_MISMATCH"
+    # P06-11D：Writer 只输出 Markdown 正文；空文本/JSON 包装/过短说明/缺必要章节等
+    # 明显不是合法报告正文的输出（确定性拒绝，禁止把半成品当最终草稿）。
+    REPORT_INVALID = "REPORT_INVALID"
+    # P06-11D：Writer 输出明显截断（finish_reason=length 或正文末尾呈现截断痕迹），
+    # 稳定失败（重试同样可能截断，等待配置/提示词修复）。
+    REPORT_TRUNCATED = "REPORT_TRUNCATED"
     INTERNAL_BUG = "INTERNAL_BUG"
 
 
@@ -78,6 +84,9 @@ _NON_RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         ErrorCode.FACT_REFERENCE_UNRESOLVED,
         ErrorCode.FACT_REFERENCE_AMBIGUOUS,
         ErrorCode.FACT_PROVENANCE_MISMATCH,
+        # P06-11D：Writer 正文不合法/截断是确定性本地问题，重试同样失败。
+        ErrorCode.REPORT_INVALID,
+        ErrorCode.REPORT_TRUNCATED,
         ErrorCode.INTERNAL_BUG,
     }
 )
