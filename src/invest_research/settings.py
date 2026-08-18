@@ -58,10 +58,8 @@ class ResearchProfile(BaseModel):
                 mode="fast",
                 research_max_iter=8,
                 analysis_max_iter=2,
-                # P06-11-fix：Writer 需依次调用 ArtifactReader(research_pack) /
-                # ArtifactReader(analysis_pack) 再输出 ReportDraft；max_iter=1 时
-                # CrewAI 会把工具参数当最终输出导致 SCHEMA_INVALID。5 是最小可用值
-                # （两次读取 + 引用验证 + 模板确认 + 最终输出）。
+                # P06-11B：Writer 只需一次 WriterContextReader + 最终输出；5 保留为
+                # 有界安全余量，不能再通过无限提高 max_iter 掩盖工具编排问题。
                 writer_max_iter=5,
                 max_retry_limit=1,
                 max_execution_time=180,

@@ -4,16 +4,17 @@
 
 - ``crewai.llm.LLM`` 在每次真实模型调用边界通过 ``crewai_event_bus`` emit 三个官方事件：
   - ``LLMCallStartedEvent``（携带 ``model``、``from_agent``、``from_task``）；
-  - ``LLMCallCompletedEvent``（携带 ``model``、``from_agent``、``response``、
-    正式字段 ``usage: dict | None``；**无 duration 字段**）；
-  - ``LLMCallFailedEvent``（携带 ``error``、``model: str | None``、``from_agent``、
-    ``from_task``；**无 duration 字段**）。
+  - ``LLMCallCompletedEvent``（携带 ``model``、``from_agent``、``response``；
+    某些路径仅保留文本 response、不保留 usage；**无 duration 字段**）；
+  - ``LLMCallFailedEvent``（携带 ``error``、``from_agent``、``from_task``；
+    **无 model/duration 字段**）。
 - 耗时：事件无 duration 字段，用 Started→(Completed|Failed) 的本地起止时间实测。
 - 事件 ``LLMEventBase.__init__`` 会把 ``from_agent`` 转换为 ``agent_role``
   （即 Agent.role 可读名，如 "Financial Analyst"），本模块再映射为稳定的
   research/analysis/writer 内部角色。
-- 每个真实模型请求只在此处记录一次：成功（Completed）或失败（Failed）互斥，
-  不存在把 Crew 汇总 usage 复制给三个角色的三倍计数问题。
+- 每个真实模型请求只在此处记录一次次数/耗时；token 由
+  ``flow_wiring`` 在 Crew 前后读取每个 Agent 自带的 TokenProcess 差值，
+  因为 CrewAI 1.6.1 事件会在部分路径丢弃 usage。
 
 安全边界：
 - 不记录 prompt、response、API Key、base_url、公司名、job_id；
@@ -28,12 +29,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from invest_research.agents.llm_factory import LLMConfig
 from invest_research.infrastructure.observability.metrics_events import (
     count_llm_request,
-    count_llm_tokens,
     count_llm_usage_missing,
     label_provider_model,
     observe_llm_duration,
@@ -51,9 +52,20 @@ _LOGGER = logging.getLogger(__name__)
 # Agent.role 可读名 → 内部稳定角色（与 crew_factory._agent_role_config 一致）。
 _ROLE_NAME_TO_ROLE: tuple[tuple[str, str], ...] = (
     ("research analyst", "research"),
+    ("信息搜集 agent", "research"),
     ("financial analyst", "analysis"),
+    ("财报分析 agent", "analysis"),
     ("report writer", "writer"),
+    ("报告撰写 agent", "writer"),
 )
+
+
+@dataclass(frozen=True)
+class _StartedCall:
+    """一次真实 LLM 调用的双时钟起点。"""
+
+    monotonic: float
+    wall_time_ns: int
 
 
 def role_name_to_role(agent_role: str | None) -> str | None:
@@ -147,10 +159,17 @@ class LlmCallObserver:
     - 事件总线不存在（旧版 CrewAI）时 ``subscribe`` 返回 None，静默跳过观测。
     """
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        *,
+        agent_roles: Mapping[str, str] | None = None,
+    ) -> None:
         self._config = config
-        # (role, model) -> 开始时间；同一 LLM 实例串行调用，冲突时取最近一次。
-        self._started_at: dict[tuple[str, str], float] = {}
+        # 生产路径优先使用 Crew 组装时建立的 agent_id→稳定角色映射；名称只作兼容回退。
+        self._agent_roles = dict(agent_roles or {})
+        # (role, model) -> 双时钟起点；monotonic 计算耗时，wall clock 构造真实 span 时间线。
+        self._started_at: dict[tuple[str, str], _StartedCall] = {}
         # 事件模型类型（惰性解析一次；不可用时禁用观测）
         self._event_types: tuple[Any, Any, Any] | None = None
 
@@ -195,17 +214,20 @@ class LlmCallObserver:
 
     def _on_started(self, source: Any, event: Any) -> None:
         try:
-            role = role_name_to_role(getattr(event, "agent_role", None))
+            role = self._event_role(event)
             model = str(getattr(event, "model", "") or "").strip()
             if role is None or not model:
                 return
-            self._started_at[(role, model)] = time.monotonic()
+            self._started_at[(role, model)] = _StartedCall(
+                monotonic=time.monotonic(),
+                wall_time_ns=time.time_ns(),
+            )
         except Exception:  # noqa: BLE001 - 观测尽力而为
             _LOGGER.warning("llm_call_observer started handling failed")
 
     def _on_completed(self, source: Any, event: Any) -> None:
         try:
-            role = role_name_to_role(getattr(event, "agent_role", None))
+            role = self._event_role(event)
             model = str(getattr(event, "model", "") or "").strip()
             if role is None or not model:
                 return
@@ -215,11 +237,7 @@ class LlmCallObserver:
             # duration：事件无 duration 字段，用 Started→Completed 本地起止实测。
             duration = self._event_duration(role, model)
             usage = self._event_usage(event)
-            if has_usage(usage):
-                tokens = extract_usage_tokens(usage)
-                for token_type in ("input", "output", "cached_input"):
-                    count_llm_tokens(provider, model_lbl, role, token_type, tokens[token_type])
-            else:
+            if not has_usage(usage):
                 count_llm_usage_missing(provider, model_lbl, role)
             count_llm_request(provider, model_lbl, role, "success")
             observe_llm_duration(provider, model_lbl, role, "success", duration)
@@ -230,11 +248,11 @@ class LlmCallObserver:
 
     def _on_failed(self, source: Any, event: Any) -> None:
         try:
-            role = role_name_to_role(getattr(event, "agent_role", None))
+            role = self._event_role(event)
             if role is None:
                 return
-            # Failed 事件有 model 字段（CrewAI 1.6.1 定义 model: str | None）；
-            # 缺失时回退最近一次 Started 的 model 配对；找不到则丢弃（不猜测模型名）。
+            # Failed 事件在 CrewAI 1.6.1 没有 model 字段；先兼容未来版本，
+            # 再回退最近一次 Started 的 model 配对；找不到则丢弃（不猜测）。
             model = str(getattr(event, "model", "") or "").strip() or self._latest_model(role)
             if model is None:
                 return
@@ -260,19 +278,39 @@ class LlmCallObserver:
         started = self._started_at.get((role, model))
         if started is None:
             return 0.0
-        return max(time.monotonic() - started, 0.0)
+        return max(time.monotonic() - started.monotonic, 0.0)
+
+    def _event_role(self, event: Any) -> str | None:
+        """事件角色解析：稳定 agent_id 优先，Agent.role 名称仅作回退。"""
+        agent_id = str(getattr(event, "agent_id", "") or "").strip()
+        if agent_id:
+            mapped = self._agent_roles.get(agent_id)
+            if mapped in ("research", "analysis", "writer", "revision"):
+                return mapped
+        return role_name_to_role(getattr(event, "agent_role", None))
 
     def _event_usage(self, event: Any) -> Any:
-        """取事件正式字段 usage（LLMCallCompletedEvent.usage: dict | None）。"""
+        """取真实模型响应 usage。
+
+        CrewAI 1.6.1 的 ``LLMCallCompletedEvent`` 没有独立 ``usage`` 字段，
+        token 位于 ``event.response.usage``。先读事件字段是为了兼容
+        可能将 usage 上移的未来版本，随后同时兼容 object/dict 响应。
+        """
         try:
-            return getattr(event, "usage", None)
+            direct_usage = getattr(event, "usage", None)
+            if direct_usage is not None:
+                return direct_usage
+            response = getattr(event, "response", None)
+            if isinstance(response, dict):
+                return response.get("usage")
+            return getattr(response, "usage", None)
         except Exception:  # noqa: BLE001
             return None
 
     def _latest_model(self, role: str) -> str | None:
         """最近一次 Started 但未 Completed/Failed 的 model（按开始时间取最新）。"""
         candidates = [
-            (started, model)
+            (started.monotonic, model)
             for (r, model), started in self._started_at.items()
             if r == role
         ]
@@ -310,8 +348,13 @@ class LlmCallObserver:
                 attributes["llm.tokens_total"] = (
                     tokens["input"] + tokens["output"] + tokens["cached_input"]
                 )
-            with tracer.start_as_current_span("llm.request", attributes=attributes):
-                # 空 block：span 边界本身即观测点
-                return
+            started = self._started_at.get((role, model))
+            start_time = started.wall_time_ns if started is not None else None
+            llm_span = tracer.start_span(
+                "llm.request",
+                attributes=attributes,
+                start_time=start_time,
+            )
+            llm_span.end(end_time=time.time_ns())
         except Exception:  # noqa: BLE001 - 观测尽力而为
             _LOGGER.warning("llm_call_observer span recording skipped")

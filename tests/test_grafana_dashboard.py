@@ -68,7 +68,13 @@ def dashboard() -> dict:
 
 
 def _all_exprs(dashboard: dict) -> list[str]:
-    return [p["targets"][0]["expr"] for p in dashboard["panels"] if p.get("targets")]
+    """收集每个面板的全部 PromQL target，不丢弃 P50/P95/P99 的后续曲线。"""
+    return [
+        target["expr"]
+        for panel in dashboard["panels"]
+        for target in panel.get("targets", [])
+        if target.get("expr")
+    ]
 
 
 def test_dashboard_is_valid_json(dashboard: dict) -> None:

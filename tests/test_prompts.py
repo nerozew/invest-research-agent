@@ -128,10 +128,10 @@ def test_writer_prompt_file_exists_and_loads() -> None:
     assert "analysis_pack" in text
     # 禁止引入新事实（grounding 红线）
     assert "禁止引入新事实" in text or "禁止添加上游" in text
-    # 工具白名单最小化
-    assert "ArtifactReader" in text
-    assert "CitationVerifier" in text
-    assert "TemplateGuide" in text
+    # P06-11B：主 Writer 工具白名单收敛为一次聚合读取，
+    # 避免多次确定性工具调用耗尽 max_iter。
+    assert "WriterContextReader" in text
+    assert "只调用一次" in text
     # 必备声明
     assert "非投资建议" in text
 

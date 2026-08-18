@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from invest_research.agents.llm_factory import FakeLLM, LLMConfig, LLMRole
+from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
     CompanyIdentity,
     FinancialAnalysisPack,
@@ -249,6 +250,130 @@ def test_live_failure_does_not_degrade_to_fake(
     with pytest.raises(LiveFlowExecutionError):
         runner.run(_request())
     assert runner.last_state is None  # 不残留运行状态
+
+
+def test_live_writer_iteration_limit_is_classified_stably(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """工具参数被当成 ReportDraft 且 Writer 耗尽迭代时归类 ITERATION_LIMIT。"""
+
+    executor = SimpleNamespace(iterations=5)
+    writer = SimpleNamespace(
+        id="writer-agent-id",
+        role="报告撰写 Agent",
+        max_iter=5,
+        agent_executor=executor,
+    )
+
+    class _ExhaustedWriterCrew:
+        agents = [writer]
+        tasks = [SimpleNamespace(agent=writer)]
+
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            ReportDraft.model_validate({"section_name": "cover"})
+            raise AssertionError("不可达")
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("writer_iteration_limit")),
+        crew_factory=lambda cfg, rt: _ExhaustedWriterCrew(),  # type: ignore[no-any-return]
+    )
+    with pytest.raises(LiveFlowExecutionError) as exc_info:
+        runner.run(_request())
+
+    assert exc_info.value.error_code == ErrorCode.ITERATION_LIMIT.value
+    assert exc_info.value.failure_stage == "05_writer"
+
+
+def test_live_tool_input_without_exhaustion_is_not_a_pack(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """工具参数不是最终 Pack；未耗尽迭代时稳定归类 NOT_A_PACK。"""
+
+    writer = SimpleNamespace(
+        id="writer-agent-id",
+        role="报告撰写 Agent",
+        max_iter=5,
+        agent_executor=SimpleNamespace(iterations=2),
+    )
+
+    class _ToolInputCrew:
+        agents = [writer]
+        tasks = [SimpleNamespace(agent=writer)]
+
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            ReportDraft.model_validate({"section_name": "cover"})
+            raise AssertionError("不可达")
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("writer_not_pack")),
+        crew_factory=lambda cfg, rt: _ToolInputCrew(),  # type: ignore[no-any-return]
+    )
+    with pytest.raises(LiveFlowExecutionError) as exc_info:
+        runner.run(_request())
+
+    assert exc_info.value.error_code == ErrorCode.NOT_A_PACK.value
+    assert exc_info.value.failure_stage == "05_writer"
+
+
+def test_agent_token_process_delta_is_recorded_once_per_role(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """CrewAI 事件丢 usage 时，从每角色 TokenProcess 真实累计值取差。"""
+    from prometheus_client import REGISTRY
+
+    class _Process:
+        def __init__(self) -> None:
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.cached_prompt_tokens = 0
+
+        def get_summary(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                prompt_tokens=self.prompt_tokens,
+                completion_tokens=self.completion_tokens,
+                cached_prompt_tokens=self.cached_prompt_tokens,
+            )
+
+    process = _Process()
+    crew = SimpleNamespace(
+        agents=[SimpleNamespace(role="报告撰写 Agent", _token_process=process)]
+    )
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("token_delta")),
+    )
+    before_snapshot = runner._agent_token_snapshots(crew)
+    labels = {
+        "provider": "qwen",
+        "model": "qwen-max",
+        "role": "writer",
+    }
+    before_input = (
+        REGISTRY.get_sample_value("llm_tokens_total", {**labels, "type": "input"})
+        or 0
+    )
+    before_output = (
+        REGISTRY.get_sample_value("llm_tokens_total", {**labels, "type": "output"})
+        or 0
+    )
+    process.prompt_tokens = 120
+    process.completion_tokens = 30
+    process.cached_prompt_tokens = 20
+
+    runner._record_agent_token_deltas(crew, before_snapshot)
+
+    after_input = (
+        REGISTRY.get_sample_value("llm_tokens_total", {**labels, "type": "input"})
+        or 0
+    )
+    after_output = (
+        REGISTRY.get_sample_value("llm_tokens_total", {**labels, "type": "output"})
+        or 0
+    )
+    assert after_input - before_input == 120
+    assert after_output - before_output == 30
 
 
 def test_live_runner_persists_rendered_markdown_report(

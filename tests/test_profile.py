@@ -43,8 +43,7 @@ def test_fast_profile_budgets() -> None:
     assert p.mode == "fast"
     assert p.research_max_iter == 8
     assert p.analysis_max_iter == 2
-    # P06-11-fix：Writer 需依次读取两个 Pack 再输出 ReportDraft，max_iter=1 会导致
-    # 工具参数被当最终输出；fast 档位调整为 5（与 deep 的 5 对齐，仍为最小可用值）。
+    # P06-11B：一次 WriterContextReader + 最终输出；5 是有界安全余量。
     assert p.writer_max_iter == 5
     assert p.max_retry_limit == 1
     assert p.max_execution_time == 180
@@ -122,7 +121,7 @@ def test_analysis_and_writer_agents_apply_own_max_iter() -> None:
     writer = build_writer_agent(_config(), fake=_fake(LLMRole.WRITER), profile=fast)
     try:
         assert analysis.max_iter == 2
-        # P06-11-fix：fast Writer max_iter 同步为 5（两 Pack 读取 + 最终输出）。
+        # P06-11B：聚合上下文读取后保留 max_iter=5 的有界安全余量。
         assert writer.max_iter == 5
         assert analysis.max_retry_limit == 1
         assert writer.max_execution_time == 180

@@ -17,6 +17,7 @@ from typing import Any
 
 from invest_research.infrastructure.observability.metrics import (
     agent_duration_seconds,
+    agent_iteration_limit_total,
     agent_runs_total,
     analysis_completeness_total,
     failure_total,
@@ -60,6 +61,7 @@ __all__ = [
     "count_failure",
     "count_agent_run",
     "observe_agent_duration",
+    "count_agent_iteration_limit",
     "count_pack_validation",
     "count_schema_repair",
     "count_analysis_completeness",
@@ -298,6 +300,13 @@ def observe_agent_duration(
         (role, profile, provider, model, status),
         duration_seconds,
     )
+
+
+def count_agent_iteration_limit(role: str, profile: str) -> None:
+    """记录一次 Agent 迭代预算耗尽（只接受稳定角色与 fast/deep）。"""
+    if role not in _AGENT_ROLES or profile not in ("fast", "deep"):
+        return
+    _safe_inc(agent_iteration_limit_total, label_values=(role, profile))
 
 
 # ---- 四、PackBoundary 维度 ----

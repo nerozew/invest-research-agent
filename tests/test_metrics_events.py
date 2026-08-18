@@ -21,6 +21,7 @@ from prometheus_client import REGISTRY
 os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
 from invest_research.infrastructure.observability import metrics  # noqa: E402
 from invest_research.infrastructure.observability.metrics_events import (  # noqa: E402
+    count_agent_iteration_limit,
     count_agent_run,
     count_analysis_completeness,
     count_failure,
@@ -335,6 +336,20 @@ def test_agent_run_and_duration_histogram() -> None:
         "agent_duration_seconds_bucket",
         {"role": "research", "profile": "fast", "provider": "qwen",
          "model": "qwen-max", "status": "success", "le": "1.0"}) or 0) >= before_bucket + 1
+
+
+def test_agent_iteration_limit_counter_has_bounded_labels() -> None:
+    """迭代耗尽指标只允许稳定角色与 fast/deep，未知值不落库。"""
+    labels = {"role": "writer", "profile": "fast"}
+    before = REGISTRY.get_sample_value("agent_iteration_limit_total", labels) or 0
+    count_agent_iteration_limit("writer", "fast")
+    after = REGISTRY.get_sample_value("agent_iteration_limit_total", labels) or 0
+    assert after >= before + 1
+
+    invalid = {"role": "company-123", "profile": "custom-123"}
+    invalid_before = REGISTRY.get_sample_value("agent_iteration_limit_total", invalid)
+    count_agent_iteration_limit("company-123", "custom-123")
+    assert REGISTRY.get_sample_value("agent_iteration_limit_total", invalid) == invalid_before
 
 
 def test_agent_role_whitelist_rejected() -> None:

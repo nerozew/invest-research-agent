@@ -50,6 +50,7 @@ __all__ = [
     "failure_total",
     "agent_runs_total",
     "agent_duration_seconds",
+    "agent_iteration_limit_total",
     "pack_validation_total",
     "schema_repair_total",
     "analysis_completeness_total",
@@ -264,6 +265,12 @@ agent_duration_seconds = Histogram(
     buckets=_AGENT_DURATION_BUCKETS,
 )
 
+agent_iteration_limit_total = Counter(
+    "agent_iteration_limit_total",
+    "Agent 达到最大迭代次数的总数（稳定角色 + fast/deep 档位）",
+    ["role", "profile"],
+)
+
 # 四、PackBoundary 维度
 pack_validation_total = Counter(
     "pack_validation_total",
@@ -313,12 +320,14 @@ llm_request_duration_seconds = Histogram(
 
 llm_tokens_total = Counter(
     "llm_tokens_total",
-    "LLM Token 用量（必须来自真实模型响应 usage；type 只允许 input/output/cached_input）",
+    "LLM Token 用量（来自 CrewAI Agent TokenProcess 真实 usage 累计差值；"
+    "type 只允许 input/output/cached_input）",
     ["provider", "model", "role", "type"],
 )
 
 llm_usage_missing_total = Counter(
     "llm_usage_missing_total",
-    "LLM 响应不包含真实 usage 的次数（不得伪造为 0）",
+    "CrewAI LLM completed 事件不包含可消费 usage 的次数（TokenProcess "
+    "仍可在角色级收口，不得伪造为 0）",
     ["provider", "model", "role"],
 )

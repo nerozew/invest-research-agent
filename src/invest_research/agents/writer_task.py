@@ -3,8 +3,8 @@
 目标（docs/05 P03-07 验收）：
 - 组装报告撰写 Agent（注入 ``AnyLLM``：FakeLLM 或 crewai.BaseLLM）与 ``Task``；
 - Task 绑定 ``output_pydantic=ReportDraft``；
-- **只暴露允许的写作工具**（least-privilege）：ArtifactReader + CitationVerifier + TemplateGuide，
-  不暴露搜索/计算等无关工具；Writer 只能使用上游 context（grounded generation）。
+- **只暴露一个聚合读取工具**（least-privilege）：WriterContextReader，
+  一次返回两个上游 Pack 与稳定模板章节；Writer 不再用多个确定性工具消耗迭代预算。
 
 CrewAI 1.6.1 关键 API（依据官方 docs/edge 的 AGENTS 模板）：
 - ``@tool("Name")`` 装饰器把函数包成 CrewAI 工具；
@@ -70,6 +70,36 @@ def make_artifact_reader(loader: ArtifactLoader | None = None) -> Any:
     return artifact_reader
 
 
+def make_writer_context_reader(loader: ArtifactLoader | None = None) -> Any:
+    """构造 WriterContextReader：一次返回写作所需的完整确定性上下文。
+
+    P06-11B 将两个 ArtifactReader 调用和 TemplateGuide 调用合并为一次读取，
+    避免 Writer 在真正输出 ``ReportDraft`` 前耗尽 ``max_iter``。返回值只来自
+    已完成的上游 Task 与代码内版本化章节常量，不发起网络请求、不新增事实。
+    """
+    resolver = loader if loader is not None else _placeholder_loader
+
+    @tool("WriterContextReader")
+    def writer_context_reader() -> dict[str, object]:
+        """一次读取 ResearchPack、FinancialAnalysisPack 与报告必需章节。"""
+        research_pack = resolver("research_pack")
+        analysis_pack = resolver("analysis_pack")
+        missing: list[str] = []
+        if research_pack is None:
+            missing.append("research_pack")
+        if analysis_pack is None:
+            missing.append("analysis_pack")
+        return {
+            "status": "ready" if not missing else "partial",
+            "research_pack": research_pack,
+            "analysis_pack": analysis_pack,
+            "required_sections": list(REPORT_SECTIONS),
+            "missing": missing,
+        }
+
+    return writer_context_reader
+
+
 @tool("CitationVerifier")
 def citation_verifier(
     claim: str, key_numbers: list[str], url: str | None = None
@@ -106,9 +136,10 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
     return {"is_known": section_name in REPORT_SECTIONS, "section": section_name}
 
 
-# Writer 最小工具白名单（least-privilege：读工件 / 验引用 / 查模板；
-# ArtifactReader 可注入真实 loader）。
-_WRITER_TOOLS = [make_artifact_reader(), citation_verifier, template_guide]
+# CitationVerifier / TemplateGuide 仍作为独立确定性函数供修订流程与单元测试
+# 复用；主 Writer 不再逐项调用它们。ReportDraft 生成后的现有质量门禁负责
+# 必需章节与 citation_keys 结构检查，修订流程仍可使用 CitationVerifier；
+# 不在此虚构“已实现所有引用语义校验”。
 
 
 def build_writer_agent(
@@ -119,16 +150,16 @@ def build_writer_agent(
 ) -> Agent:
     """构建报告撰写 Agent（统一 LLM 接口）。
 
-    - 只注入 ArtifactReader + CitationVerifier + TemplateGuide；
+    - 只注入 WriterContextReader；一次读取两个 Pack 与模板章节；
     - ``artifact_loader``：可选注入上游工件读取器（生产从 Task 输出读取真实 pack）；
-      未注入时 ArtifactReader 用占位实现（向后兼容 fake 测试）；
+      未注入时 WriterContextReader 用占位实现（向后兼容 fake 测试）；
     - backstory 使用 writer_prompt_v2（P06-09A：按 completeness 如实组织报告）；
     - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.WRITER)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
     resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
-    reader = make_artifact_reader(artifact_loader)
+    context_reader = make_writer_context_reader(artifact_loader)
     return Agent(
         role="报告撰写 Agent",
         goal=(
@@ -137,7 +168,7 @@ def build_writer_agent(
         ),
         backstory=prompt,
         llm=llm,
-        tools=[reader, citation_verifier, template_guide],
+        tools=[context_reader],
         allow_delegation=False,
         verbose=False,
         max_iter=resolved.writer_max_iter,
@@ -166,9 +197,9 @@ def build_writer_task(
         description=(
             "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
             "按 writer_prompt_v2 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
-            "写作素材通过 ArtifactReader 工具读取：调用 ArtifactReader(\"research_pack\") 与 "
-            "ArtifactReader(\"analysis_pack\") 获取上游真实内容（若未读到内容，必须明确写入"
-            "数据限制章节，不得编造）。\n"
+            "写作开始时只调用一次 WriterContextReader，读取 research_pack、analysis_pack 与"
+            " required_sections；不要重复调用工具。若 status=partial，必须把 missing 中的"
+            "缺失项写入数据限制章节，不得编造。读取后立即输出最终 ReportDraft。\n"
             "必须读取 analysis_pack.completeness 并按状态组织报告：complete 正常撰写财务表现；"
             "partial 把 limitations 中的缺失数据及原因写入数据限制章节；unavailable 在财务/"
             "指标章节仅说明数据不可用（引用 unavailable_reason），不得推断或编造财务数据。\n"

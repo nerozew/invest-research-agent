@@ -46,6 +46,7 @@ from invest_research.agents.pack_parsing import (
     PackBoundary,
 )
 from invest_research.application.progress import ProgressSink
+from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
     CompanyIdentity,
     FinancialAnalysisPack,
@@ -84,6 +85,82 @@ _AGENT_ROLE_TO_STEP = {
     "analysis": "04_analysis",
     "writer": "05_writer",
 }
+
+_AGENT_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "research": ("research", "信息搜集"),
+    "analysis": ("analysis", "financial analyst", "财报分析"),
+    "writer": ("writer", "report writer", "报告撰写"),
+}
+
+_TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "cached_prompt_tokens")
+
+
+def _stable_agent_role(role_name: str | None) -> str | None:
+    """把 CrewAI 可读角色名映射为稳定 research/analysis/writer。"""
+    if not role_name:
+        return None
+    lowered = str(role_name).strip().lower()
+    for role, aliases in _AGENT_ROLE_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return role
+    return None
+
+
+def _validation_role(exc: Exception) -> str | None:
+    """从 Pydantic ValidationError 的模型标题推导当前 Pack 阶段。"""
+    title = str(getattr(exc, "title", "") or "").strip()
+    return {
+        "ResearchPack": "research",
+        "FinancialAnalysisPack": "analysis",
+        "ReportDraft": "writer",
+    }.get(title)
+
+
+def _iteration_limit_details(
+    crew: Any,
+    *,
+    preferred_role: str | None = None,
+) -> tuple[str, str] | None:
+    """从 Crew 执行器真实计数判断哪个 Agent 已耗尽 max_iter。
+
+    CrewAI 1.6.1 在耗尽时会额外请求一次 final answer，而不会抛专用异常；
+    因此应用边界必须读取 executor.iterations/max_iter 保存稳定错误分类。
+    """
+    tasks = list(getattr(crew, "tasks", None) or [])
+    for task in reversed(tasks):
+        agent = getattr(task, "agent", None)
+        if agent is None:
+            continue
+        executor = getattr(agent, "agent_executor", None)
+        iterations = getattr(executor, "iterations", None)
+        max_iter = getattr(agent, "max_iter", None)
+        if not isinstance(iterations, int) or not isinstance(max_iter, int):
+            continue
+        if iterations < max_iter:
+            continue
+        role = _stable_agent_role(getattr(agent, "role", None))
+        if role is not None and (preferred_role is None or role == preferred_role):
+            return role, _AGENT_ROLE_TO_STEP[role]
+    return None
+
+
+def _looks_like_tool_input(exc: Exception) -> bool:
+    """识别 Pydantic 错误中的已知工具参数，避免把它归为 INTERNAL_BUG。"""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return False
+    try:
+        entries = errors()
+    except Exception:  # noqa: BLE001 - 第三方异常对象不可信
+        return False
+    tool_keys = {"artifact_key", "section_name", "action", "action_input"}
+    return any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("input"), dict)
+        and bool(tool_keys.intersection(entry["input"]))
+        for entry in entries
+    )
+
 
 class LiveFlowExecutionError(RuntimeError):
     """live 模式执行失败（上游/质量门禁不可恢复）。
@@ -357,24 +434,45 @@ class LiveResearchFlowRunner:
         #    scope 在 kickoff 期间保持活跃，结束后显式退出清除本轮 handler。
         scope = self._subscribe_task_progress(crew)
         llm_scope = self._subscribe_llm_calls(crew)
+        usage_before = self._agent_token_snapshots(crew)
         try:
             result = crew.kickoff(inputs=inputs)
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
+            error_code = ErrorCode.INTERNAL_BUG.value
+            failure_stage: str | None = None
+            exhausted = _iteration_limit_details(
+                crew,
+                preferred_role=_validation_role(exc),
+            )
+            if exhausted is not None:
+                role, failure_stage = exhausted
+                error_code = ErrorCode.ITERATION_LIMIT.value
+                try:
+                    from invest_research.infrastructure.observability.metrics_events import (
+                        count_agent_iteration_limit,
+                    )
+
+                    count_agent_iteration_limit(role, self._current_profile.mode)
+                except Exception:  # noqa: BLE001 - 指标尽力而为
+                    pass
+            elif _looks_like_tool_input(exc):
+                error_code = ErrorCode.NOT_A_PACK.value
+                failure_stage = "05_writer"
+            raise LiveFlowExecutionError(
+                f"真实 Crew 执行失败: {type(exc).__name__}: {exc}",
+                error_code=error_code,
+                failure_stage=failure_stage,
+            ) from exc
+        finally:
+            self._record_agent_token_deltas(crew, usage_before)
             if scope is not None:
                 scope.__exit__(None, None, None)
             if llm_scope is not None:
                 llm_scope.__exit__(None, None, None)
-            raise LiveFlowExecutionError(
-                f"真实 Crew 执行失败: {type(exc).__name__}: {exc}"
-            ) from exc
-        if scope is not None:
-            scope.__exit__(None, None, None)
-        if llm_scope is not None:
-            llm_scope.__exit__(None, None, None)
 
         # P06-09C：Agent 耗时指标（尽力而为，不改变业务结果）。
-        # P06-11A：LLM 每次真实调用的 token/次数/耗时/span 由 LLM 事件观测器负责，
-        # 不再把 Crew 汇总 usage 复制给三个角色（修复三倍计数）。
+        # P06-11B：次数/耗时/span 由 LLM 事件观测器负责；Token 已在
+        # kickoff 前后按 Agent TokenProcess 差值记录，不复制 Crew 汇总。
         self._record_agent_metrics(crew, result)
 
         # P06-06B：03_documents 在 Research Task 完成后由本 runner 标记
@@ -496,7 +594,8 @@ class LiveResearchFlowRunner:
 
         - ``LLMCallStartedEvent`` / ``LLMCallCompletedEvent`` / ``LLMCallFailedEvent``
           在每次真实模型请求边界 emit（crewai.llm.LLM 官方事件，非 monkey patch）；
-        - 每个模型请求只记录一次（成功或失败互斥），Token 只来自真实响应 usage；
+        - 每个模型请求只记录一次次数/耗时；Token 由 Agent TokenProcess
+          在 kickoff 前后取差，避免 CrewAI 事件丢 usage 与 Crew 汇总三倍复制；
         - 返回 ``scoped_handlers()`` context manager；调用方必须在 kickoff 完成后
           退出清理（防止 handler 泄漏到下一个 Job）。
         """
@@ -507,20 +606,89 @@ class LiveResearchFlowRunner:
         except ImportError:
             return None
         try:
-            return LlmCallObserver(self._config).subscribe()
+            agent_roles: dict[str, str] = {}
+            for stable_role, agent in zip(
+                _AGENT_ROLE_ORDER, getattr(crew, "agents", None) or []
+            ):
+                agent_id = str(getattr(agent, "id", "") or "").strip()
+                if agent_id:
+                    agent_roles[agent_id] = stable_role
+            return LlmCallObserver(
+                self._effective_config,
+                agent_roles=agent_roles,
+            ).subscribe()
         except Exception:  # noqa: BLE001 - 观测尽力而为
             return None
+
+    @staticmethod
+    def _agent_token_snapshots(crew: Any) -> dict[str, dict[str, int]]:
+        """读取每个 Agent 的 CrewAI TokenProcess 累计值。
+
+        CrewAI 1.6.1 的 completed 事件在多数非流式路径只携带文本，
+        但 Agent ``_token_process`` 由官方 TokenCalcHandler 从真实响应 usage
+        累加。这里仅作鸭子类型读取，不修改第三方对象。
+        """
+        snapshots: dict[str, dict[str, int]] = {}
+        for agent in getattr(crew, "agents", None) or []:
+            role = _stable_agent_role(getattr(agent, "role", None))
+            process = getattr(agent, "_token_process", None)
+            summary_getter = getattr(process, "get_summary", None)
+            if role is None or not callable(summary_getter):
+                continue
+            try:
+                summary = summary_getter()
+                snapshots[role] = {
+                    field: max(0, int(getattr(summary, field, 0) or 0))
+                    for field in _TOKEN_FIELDS
+                }
+            except Exception:  # noqa: BLE001 - 观测尽力而为
+                continue
+        return snapshots
+
+    def _record_agent_token_deltas(
+        self,
+        crew: Any,
+        before: dict[str, dict[str, int]],
+    ) -> None:
+        """按角色记录真实 TokenProcess 前后差值（成功/失败都记）。"""
+        try:
+            from invest_research.agents.llm_factory import LLMRole
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_llm_tokens,
+                label_provider_model,
+            )
+
+            after = self._agent_token_snapshots(crew)
+            field_to_type = {
+                "prompt_tokens": "input",
+                "completion_tokens": "output",
+                "cached_prompt_tokens": "cached_input",
+            }
+            for role, current in after.items():
+                try:
+                    role_enum = LLMRole(role)
+                except ValueError:
+                    continue
+                model = self._effective_config.model_for(role_enum)
+                provider, model_lbl = label_provider_model(
+                    self._effective_config.vendor,
+                    model,
+                    base_url=self._effective_config.base_url,
+                )
+                previous = before.get(role, {})
+                for field, token_type in field_to_type.items():
+                    delta = max(current.get(field, 0) - previous.get(field, 0), 0)
+                    count_llm_tokens(provider, model_lbl, role, token_type, delta)
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            _LOGGER.warning("agent token metrics recording skipped")
 
     @staticmethod
     def _role_to_step(role_name: str | None) -> str | None:
         """把 Agent role 名映射到步骤名（未知 role 返回 None 不标记）。"""
         if not role_name:
             return None
-        lowered = str(role_name).lower()
-        for role, step in _AGENT_ROLE_TO_STEP.items():
-            if role in lowered or lowered in role:
-                return step
-        return None
+        role = _stable_agent_role(role_name)
+        return _AGENT_ROLE_TO_STEP.get(role) if role is not None else None
 
     def _build_crew_inputs(
         self, request: ResearchRequest, prefetch_result: PrefetchResult | None
@@ -573,9 +741,9 @@ class LiveResearchFlowRunner:
     def _record_agent_metrics(self, crew: Any, result: Any) -> None:
         """Agent 耗时 Prometheus 指标（P06-09C，尽力而为）。
 
-        P06-11A 说明：LLM 每次真实调用的 token/次数/耗时/span 由
-        ``LlmCallObserver``（LLM 事件总线）负责，这里只保留 Agent 级耗时指标，
-        **不再**把 Crew 汇总 usage 复制给三个角色（修复三倍计数问题）。
+        P06-11B 说明：LLM 次数/耗时/span 由 ``LlmCallObserver`` 负责；
+        Token 由 ``_record_agent_token_deltas`` 按 Agent 真实累计值取差。这里只保留
+        Agent 级耗时指标，**不再**把 Crew 汇总 usage 复制给三个角色。
         """
         try:
             from invest_research.agents.llm_factory import LLMRole

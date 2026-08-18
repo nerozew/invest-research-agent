@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 from prometheus_client import REGISTRY
@@ -46,32 +46,6 @@ def llm_config() -> LLMConfig:
     return _make_config()
 
 
-@pytest.fixture(autouse=True)
-def _cleanup_metrics() -> Iterator[None]:
-    """每个测试前后清理 llm_ 指标，避免跨测试污染。"""
-    yield
-    _unregister_llm_metrics()
-
-
-def _unregister_llm_metrics() -> None:
-    """从 REGISTRY 注销 llm_ 指标（幂等）。"""
-    for collector in list(REGISTRY._collector_to_names):  # noqa: SLF001
-        names = REGISTRY._collector_to_names[collector]  # noqa: SLF001
-        if isinstance(names, (list, tuple, set)) and any(
-            "llm_" in name for name in names
-        ):
-            try:
-                REGISTRY.unregister(collector)
-            except (ValueError, KeyError):
-                pass
-            continue
-        if "llm_" in names:
-            try:
-                REGISTRY.unregister(collector)
-            except (ValueError, KeyError):
-                pass
-
-
 def _samples() -> list[tuple[str, dict[str, str], float]]:
     """收集当前 REGISTRY 中 llm_ 指标样本。"""
     result: list[tuple[str, dict[str, str], float]] = []
@@ -80,6 +54,16 @@ def _samples() -> list[tuple[str, dict[str, str], float]]:
             if sample.name.startswith("llm_"):
                 result.append((sample.name, dict(sample.labels), float(sample.value)))
     return result
+
+
+def _sample_total(name: str, **labels: str) -> float:
+    """按 label 子集汇总当前值；测试比较前后增量，不注销全局 collector。"""
+    return sum(
+        value
+        for sample_name, sample_labels, value in _samples()
+        if sample_name == name
+        and all(sample_labels.get(key) == expected for key, expected in labels.items())
+    )
 
 
 class _FakeAgent:
@@ -110,20 +94,20 @@ def _make_completed_event(
     usage: dict[str, Any] | None = None,
     duration: float = 1.5,
 ) -> Any:
-    """构造 LLMCallCompletedEvent（usage/duration 走 extra=allow）。"""
+    """构造 LLMCallCompletedEvent（CrewAI 1.6.1 的 usage 位于 response）。"""
     from crewai.events.types.llm_events import LLMCallCompletedEvent, LLMCallType
 
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],
-        "response": "ok",
+        "response": {"content": "ok", "usage": usage} if usage is not None else "ok",
         "call_type": LLMCallType.LLM_CALL,
         "from_task": None,
         "from_agent": _FakeAgent(role),
-        "duration": duration,
     }
-    if usage is not None:
-        kwargs["usage"] = usage
+    # 事件没有 duration 字段；参数仅保留为测试语义说明，
+    # 真实耗时由 Started→Completed 的 monotonic 时钟计算。
+    _ = duration
     return LLMCallCompletedEvent(**kwargs)
 
 
@@ -158,9 +142,38 @@ def test_role_name_to_role_maps_readable_names() -> None:
     assert role_name_to_role("Research Analyst") == "research"
     assert role_name_to_role("Financial Analyst") == "analysis"
     assert role_name_to_role("Report Writer") == "writer"
+    assert role_name_to_role("信息搜集 Agent") == "research"
+    assert role_name_to_role("财报分析 Agent") == "analysis"
+    assert role_name_to_role("报告撰写 Agent") == "writer"
     assert role_name_to_role("Unknown Role") is None
     assert role_name_to_role(None) is None
     assert role_name_to_role("") is None
+
+
+def test_agent_id_mapping_takes_precedence_over_readable_name(
+    llm_config: LLMConfig,
+) -> None:
+    """生产路径用稳定 agent_id 映射，不依赖中英文展示名称。"""
+    observer = LlmCallObserver(
+        llm_config,
+        agent_roles={"agent-自定义角色": "writer"},
+    )
+    before = _sample_total(
+        "llm_requests_total", role="writer", model="qwen-test", status="success"
+    )
+    _drive(
+        observer,
+        _make_started_event("自定义角色", "qwen-test"),
+        _make_completed_event(
+            "自定义角色",
+            "qwen-test",
+            usage={"prompt_tokens": 2, "completion_tokens": 1},
+        ),
+    )
+    after = _sample_total(
+        "llm_requests_total", role="writer", model="qwen-test", status="success"
+    )
+    assert after - before == 1.0
 
 
 def test_extract_usage_tokens_dict_and_object() -> None:
@@ -188,6 +201,9 @@ def test_has_usage_false_when_empty_or_none() -> None:
 def test_single_call_counts_once(llm_config: LLMConfig) -> None:
     """一次成功调用 → success=1（不三倍）。"""
     observer = LlmCallObserver(llm_config)
+    before = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="success"
+    )
     _drive(
         observer,
         _make_started_event("Research Analyst", "qwen-test"),
@@ -198,16 +214,21 @@ def test_single_call_counts_once(llm_config: LLMConfig) -> None:
         ),
     )
 
-    requests = [s for s in _samples() if s[0] == "llm_requests_total"]
-    success = [s for s in requests if s[2]["status"] == "success"]
-    # 恰好一条 success 序列，值为 1
-    assert len(success) == 1, f"期望 1 条 success 序列，实际 {success}"
-    assert success[0][2] == 1.0
+    after = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="success"
+    )
+    assert after - before == 1.0
 
 
 def test_three_roles_not_tripled(llm_config: LLMConfig) -> None:
     """三个角色各一次调用 → 每个角色 success=1（不是 3）。"""
     observer = LlmCallObserver(llm_config)
+    before = {
+        role: _sample_total(
+            "llm_requests_total", role=role, model="qwen-test", status="success"
+        )
+        for role in ("research", "analysis", "writer")
+    }
     for role_name in ("Research Analyst", "Financial Analyst", "Report Writer"):
         _drive(
             observer,
@@ -219,16 +240,11 @@ def test_three_roles_not_tripled(llm_config: LLMConfig) -> None:
             ),
         )
 
-    requests = [
-        s
-        for s in _samples()
-        if s[0] == "llm_requests_total" and s[2]["status"] == "success"
-    ]
-    by_role: dict[str, float] = {}
-    for _, labels, value in requests:
-        role = labels["role"]
-        by_role[role] = by_role.get(role, 0.0) + value
-    assert by_role == {"research": 1.0, "analysis": 1.0, "writer": 1.0}
+    for role in ("research", "analysis", "writer"):
+        after = _sample_total(
+            "llm_requests_total", role=role, model="qwen-test", status="success"
+        )
+        assert after - before[role] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +255,12 @@ def test_three_roles_not_tripled(llm_config: LLMConfig) -> None:
 def test_success_records_duration(llm_config: LLMConfig) -> None:
     """成功调用记录耗时（duration observe）。"""
     observer = LlmCallObserver(llm_config)
+    before_count = _sample_total(
+        "llm_request_duration_seconds_count",
+        role="research",
+        model="qwen-test",
+        status="success",
+    )
     _drive(
         observer,
         _make_started_event("Research Analyst", "qwen-test"),
@@ -250,40 +272,57 @@ def test_success_records_duration(llm_config: LLMConfig) -> None:
         ),
     )
 
-    count_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_count"]
-    sum_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_sum"]
-    assert any(s[2] == 1.0 for s in count_s)
-    assert any(abs(s[2] - 2.5) < 1e-6 for s in sum_s)
+    after_count = _sample_total(
+        "llm_request_duration_seconds_count",
+        role="research",
+        model="qwen-test",
+        status="success",
+    )
+    assert after_count - before_count == 1.0
 
 
 def test_failure_records_count_and_duration(llm_config: LLMConfig) -> None:
     """失败调用记录 failure 次数与耗时。"""
     observer = LlmCallObserver(llm_config)
+    before = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="failure"
+    )
+    before_duration = _sample_total(
+        "llm_request_duration_seconds_count",
+        role="research",
+        model="qwen-test",
+        status="failure",
+    )
     _drive(
         observer,
         _make_started_event("Research Analyst", "qwen-test"),
         _make_failed_event("Research Analyst"),
     )
 
-    requests = [s for s in _samples() if s[0] == "llm_requests_total"]
-    failures = [s for s in requests if s[2]["status"] == "failure"]
-    assert len(failures) == 1
-    assert failures[0][2] == 1.0
-    # 失败也有 duration count（本地起止时间实测 >= 0）
-    count_s = [s for s in _samples() if s[0] == "llm_request_duration_seconds_count"]
-    assert any(s[2] == 1.0 for s in count_s)
+    after = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="failure"
+    )
+    assert after - before == 1.0
+    after_duration = _sample_total(
+        "llm_request_duration_seconds_count",
+        role="research",
+        model="qwen-test",
+        status="failure",
+    )
+    assert after_duration - before_duration == 1.0
 
 
 def test_failure_does_not_count_missing(llm_config: LLMConfig) -> None:
     """失败不产生 usage missing（missing=有响应但无 usage）。"""
     observer = LlmCallObserver(llm_config)
+    before = _sample_total("llm_usage_missing_total", role="research", model="qwen-test")
     _drive(
         observer,
         _make_started_event("Research Analyst", "qwen-test"),
         _make_failed_event("Research Analyst"),
     )
-    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
-    assert missing == []
+    after = _sample_total("llm_usage_missing_total", role="research", model="qwen-test")
+    assert after == before
 
 
 # ---------------------------------------------------------------------------
@@ -291,9 +330,18 @@ def test_failure_does_not_count_missing(llm_config: LLMConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_usage_token_recorded_correctly(llm_config: LLMConfig) -> None:
-    """有真实 usage → input/output/cached_input 正确计数。"""
+def test_observer_does_not_double_record_token_metrics(llm_config: LLMConfig) -> None:
+    """事件观测器只记次数/耗时；Token 由 Agent TokenProcess 差值统一记录。"""
     observer = LlmCallObserver(llm_config)
+    before = {
+        token_type: _sample_total(
+            "llm_tokens_total",
+            role="analysis",
+            model="qwen-test",
+            type=token_type,
+        )
+        for token_type in ("input", "output", "cached_input")
+    }
     _drive(
         observer,
         _make_started_event("Financial Analyst", "qwen-test"),
@@ -308,30 +356,28 @@ def test_usage_token_recorded_correctly(llm_config: LLMConfig) -> None:
         ),
     )
 
-    tokens = [s for s in _samples() if s[0] == "llm_tokens_total"]
-    by_type = {s[2]["type"]: s[2] for s in tokens}
-    assert by_type["input"] == 100.0
-    assert by_type["output"] == 50.0
-    assert by_type["cached_input"] == 20.0
-    # 有 usage 时不记 missing
-    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
-    assert missing == []
+    for token_type in ("input", "output", "cached_input"):
+        after = _sample_total(
+            "llm_tokens_total",
+            role="analysis",
+            model="qwen-test",
+            type=token_type,
+        )
+        assert after == before[token_type]
 
 
 def test_missing_usage_only_increments_missing(llm_config: LLMConfig) -> None:
     """无 usage → 只增加 missing，不写 token，也不伪造 0。"""
     observer = LlmCallObserver(llm_config)
+    before = _sample_total("llm_usage_missing_total", role="writer", model="qwen-test")
     _drive(
         observer,
         _make_started_event("Report Writer", "qwen-test"),
         _make_completed_event("Report Writer", "qwen-test"),  # 无 usage
     )
 
-    missing = [s for s in _samples() if s[0] == "llm_usage_missing_total"]
-    assert len(missing) == 1
-    assert missing[0][2] == 1.0
-    tokens = [s for s in _samples() if s[0] == "llm_tokens_total"]
-    assert tokens == [], "无 usage 时不得写入 token 序列"
+    after = _sample_total("llm_usage_missing_total", role="writer", model="qwen-test")
+    assert after - before == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -344,14 +390,19 @@ def test_subscribe_and_event_bus_emit(llm_config: LLMConfig) -> None:
     from crewai.events.event_bus import crewai_event_bus
 
     observer = LlmCallObserver(llm_config)
+    before = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="success"
+    )
     scope = observer.subscribe()
     assert scope is not None
     try:
-        crewai_event_bus.emit(
+        started_future = crewai_event_bus.emit(
             None,
             event=_make_started_event("Research Analyst", "qwen-test"),
         )
-        crewai_event_bus.emit(
+        if started_future is not None:
+            started_future.result(timeout=2.0)
+        completed_future = crewai_event_bus.emit(
             None,
             event=_make_completed_event(
                 "Research Analyst",
@@ -359,16 +410,15 @@ def test_subscribe_and_event_bus_emit(llm_config: LLMConfig) -> None:
                 usage={"prompt_tokens": 5, "completion_tokens": 3},
             ),
         )
+        if completed_future is not None:
+            completed_future.result(timeout=2.0)
     finally:
         scope.__exit__(None, None, None)
 
-    success = [
-        s
-        for s in _samples()
-        if s[0] == "llm_requests_total" and s[2]["status"] == "success"
-    ]
-    assert len(success) == 1
-    assert success[0][2] == 1.0
+    after = _sample_total(
+        "llm_requests_total", role="research", model="qwen-test", status="success"
+    )
+    assert after - before == 1.0
 
 
 def test_subscribe_returns_none_when_no_event_bus(

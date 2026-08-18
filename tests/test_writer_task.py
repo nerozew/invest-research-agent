@@ -1,7 +1,7 @@
 """P03-07 Writer Task 测试（fake LLM，不联网）。
 
 验证目标（docs/05 P03-07 验收）：
-- Agent 可构建，只暴露 ArtifactReader + CitationVerifier + TemplateGuide（最小权限白名单）；
+- Agent 可构建，只暴露 WriterContextReader（一次聚合读取，最小权限白名单）；
 - Task 绑定 output_pydantic=ReportDraft；
 - 三个工具是确定性实现（不依赖 LLM）；
 - FakeLLM 可通过 response_model=ReportDraft 实例化报告草稿；
@@ -18,6 +18,7 @@ from invest_research.agents.writer_task import (
     build_writer_task,
     citation_verifier,
     make_artifact_reader,
+    make_writer_context_reader,
     template_guide,
 )
 from invest_research.domain.models import ReportDraft
@@ -38,10 +39,10 @@ def _fake() -> FakeLLM:
 
 
 def test_writer_agent_exposes_only_whitelisted_tools() -> None:
-    """最小权限白名单：Writer 只暴露 ArtifactReader + CitationVerifier + TemplateGuide。"""
+    """主 Writer 只暴露一次聚合读取工具，避免确定性工具循环耗尽预算。"""
     agent = build_writer_agent(_config(), fake=_fake())
     tool_names = {t.name for t in agent.tools or []}
-    assert tool_names == {"ArtifactReader", "CitationVerifier", "TemplateGuide"}
+    assert tool_names == {"WriterContextReader"}
     # 绝不暴露搜索/计算等无关工具
     assert not tool_names & {"GoogleSearch", "FinancialCalculator", "SECSubmissions"}
 
@@ -116,6 +117,33 @@ def test_artifact_reader_loader_returns_none_is_not_found() -> None:
     result = reader.run(artifact_key="analysis_pack")
     assert result["status"] == "not_found"
     assert "content" not in result
+
+
+def test_writer_context_reader_returns_both_packs_and_template_once() -> None:
+    """聚合 Reader 一次返回两个 Pack 与模板，缺失项显式为 partial。"""
+    calls: list[str] = []
+
+    def loader(key: str) -> dict[str, object] | None:
+        calls.append(key)
+        if key == "research_pack":
+            return {"version": "research_pack_v1"}
+        if key == "analysis_pack":
+            return {"version": "analysis_pack_v2", "completeness": "partial"}
+        return None
+
+    reader = make_writer_context_reader(loader)
+    result = reader.run()
+    assert result["status"] == "ready"
+    assert result["research_pack"]["version"] == "research_pack_v1"
+    assert result["analysis_pack"]["version"] == "analysis_pack_v2"
+    assert result["required_sections"] == list(REPORT_SECTIONS)
+    assert result["missing"] == []
+    assert calls == ["research_pack", "analysis_pack"]
+
+    partial = make_writer_context_reader(lambda key: None if key == "analysis_pack" else {})
+    partial_result = partial.run()
+    assert partial_result["status"] == "partial"
+    assert partial_result["missing"] == ["analysis_pack"]
 
 
 def test_fake_llm_instantiates_report_draft() -> None:

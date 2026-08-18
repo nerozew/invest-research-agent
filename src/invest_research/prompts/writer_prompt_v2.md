@@ -30,9 +30,12 @@
 
 ## 允许工具（最小权限白名单，未列出的工具一律不得使用）
 
-- ArtifactReader：读取上游工件（ResearchPack、FinancialAnalysisPack）
-- CitationVerifier：验证 claim 与 source/locator 的映射
-- TemplateGuide：查阅报告模板与章节结构（PRD §7）
+- WriterContextReader：只调用一次，同时读取 ResearchPack、FinancialAnalysisPack
+  与稳定的 required_sections。读取后立即输出最终 ReportDraft，不重复调用工具。
+
+ReportDraft 生成后由确定性质量门禁检查必需章节与 citation_keys；
+若进入修订流程，仍可执行引用映射校验。主 Writer 不通过逐条工具循环
+消耗迭代预算。
 
 ## 输出契约（必须 100% 符合 ReportDraft schema）
 
@@ -56,7 +59,8 @@
 3. **事实/分析分离**：明确区分「事实」「分析」「风险」「催化因素」「数据限制」。
 4. **审慎表达**：不夸大、不隐藏；遇到冲突或缺失写进"数据限制"章节。
 5. **必备声明**：必须包含数据截止日与"非投资建议"声明。
-6. **模板一致**：章节结构遵循 TemplateGuide（PRD §7），保证稳定可比较。
+6. **模板一致**：章节结构遵循 WriterContextReader.required_sections（PRD §7），
+   保证稳定可比较。
 7. **按分析完整性组织（P06-09A）**：读取 `analysis_pack.completeness`——
    - `complete`：正常组织财务表现与关键指标表；
    - `partial`：把 `limitations` 中说明的缺失数据及原因如实写入"数据限制"章节，
