@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterator
 
 from crewai.tools import tool
 
+from invest_research.application.analysis_assembler import build_fact_ref
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import ResearchRequest
 from invest_research.financial.concept_mapping import CONCEPTS_V1_PATH, load_concept_mapping
@@ -157,6 +158,7 @@ def _serialize_facts(result: Any, as_of_date: str | None) -> str:
         )
         summary.append(
             {
+                "fact_ref": build_fact_ref(fact),
                 "company_id": fact.company_id,
                 "source_id": f"sec-companyfacts-{fact.company_id}",
                 "source_url": (

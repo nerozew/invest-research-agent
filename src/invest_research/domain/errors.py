@@ -33,6 +33,12 @@ class ErrorCode(StrEnum):
     # 例如 DeepSeek 普通 Chat Completion 返回 HTTP 400 "This response_format type
     # is unavailable now"。归类为不可重试：重试同样会失败，等待配置/适配修复。
     STRUCTURED_OUTPUT_UNSUPPORTED = "STRUCTURED_OUTPUT_UNSUPPORTED"
+    # P06-11C：LLM 选中的 fact_ref 在预取事实集中找不到唯一匹配（非网络错误，禁止猜测）。
+    FACT_REFERENCE_UNRESOLVED = "FACT_REFERENCE_UNRESOLVED"
+    # P06-11C：fact_ref 在预取事实集中存在多重匹配（歧义，禁止猜测取其一）。
+    FACT_REFERENCE_AMBIGUOUS = "FACT_REFERENCE_AMBIGUOUS"
+    # P06-11C：LLM 试图改写事实来源/数值（如草稿携带事实内容与原始事实不一致）。
+    FACT_PROVENANCE_MISMATCH = "FACT_PROVENANCE_MISMATCH"
     INTERNAL_BUG = "INTERNAL_BUG"
 
 
@@ -68,6 +74,10 @@ _NON_RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         ErrorCode.QUALITY_GATE_FAILED,
         # P06-11B：供应商不支持结构化输出 response_format → 立即终态失败（不可重试）。
         ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED,
+        # P06-11C：fact_ref 未解决/歧义/来源不一致是确定性本地问题，重试同样失败。
+        ErrorCode.FACT_REFERENCE_UNRESOLVED,
+        ErrorCode.FACT_REFERENCE_AMBIGUOUS,
+        ErrorCode.FACT_PROVENANCE_MISMATCH,
         ErrorCode.INTERNAL_BUG,
     }
 )

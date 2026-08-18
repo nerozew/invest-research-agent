@@ -440,6 +440,66 @@ class FinancialAnalysisPack(BaseModel):
         return self
 
 
+class AnalysisSelectionDraft(BaseModel):
+    """财报分析 Agent 的“选择草稿”（P06-11C，仅限 JSON 文本本地校验路径）。
+
+    设计动机（LLM 选择，代码组装）：
+    - 不再要求 LLM 重新抄写完整 ``FinancialFact``（嵌套契约容易被模型丢弃，
+      如 DeepSeek JSON 文本路径丢 ``company_id`` → ``facts.0.company_id: Field
+      required``）；
+    - LLM 只返回一组 ``selected_fact_refs`` 引用，真正的 ``FinancialFact``
+      由 ``AnalysisPackAssembler`` 从原始可信预取事实中确定性取回；
+    - ``metric_results`` 仅承载确定性的指标计算引用（本任务范围：若无法安全捕获
+      FinancialCalculator 返回值，保持空并由 assembler 输出 partial 说明限制）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(min_length=1)  # 例如 "analysis_selection_draft_v1"
+    schema_version: str = Field(default="analysis_selection_draft_v1")
+    period_end: date
+    # LLM 选中的事实引用（稳定短 hash，由 build_fact_ref 确定性生成）。
+    # 允许为空：completeness=unavailable 时合法；重复引用由 assembler 幂等去重。
+    selected_fact_refs: list[str] = Field(default_factory=list)
+    # 确定性指标计算引用（本任务范围可能为空；非空时必须携带完整结果或在组装时丢弃）。
+    metric_results: list[MetricResult] = Field(default_factory=list)
+    analysis_notes: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    completeness: AnalysisCompleteness = AnalysisCompleteness.PARTIAL
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_selection_draft(self) -> "AnalysisSelectionDraft":
+        """跨字段校验：状态与内容一致（对齐 FinancialAnalysisPack v2 语义）。
+
+        - unavailable：selected_fact_refs/metric_results 必须为空，且必须有
+          unavailable_reason；
+        - partial：必须提供 limitations；
+        - complete：selected_fact_refs 或 metric_results 至少一项非空，
+          unavailable_reason 为空。
+        """
+        if self.completeness == AnalysisCompleteness.COMPLETE:
+            if not self.selected_fact_refs and not self.metric_results:
+                raise ValueError(
+                    "completeness=complete 时 selected_fact_refs 或 metric_results 至少一项非空"
+                )
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=complete 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.PARTIAL:
+            if not self.limitations:
+                raise ValueError("completeness=partial 时必须提供 limitations")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=partial 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.UNAVAILABLE:
+            if not self.unavailable_reason:
+                raise ValueError("completeness=unavailable 时必须提供 unavailable_reason")
+            if self.selected_fact_refs or self.metric_results:
+                raise ValueError(
+                    "completeness=unavailable 时 selected_fact_refs/metric_results 必须为空"
+                )
+        return self
+
+
 class ReportDraft(BaseModel):
     """报告撰写 Agent 的输出（workflow 步骤 05）。"""
 

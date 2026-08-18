@@ -260,3 +260,48 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
   5. Jaeger 搜索含 `llm.request` span，属性仅含 llm.provider/model/role/status/duration_s/tokens_total；
   6. Grafana LLM Row 中 Token 1h/24h 面板有非空数据、P50/P95/P99 有曲线、筛选变量可用；
   7. 完成后把结果追加到 docs/18 或本文件（不得自行 push）。
+
+## P06-11C: 修复 DeepSeek 普通 JSON 路径的嵌套 FinancialFact 契约丢失（DONE, not pushed）
+
+- **根因**：P06-11B 让 DeepSeek 走"普通 JSON → PackBoundary 本地校验"，但任务描述仍要求
+  模型输出完整 `FinancialAnalysisPack`（含嵌套 FinancialFact）。JSON 文本路径下模型没有
+  获得完整嵌套契约（尤其必填 `company_id`/`source_id`），重抄 JSON 时丢字段 →
+  `facts[0].company_id: Field required`。审计确认预取 `_serialize_facts` 已含 company_id
+  （CIK）与规范化 source_id，因此是 **LLM 重抄丢字段**，非 SEC 数据缺失。
+- **公司身份语义**：`FinancialFact.company_id` = SEC CIK（10 位数字，来自
+  `SECCompanyFactsTool._to_fact(company_id=cik)`）；未更名、未改数据库结构。
+- **修复（LLM 选择，代码组装）**：
+  - `domain/models.py`：新增 `AnalysisSelectionDraft`（只含 selected_fact_refs /
+    metric_results / notes / limitations / completeness / unavailable_reason）。
+  - `application/analysis_assembler.py`（新增）：`build_fact_ref`（sha256 稳定短 hash，
+    payload=company/concept/period/unit/accession/form_type/fiscal_period，**不含 source_id**
+    ——两侧表示不一致会导致 FACT_REFERENCE_UNRESOLVED）、`AnalysisPackAssembler`（ref→原始
+    FinancialFact 唯一匹配；未解析→FACT_REFERENCE_UNRESOLVED、多重→FACT_REFERENCE_AMBIGUOUS、
+    公司身份不一致→FACT_PROVENANCE_MISMATCH；重复 ref 幂等去重）、`parse_fact_records`。
+  - `infrastructure/real_tools.py`：`_serialize_facts` 每条事实追加 `fact_ref`（LLM 输入契约）。
+  - `agents/analysis_task.py`：DeepSeek/generic 提示词要求只输出 AnalysisSelectionDraft，
+    禁止抄写 FinancialFact、禁止修改/猜测 SEC 数值。
+  - `agents/crew_factory.py`：Writer 的 `_task_output_loader` 注入 `analysis_facts`，
+    检测 Draft 时现场组装为 FinancialAnalysisPack（Writer 只读组装后的 pack）。
+  - `infrastructure/flow_wiring.py`：`_parse_prefetched_facts` 从 prefetch JSON 还原
+    原始事实；`_extract_analysis_pack` 检测 `selected_fact_refs` → Draft 组装，
+    失败转 LiveFlowExecutionError（稳定 error_code，failure_stage=04_analysis）。
+  - `domain/errors.py`：新增 `FACT_REFERENCE_UNRESOLVED`/`FACT_REFERENCE_AMBIGUOUS`/
+    `FACT_PROVENANCE_MISMATCH`（均不可重试）。
+  - `prompts/analysis_prompt_v2.md`：输出契约改为"LLM 选择，代码组装"（AnalysisSelectionDraft），
+    保留 `analysis_pack_v2` 引用。
+- **验证**：`tests/test_p06_11c_analysis_assembler.py` 26 用例通过（真实 SEC fixture 含
+  company_id/source_id、model 只返回 fact_ref、assembler 恢复完整 FinancialFact、
+  最终 pack 字段与原始输入一致、LLM 无法改写 value/unit/period、未解析/多重匹配/来源不一致
+  稳定失败、重复 ref 幂等去重、unavailable+空 refs 合法、partial 必须 limitations、
+  complete 必有 facts/metrics、company_id 仍必填、缺 company_id 完整 fact 不静默通过、
+  DeepSeek 不绑 output_pydantic、Qwen 原路径不受影响、Writer loader 读组装后 pack、
+  错误不泄露 API Key、无常量补 company_id、端到端离线契约）；
+  回归 219 passed（p06-11b / pack_boundary / pack_contracts / analysis_task /
+  analysis_completeness / flow_wiring / writer_task / research_crew /
+  final_report_artifacts / real_tools / models / prompts）；Ruff 全绿；
+  `mypy src` 117 个源文件全绿。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；未 push；未启动 Docker；
+  未运行 100 次基准；未进入下一任务。
+- **下一候选任务**：受控 live 验证 DeepSeek 输出 Draft 能被本地 Assembler 组装；
+  随后 `P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。

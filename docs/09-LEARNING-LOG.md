@@ -2483,3 +2483,50 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 ### 下一任务建议
 
 - 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Analysis/Writer 的 JSON 文本输出能被本地 PackBoundary 正常解析；再评估 P06-12（README 演示）或 Checkpoint 升级。
+
+## P06-11C: 修复 DeepSeek 普通 JSON 路径的嵌套 FinancialFact 契约丢失（✅ 已完成 2026-08-18）
+
+**任务目标**：P06-11B 解决了 DeepSeek response_format 400，但 live 仍报 `facts.0.company_id: Field required`。本任务把"LLM 重抄完整 FinancialFact"改为"LLM 只输出 selected_fact_refs → 本地 AnalysisPackAssembler 确定性组装"，保证 company_id/source_id/value/unit/period 全部来自原始预取事实。不做任何放宽容忍（company_id 保持必填）、不额外调用 LLM 修复、不重新启用 output_pydantic。
+
+**根因**：P06-11B 让 DeepSeek 走"普通 JSON → PackBoundary 本地校验"，但任务描述仍要求模型输出完整 `FinancialAnalysisPack`（含嵌套 FinancialFact）。DeepSeek 的 JSON 文本路径没有获得完整嵌套契约（尤其 `company_id`/`source_id` 必填字段），模型在重新组织 JSON 时丢字段 → `facts[0]` 缺 company_id。审计确认：预取 `_serialize_facts` 已包含 company_id（CIK）与规范化 source_id，因此这是 **LLM 重抄 JSON 时丢字段**，不是 SEC 数据缺失。
+
+**三段路径区分**：
+1. **普通 Chat Completion / tool calling**：DeepSeek 支持，SEC/Serper/FinancialCalculator 正常；
+2. **CrewAI 原生 Pydantic 转换**：`task.py:768 _export_output → convert_to_model → Converter.to_pydantic → llm.call(response_model=...)` → OpenAI SDK `beta.chat.completions.parse` + json_schema response_format → DeepSeek 普通端点 HTTP 400；
+3. **P06-11B JSON 文本 + 本地校验**：避开 400，但要求模型抄写完整嵌套 FinancialFact → 模型丢 `company_id`。
+
+**company_id 语义**：`FinancialFact.company_id` 在领域模型中就是 SEC CIK（10 位数字，来自 `SECCompanyFactsTool._to_fact(company_id=cik)`）。未更名、未改数据库结构。
+
+**修改文件**：
+- `domain/models.py`：新增 `AnalysisSelectionDraft`（只含 selected_fact_refs/metric_results/notes/limitations/completeness/unavailable_reason，完整校验对齐 FinancialAnalysisPack v2 语义）。
+- `application/analysis_assembler.py`（新增）：`build_fact_ref`（sha256 稳定短 hash，payload=company/concept/period/unit/accession/form_type/fiscal_period）、`AnalysisPackAssembler`（ref→原始 FinancialFact 唯一匹配；未解析→FACT_REFERENCE_UNRESOLVED；多重→FACT_REFERENCE_AMBIGUOUS；company_identity_hint 不一致→FACT_PROVENANCE_MISMATCH；重复 ref 幂等去重）、`parse_fact_records`（summary JSON→FinancialFact）。
+- `infrastructure/real_tools.py`：`_serialize_facts` 每条事实追加 `fact_ref`（LLM 输入契约）。
+- `agents/analysis_task.py`：DeepSeek/generic 提示词追加 `_JSON_TEXT_SELECTION_DRAFT_SCHEMA`，明确只输出 AnalysisSelectionDraft、禁止抄写 FinancialFact、禁止修改 SEC 数值。
+- `agents/crew_factory.py`：Writer 的 `_task_output_loader` 注入 `analysis_facts`，检测到 Draft 时现场组装为 FinancialAnalysisPack（Writer 只读组装后的 pack）。
+- `infrastructure/flow_wiring.py`：`_parse_prefetched_facts` 从 prefetch JSON 还原原始事实；`_extract_analysis_pack` 检测 `selected_fact_refs` → Draft 组装，失败转 LiveFlowExecutionError（稳定 error_code，failure_stage=04_analysis）；crew_factory 传递 analysis_facts。
+- `domain/errors.py`：新增 `FACT_REFERENCE_UNRESOLVED`/`FACT_REFERENCE_AMBIGUOUS`/`FACT_PROVENANCE_MISMATCH`（均不可重试）。
+- `prompts/analysis_prompt_v2.md`：输出契约改为"LLM 选择，代码组装"（AnalysisSelectionDraft），保留 `analysis_pack_v2` 引用。
+- `tests/test_p06_11c_analysis_assembler.py`（新增 26 用例，覆盖 20 项契约）。
+
+**fact_ref 关键设计决策**：`build_fact_ref` 的 payload **不包含 source_id**——SEC 原始工具生成的 `FinancialFact.source_id=""`（占位），而 `_serialize_facts` 展示给 LLM 的 summary 把它规范化为 `sec-companyfacts-<cik>`；若 fact_ref 依赖 source_id，LLM 拿到的 ref 与 assembler 重建的 ref 不一致 → 全部 FACT_REFERENCE_UNRESOLVED。另外相同期间可能出现 10-Q 与 10-Q/A 两条事实（同 period/concept/value），必须用 form_type/fiscal_period 区分，否则 fact_ref 碰撞 → 多重匹配。
+
+### 3 个知识点
+
+1. **"LLM 选择，代码组装"是嵌套结构化输出的正确姿势**：让模型输出完整嵌套 FinancialFact 等于把必填字段契约交给模型记忆；DeepSeek JSON 文本路径没有远程 schema 约束，丢 `company_id` 是必然结果。改为只让模型选 fact_ref，真正的 FinancialFact 由本地确定性代码从原始事实取回，模型连改写 value/unit/period 的机会都没有。
+2. **确定性 fact_ref 必须基于"输入侧与组装侧完全一致"的字段**：source_id 在原始工具（空占位）与 summary 展示（规范化）两侧不一致，若纳入 hash 会导致 ref 永远无法解析；company/concept/period/unit/accession/form_type/fiscal_period 在两侧一致，足以唯一标识 SEC 事实。
+3. **P06-11B 只解决了"400"，没解决"嵌套契约丢失"**：两类问题层级不同——前者是供应商能力（response_format 不支持），后者是提示词/组装契约（模型重抄嵌套对象丢字段）。测试必须覆盖真实嵌套 field（facts[0].company_id），不能只测空 facts。
+
+### 检查问题（请用自己的话回答）
+
+为什么 `build_fact_ref` 必须把 `source_id` 排除在 hash payload 之外？提示：`SECCompanyFactsTool._to_fact` 生成的 `FinancialFact.source_id` 与 `_serialize_facts` 展示给 LLM 的 `source_id` 各是什么值，如果纳入 hash 会产生什么错误码？
+
+### 已知限制与风险
+
+- DeepSeek/generic 路径的 `metric_results` 未做跨模块捕获（FinancialCalculator 返回值仍由模型在 Draft 中携带）；若无法安全组装指标，assembler 输出 partial 并说明限制，不扩大本任务重写计算工具。
+- 未执行真实 DeepSeek/Qwen 付费调用；真实 live 行为需受控 smoke 验证。
+- `parse_fact_records` 只接受 company_id 存在且 taxonomy 默认 us-gaap 的 record；脏数据导致整条 record 被跳过（不静默伪造）。
+- 未 push；未启动 Docker；未运行 100 次基准；未进入下一任务。
+
+### 下一任务建议
+
+- 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Analysis 输出 Draft 能被本地 Assembler 正常组装；随后评估 P06-12（README 演示）。

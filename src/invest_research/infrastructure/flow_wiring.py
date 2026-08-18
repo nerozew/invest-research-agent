@@ -44,12 +44,20 @@ from invest_research.agents.crew_factory import build_live_research_crew, build_
 from invest_research.agents.llm_factory import AnyLLM, LLMConfig
 from invest_research.agents.pack_parsing import (
     PackBoundary,
+    extract_candidate,
+)
+from invest_research.application.analysis_assembler import (
+    AnalysisAssemblerError,
+    AnalysisPackAssembler,
+    parse_fact_records,
 )
 from invest_research.application.progress import ProgressSink
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
+    AnalysisSelectionDraft,
     CompanyIdentity,
     FinancialAnalysisPack,
+    FinancialFact,
     ReportDraft,
     ResearchPack,
     ResearchRequest,
@@ -343,7 +351,9 @@ class LiveResearchFlowRunner:
         self._crew_factory: Callable[..., Crew] = (
             crew_factory
             if crew_factory is not None
-            else lambda cfg, rt: build_live_research_crew(cfg, rt, profile=self._current_profile)
+            else lambda cfg, rt: build_live_research_crew(
+                cfg, rt, profile=self._current_profile, analysis_facts=self._analysis_facts
+            )
         )
         # 外部调用统计（P05-13）：真实工具经 build_research_tools 写入该 dict，
         # runner 在生成 manifest 时并入 evidence（不泄露任何密钥）。
@@ -358,6 +368,8 @@ class LiveResearchFlowRunner:
         self._budget = budget
         # 本次运行的预取结果（供任务注入与结构化收尾复用）
         self._prefetch_result: PrefetchResult | None = None
+        # P06-11C：本次预取的原始可信 FinancialFact 集合（供选择草稿现场组装）。
+        self._analysis_facts: list[FinancialFact] = []
         # 结构化收尾只允许一次
         self._finalize_used = False
         # P06-06B：实时进度端口（Worker 在 run 前注入；不注入则静默）
@@ -371,7 +383,9 @@ class LiveResearchFlowRunner:
 
     def assemble_crew(self, fakes: dict[str, AnyLLM]) -> Crew:
         """用注入的 fake LLM 组装三 Agent 顺序 Crew（离线契约验证，不联网）。"""
-        return build_research_crew(self._config, fakes)
+        return build_research_crew(
+            self._config, fakes, analysis_facts=self._analysis_facts
+        )
 
     # ------------------------------------------------------------------
     # P06-06B：进度标记辅助（写入失败不中断任务）
@@ -449,6 +463,9 @@ class LiveResearchFlowRunner:
                 # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
                 prefetch_result = None
         self._prefetch_result = prefetch_result
+        # P06-11C：把预取 financial_facts_summary（JSON 文本）还原为原始可信
+        # FinancialFact 集合，供选择草稿现场组装（见 _extract_packs）。
+        self._analysis_facts = self._parse_prefetched_facts(prefetch_result)
         self._mark("01_company_resolve", "succeeded")
 
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
@@ -832,11 +849,37 @@ class LiveResearchFlowRunner:
         except Exception:  # noqa: BLE001 - 指标写入尽力而为
             _LOGGER.warning("agent/llm metrics recording skipped")
 
+    @staticmethod
+    def _parse_prefetched_facts(prefetch_result: PrefetchResult | None) -> list[FinancialFact]:
+        """从预取 financial_facts_summary JSON 文本还原原始可信 FinancialFact 集合。
+
+        ``_serialize_facts`` 输出结构：``{"ok": true, "mapping_version": ...,
+        "count": ..., "facts": [...]}``。这里剥离包装取 ``facts`` 数组，
+        交给 ``parse_fact_records`` 反序列化为 FinancialFact。
+        """
+        if prefetch_result is None or prefetch_result.financial_facts_summary is None:
+            return []
+        try:
+            payload = json.loads(prefetch_result.financial_facts_summary)
+        except (TypeError, ValueError):
+            return []
+        records = payload.get("facts", []) if isinstance(payload, dict) else []
+        if not isinstance(records, list):
+            return []
+        try:
+            return parse_fact_records(records)
+        except (KeyError, TypeError, ValueError):
+            return []
+
     def _extract_packs(self, result: Any, request: ResearchRequest) -> ResearchFlowState:
         """从 Crew 结果解析三个 pack 到 state。
 
         - CrewAI 1.6.1 的 ``CrewOutput`` 通过 ``tasks_output`` 按顺序暴露各 Task 输出；
         - 兼容 ``result.output``/``result.json_dict`` 兜底解析；
+        - P06-11C：Analysis 输出若是 ``AnalysisSelectionDraft``（含 selected_fact_refs），
+          先经 ``AnalysisPackAssembler`` 确定性组装为完整 ``FinancialAnalysisPack``；
+          若草稿组装失败（ref 未解析/歧义/来源不一致）→ LiveFlowExecutionError
+          （稳定错误码，failure_stage=04_analysis），不降级。
         - 任一 pack 缺失视为不可恢复失败（不降级）。
         """
         state = ResearchFlowState(request=request)
@@ -850,7 +893,7 @@ class LiveResearchFlowRunner:
         if len(outputs) >= 1:
             state.research_pack = self._extract_research_pack(outputs[0], request)
         if len(outputs) >= 2:
-            state.analysis_pack = _to_packed(outputs[1], FinancialAnalysisPack)
+            state.analysis_pack = self._extract_analysis_pack(outputs[1])
             # P06-09C：Analysis pack 完整性分布（尽力而为）
             try:
                 from invest_research.infrastructure.observability.metrics_events import (
@@ -868,6 +911,32 @@ class LiveResearchFlowRunner:
         if state.research_pack is None or state.analysis_pack is None or state.report_draft is None:
             raise LiveFlowExecutionError("Crew 输出不完整：需要 research/analysis/writer 三个 pack")
         return state
+
+    def _extract_analysis_pack(self, obj: Any) -> FinancialAnalysisPack:
+        """解析 Analysis 输出；P06-11C：先检测 SelectionDraft，再走 PackBoundary。
+
+        - 输出含 ``selected_fact_refs`` 键（AnalysisSelectionDraft）→ 现场组装；
+        - 否则（Qwen 原生 FinancialAnalysisPack / 旧路径完整 facts）→ 原 _to_packed。
+        """
+        candidate = extract_candidate(obj)
+        if isinstance(candidate, dict) and "selected_fact_refs" in candidate:
+            try:
+                draft = AnalysisSelectionDraft.model_validate(candidate)
+            except Exception as exc:
+                raise LiveFlowExecutionError(
+                    "Analysis 输出不是合法 AnalysisSelectionDraft",
+                    error_code="SCHEMA_INVALID",
+                    failure_stage="04_analysis",
+                ) from exc
+            try:
+                return AnalysisPackAssembler().assemble(draft, self._analysis_facts)
+            except AnalysisAssemblerError as exc:
+                raise LiveFlowExecutionError(
+                    str(exc),
+                    error_code=exc.error_code,
+                    failure_stage="04_analysis",
+                ) from exc
+        return _to_packed(obj, FinancialAnalysisPack)
 
     def _extract_research_pack(self, obj: Any, request: ResearchRequest) -> ResearchPack:
         """解析 Research 输出；失败时尝试一次有界结构化收尾（不伪造来源）。"""

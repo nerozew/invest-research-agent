@@ -191,6 +191,34 @@ _JSON_TEXT_INSTRUCTION = (
     "4. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
 )
 
+# P06-11C：DeepSeek/generic 本地校验路径的选择草稿契约说明。
+# 模型只返回 selected_fact_refs，不抄写完整 FinancialFact（嵌套契约容易丢失）；
+# 真正的 FinancialFact 由本地 AnalysisPackAssembler 从预取事实中确定性取回。
+_JSON_TEXT_SELECTION_DRAFT_SCHEMA = """\
+\n
+【P06-11C 输出契约：只输出 AnalysisSelectionDraft（选择草稿）】
+你不需要抄写完整 FinancialFact。在本次输入的 financial_facts JSON 中，
+每条事实都已带一个稳定的 "fact_ref" 字段。你只需要在最终 JSON 里引用这些 fact_ref：
+{
+  "version": "analysis_selection_draft_v1",
+  "schema_version": "analysis_selection_draft_v1",
+  "period_end": "<分析期间截止日，必须 ≤ as_of_date，格式 YYYY-MM-DD>",
+  "selected_fact_refs": ["fr_<12位hex>", "..."],
+  "metric_results": [],
+  "analysis_notes": "<可选：趋势与异常解释>",
+  "limitations": ["<completeness=partial 时必填：缺失数据及原因>"],
+  "completeness": "complete|partial|unavailable",
+  "unavailable_reason": "<completeness=unavailable 时必填>"
+}
+硬性规则：
+1. 禁止输出完整 FinancialFact（禁止重新抄写 company_id/source_id/concept/value/unit/period）；
+2. selected_fact_refs 只能从本次输入的 financial_facts JSON 中复制，禁止修改、伪造或猜测；
+3. 禁止修改、抄写或猜测任何 SEC 数值（value/unit/period 由本地代码从原始事实取回）；
+4. 工具参数（FinancialFactQuery/FinancialCalculator 的 Action/Action Input）不能作为最终答案；
+5. completeness=unavailable 时 selected_fact_refs 必须为 [] 并给出 unavailable_reason；
+6. completeness=partial 时必须给出 limitations。
+"""
+
 
 def build_analysis_agent(
     config: LLMConfig,
@@ -266,11 +294,16 @@ def build_analysis_task(
     ):
         # P06-11B：deepseek/generic 走 JSON 文本 + 本地校验路径。
         # 提示词明确要求只输出 JSON object；不得触发 CrewAI 远程 Pydantic parse。
-        description = description + _JSON_TEXT_INSTRUCTION
+        # P06-11C：要求模型只输出 AnalysisSelectionDraft（selected_fact_refs），
+        # 不输出完整 FinancialFact；由本地 AnalysisPackAssembler 确定性组装。
+        description = (
+            description + _JSON_TEXT_INSTRUCTION + _JSON_TEXT_SELECTION_DRAFT_SCHEMA
+        )
         return Task(
             description=description,
             expected_output=(
-                "一个可被 FinancialAnalysisPack 校验通过的 JSON object（非自由文本）"
+                "一个可被 AnalysisSelectionDraft 校验通过的 JSON object（非自由文本）。"
+                "只包含 selected_fact_refs 引用，不包含完整 FinancialFact。"
             ),
             agent=task_agent,
             # 不绑定 output_pydantic：避免 CrewAI 在输出转换阶段调用
