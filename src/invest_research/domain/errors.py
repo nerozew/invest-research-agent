@@ -23,6 +23,10 @@ class ErrorCode(StrEnum):
     TIMEOUT = "TIMEOUT"
     DOCUMENT_UNSUPPORTED = "DOCUMENT_UNSUPPORTED"
     SCHEMA_INVALID = "SCHEMA_INVALID"
+    # P06-11-fix：Agent 输出是工具调用过程/参数等非最终 Pack 结构（稳定分类，不归 INTERNAL_BUG）。
+    NOT_A_PACK = "NOT_A_PACK"
+    # P06-11-fix：Agent 迭代预算耗尽（CrewAI 会把最后一次工具输出当最终答案）。
+    ITERATION_LIMIT = "ITERATION_LIMIT"
     DATA_AMBIGUOUS = "DATA_AMBIGUOUS"
     QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
     INTERNAL_BUG = "INTERNAL_BUG"
@@ -52,6 +56,10 @@ _NON_RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         ErrorCode.COMPANY_AMBIGUOUS,
         ErrorCode.AUTH_ERROR,
         ErrorCode.DOCUMENT_UNSUPPORTED,
+        # 工具过程/参数被当最终 Pack、迭代预算耗尽：不是可重试的上游干扰，
+        # 而是 Agent 未能产出最终答案（重试同样会失败，等待修复配置/提示词）。
+        ErrorCode.NOT_A_PACK,
+        ErrorCode.ITERATION_LIMIT,
         ErrorCode.DATA_AMBIGUOUS,
         ErrorCode.QUALITY_GATE_FAILED,
         ErrorCode.INTERNAL_BUG,

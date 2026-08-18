@@ -63,15 +63,31 @@ def classify_failure(exc: Exception, *, stage: str | None = None) -> FailureInfo
     7. 输入校验 / ValueError 且含"不能为空"/"必须" → INPUT_INVALID；
     8. 其它 → INTERNAL_BUG（兜底，绝不隐藏失败）。
     """
-    # PackParseError 通过鸭子类型识别（error_code 属性），避免 application 依赖 agents。
-    if getattr(exc, "error_code", None) == ErrorCode.SCHEMA_INVALID.value:
+    # PackParseError / LiveFlowExecutionError 等通过鸭子类型识别（error_code 属性）。
+    # P06-11-fix：稳定边界错误码（NOT_A_PACK / SCHEMA_INVALID / ITERATION_LIMIT 等）
+    # 由抛错方给出，分类器直接透传，不落到笼统 INTERNAL_BUG。
+    attached_code = getattr(exc, "error_code", None)
+    if attached_code is not None:
+        try:
+            known = ErrorCode(attached_code)
+        except ValueError:
+            known = None
+        if known is not None:
+            return FailureInfo(
+                error_code=known.value,
+                error_message=sanitize_message(str(exc)),
+                failure_stage=stage,
+            )
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+
+    # P06-11-fix：CrewAI 迭代预算耗尽（force_final_answer 提示后仍拿不到最终答案）。
+    if "force_final_answer" in text or "maximum iterations reached" in text:
         return FailureInfo(
-            error_code=ErrorCode.SCHEMA_INVALID.value,
+            error_code=ErrorCode.ITERATION_LIMIT.value,
             error_message=sanitize_message(str(exc)),
             failure_stage=stage,
         )
-
-    text = f"{type(exc).__name__}: {exc}".lower()
 
     if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text:
         return FailureInfo(
