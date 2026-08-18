@@ -500,6 +500,36 @@ class AnalysisSelectionDraft(BaseModel):
         return self
 
 
+class ResearchSelectionDraft(BaseModel):
+    """信息搜集 Agent 的“选择草稿”（P06-11E，仅限 JSON 文本本地校验路径）。
+
+    设计动机（与 AnalysisSelectionDraft 对称）：
+    - LLM 不重新抄写完整 ``Source`` 契约，只返回一组 ``selected_source_urls``；
+    - 真正的 ``Source`` 由 ``ResearchPackAssembler`` 从可信预取/缓存
+      SEC 申报结果中确定性取回；
+    - 防止 DeepSeek JSON 文本路径丢失 ``canonical_url``/``source_type`` 等
+      必填字段（嵌套契约丢失）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(min_length=1)  # 例如 "research_selection_draft_v1"
+    schema_version: str = Field(default="research_selection_draft_v1")
+    as_of_date: date
+    # LLM 选中的来源 URL（从 prefetch 提供的可信来源集合中复制，禁止发明）。
+    # 允许为空（无来源时不得伪造 ResearchPack）。
+    selected_source_urls: list[str] = Field(default_factory=list)
+    coverage_notes: str | None = None
+    conflicts: list[str] = Field(default_factory=list)
+
+    @field_validator("selected_source_urls")
+    @classmethod
+    def _strip_urls(cls, value: list[str]) -> list[str]:
+        """逐项清理首尾空白并过滤空项（不修改 URL 内容）。"""
+        cleaned = [u.strip() for u in value if u and u.strip()]
+        return cleaned
+
+
 class ReportDraft(BaseModel):
     """报告撰写 Agent 的输出（workflow 步骤 05）。"""
 

@@ -41,12 +41,20 @@ from typing import Any, Callable, TypeVar
 from crewai.crew import Crew
 from pydantic import BaseModel
 
+from invest_research.agents.analysis_task import build_analysis_task
 from invest_research.agents.crew_factory import build_live_research_crew, build_research_crew
-from invest_research.agents.llm_factory import AnyLLM, LLMConfig
+from invest_research.agents.llm_factory import (
+    AnyLLM,
+    LLMConfig,
+    StructuredOutputMode,
+    structured_output_mode,
+)
 from invest_research.agents.pack_parsing import (
     PackBoundary,
     extract_candidate,
 )
+from invest_research.agents.research_task import build_research_task
+from invest_research.agents.writer_task import ArtifactLoader, build_writer_task
 from invest_research.application.analysis_assembler import (
     AnalysisAssemblerError,
     AnalysisPackAssembler,
@@ -57,6 +65,11 @@ from invest_research.application.report_draft_assembler import (
     ReportAssemblerError,
     ReportDraftAssembler,
 )
+from invest_research.application.research_assembler import (
+    ResearchAssemblerError,
+    ResearchPackAssembler,
+)
+from invest_research.application.structured_finalizer import FinalizerError
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
     AnalysisSelectionDraft,
@@ -66,6 +79,7 @@ from invest_research.domain.models import (
     ReportDraft,
     ResearchPack,
     ResearchRequest,
+    ResearchSelectionDraft,
     Source,
     SourceType,
 )
@@ -74,6 +88,9 @@ from invest_research.flows.manifest import build_run_manifest
 from invest_research.flows.quality import run_quality_gate
 from invest_research.flows.reflection import ReflectionController
 from invest_research.flows.state import ResearchFlowState
+from invest_research.infrastructure.finalizers.deepseek_json_object_finalizer import (
+    DeepSeekJsonObjectFinalizer,
+)
 from invest_research.infrastructure.live_resources import FlowModeError
 from invest_research.infrastructure.performance import PerformanceRecorder, extract_token_usage
 from invest_research.infrastructure.prefetch import PrefetchResult, prefetch_summary_text
@@ -336,6 +353,32 @@ def _normalize_research_sources(research_pack: ResearchPack) -> ResearchPack:
     return research_pack.model_copy(update={"sources": sources})
 
 
+def _staged_artifact_loader(state: ResearchFlowState) -> ArtifactLoader:
+    """P06-11E：分阶段 Writer 的 ArtifactReader loader（现场读取已组装 pack）。
+
+    - ``research_pack`` / ``analysis_pack`` 从当前 state 读取（分阶段路径先执行
+      Research/Analysis，Writer 阶段运行时上游 pack 已就绪）；
+    - 保证 Writer 只读到最终组装后的 pack，绝不读到未经组装的草稿。
+    """
+
+    def loader(artifact_key: str) -> dict[str, Any] | None:
+        if artifact_key == "research_pack":
+            return (
+                state.research_pack.model_dump(mode="json")
+                if state.research_pack is not None
+                else None
+            )
+        if artifact_key == "analysis_pack":
+            return (
+                state.analysis_pack.model_dump(mode="json")
+                if state.analysis_pack is not None
+                else None
+            )
+        return None
+
+    return loader
+
+
 class LiveResearchFlowRunner:
     """live 模式的 FlowRunner 契约实现（真实 Crew + 质量门禁 + 受控反思 + 进度）。
 
@@ -400,6 +443,9 @@ class LiveResearchFlowRunner:
         self._analysis_facts: list[FinancialFact] = []
         # 结构化收尾只允许一次
         self._finalize_used = False
+        # P06-11E：是否注入 fake crew_factory（测试路径）；None 时生产走分阶段执行。
+        # 注意不能直接用 self._crew_factory is not None 判断——__init__ 总会赋 lambda。
+        self._staged = crew_factory is None
         # P06-06B：实时进度端口（Worker 在 run 前注入；不注入则静默）
         self.progress: ProgressSink | None = None
         self.job_id: uuid.UUID | None = None
@@ -493,6 +539,11 @@ class LiveResearchFlowRunner:
     def _run_live_impl(self, request: ResearchRequest, ctx: _RunContext) -> ResearchFlowState:
         """真实执行：Crew → 解析 → 质量门禁 → 受控反思 → manifest。
 
+        P06-11E：生产路径（未注入 crew_factory）拆分为三阶段执行——
+        Research → Finalize/Validate/Assemble → Analysis → Writer，前序成功后才执行
+        下一步（Research 失败不执行 Analysis；Analysis 失败不执行 Writer）。
+        注入 ``crew_factory``（测试 fake crew）时保持一次 kickoff 兼容路径。
+
         严格保持顺序；任一不可恢复失败抛 ``LiveFlowExecutionError``
         （绝不偷偷调用 fake）。
         """
@@ -520,12 +571,65 @@ class LiveResearchFlowRunner:
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
         inputs = self._build_crew_inputs(request, prefetch_result)
 
-        # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）。
-        #    P06-06A：按任务档位解析后的有效配置（fast 已关闭思考模式）。
+        # P06-11E：拆分执行阶段。生产路径走三阶段短路；测试注入 fake crew 走兼容。
+        if not self._staged:
+            state, crew, result = self._run_legacy_crew(request, ctx, inputs)
+            # 兼容路径：kickoff 后记录 Agent 指标 + 性能（分阶段路径在各阶段内已记录）
+            self._record_agent_metrics(crew, result)
+            self._record_performance(crew, result)
+        else:
+            state = self._run_staged(request, ctx)
+            crew, result = None, None
+
+        # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界）
+        self._mark("06_quality_gate", "running")
+        state.quality_report = run_quality_gate(state)
+        self._mark("06_quality_gate", "succeeded")
+
+        # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
+        reflection = self._run_reflection(state)
+
+        # 5. 采集性能并生成 RunManifest（质量门禁通过才 published）
+        performance = self._recorder.snapshot()
+        # P06-06B：07_manifest 边界
+        self._mark("07_manifest", "running")
+        state.run_manifest = build_run_manifest(
+            state, self._config, started_at=started_at, performance=performance
+        )
+        # 合并反思审计记录（不丢失受控反思决策）
+        state.run_manifest["reflection"] = reflection
+        # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）。
+        # stats 为空时（Agent 直接用预取结果、未调工具）从性能记录器补全真实调用。
+        invocation: dict[str, int] = dict(self._stats)
+        if not invocation:
+            for tool_name, metrics in self._recorder.snapshot()["tools"].items():
+                invocation[f"{tool_name}_calls"] = int(metrics["calls"])
+        if invocation:
+            state.run_manifest["evidence"] = {"invocation_summary": invocation}
+        self._mark("07_manifest", "succeeded")
+
+        # 6. 保存中间产物（确定性落盘）
+        self._persist_intermediates(request, state)
+
+        return state
+
+    # ------------------------------------------------------------------
+    # P06-11E：执行阶段拆分（Research → Analysis → Writer 三阶段短路）
+    # ------------------------------------------------------------------
+
+    def _run_legacy_crew(
+        self,
+        request: ResearchRequest,
+        ctx: _RunContext,
+        inputs: dict[str, str],
+    ) -> tuple[ResearchFlowState, Any, Any]:
+        """兼容路径：一次 kickoff 运行三 Agent Crew（测试注入 fake crew 时使用）。
+
+        保留注入 ``crew_factory`` 的离线契约验证（P05-12B 及既有测试），
+        不改变 kickoff 后解析/落盘逻辑。
+        """
+        # 1. 运行三 Agent 顺序 Crew（注入 fake crew）。
         crew = self._crew_factory(ctx.effective_config, self._research_tools)
-        #    P06-06B：用 CrewAI TaskStartedEvent 标记 Task 开始（task.py:521 可靠 emit）；
-        #    P06-11A：用 CrewAI LLMCall*Event 记录每次真实模型调用（指标 + Jaeger span）。
-        #    scope 在 kickoff 期间保持活跃，结束后显式退出清除本轮 handler。
         scope = self._subscribe_task_progress(crew)
         llm_scope = self._subscribe_llm_calls(crew)
         usage_before = self._agent_token_snapshots(crew)
@@ -534,9 +638,6 @@ class LiveResearchFlowRunner:
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
             error_code = ErrorCode.INTERNAL_BUG.value
             failure_stage: str | None = None
-            # P06-11B：先判断是否为供应商拒绝远程结构化输出（response_format 400）。
-            # 这是最接近失败根因的分类，优先于迭代耗尽/网络瞬态等间接原因；
-            # 若同时发生迭代耗尽，也保留 response_format 根因并记录前置信息。
             exc_text = f"{type(exc).__name__}: {exc}".lower()
             if _is_structured_output_unsupported(exc_text):
                 error_code = ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED.value
@@ -577,50 +678,246 @@ class LiveResearchFlowRunner:
             if llm_scope is not None:
                 llm_scope.__exit__(None, None, None)
 
-        # P06-09C：Agent 耗时指标（尽力而为，不改变业务结果）。
-        # P06-11B：次数/耗时/span 由 LLM 事件观测器负责；Token 已在
-        # kickoff 前后按 Agent TokenProcess 差值记录，不复制 Crew 汇总。
-        self._record_agent_metrics(crew, result)
-
-        # P06-06B：03_documents 在 Research Task 完成后由本 runner 标记
-        # （Research 行为内含文档处理，Crew 内无独立 documents Task）。
         self._mark("03_documents", "succeeded")
-
-        # 2. 解析三个 pack 写入 state
         state = self._extract_packs(result, request, ctx)
+        return state, crew, result
 
-        # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界）
-        self._mark("06_quality_gate", "running")
-        state.quality_report = run_quality_gate(state)
-        self._mark("06_quality_gate", "succeeded")
+    def _run_staged(self, request: ResearchRequest, ctx: _RunContext) -> ResearchFlowState:
+        """P06-11E 三阶段执行：Research → Analysis → Writer（前序成功才执行下一步）。
 
-        # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
-        reflection = self._run_reflection(state)
+        1. 执行 Research 工具循环；
+        2. Finalize + Validate + Assemble → ResearchPack；
+        3. ResearchPack 成功后才执行 Analysis；
+        4. Finalize + Validate + Assemble → FinancialAnalysisPack；
+        5. FinancialAnalysisPack 成功后才执行 Writer；
+        6. Writer Markdown → ReportDraftAssembler → ReportDraft；
+        7. 质量门禁由调用方（_run_live_impl）在 state 上执行。
 
-        # 5. 采集性能并生成 RunManifest（质量门禁通过才 published）
-        self._record_performance(crew, result)
-        performance = self._recorder.snapshot()
-        # P06-06B：07_manifest 边界
-        self._mark("07_manifest", "running")
-        state.run_manifest = build_run_manifest(
-            state, self._config, started_at=started_at, performance=performance
-        )
-        # 合并反思审计记录（不丢失受控反思决策）
-        state.run_manifest["reflection"] = reflection
-        # 合并外部调用统计证据（P05-13 验收：SEC/Serper/LLM 等调用证据可见）。
-        # stats 为空时（Agent 直接用预取结果、未调工具）从性能记录器补全真实调用。
-        invocation: dict[str, int] = dict(self._stats)
-        if not invocation:
-            for tool_name, metrics in self._recorder.snapshot()["tools"].items():
-                invocation[f"{tool_name}_calls"] = int(metrics["calls"])
-        if invocation:
-            state.run_manifest["evidence"] = {"invocation_summary": invocation}
-        self._mark("07_manifest", "succeeded")
-
-        # 6. 保存中间产物（确定性落盘）
-        self._persist_intermediates(request, state)
-
+        任一阶段失败立即抛 ``LiveFlowExecutionError``（短路，不执行后续 Agent）。
+        """
+        state = ResearchFlowState(request=request)
+        # 1+2. Research
+        self._mark("02_research", "running")
+        state.research_pack = self._exec_research_stage(request, ctx)
+        self._mark("02_research", "succeeded")
+        self._mark("03_documents", "succeeded")
+        # 3+4. Analysis（ResearchPack 成功后才执行）
+        self._mark("04_analysis", "running")
+        state.analysis_pack = self._exec_analysis_stage(request, ctx)
+        self._mark("04_analysis", "succeeded")
+        # 5+6. Writer（FinancialAnalysisPack 成功后才执行）
+        self._mark("05_writer", "running")
+        state.report_draft = self._exec_writer_stage(request, ctx, state)
+        self._mark("05_writer", "succeeded")
         return state
+
+    def _exec_research_stage(
+        self, request: ResearchRequest, ctx: _RunContext
+    ) -> ResearchPack:
+        """Research 阶段：Agent 工具循环 → Finalize → Validate → Assemble。"""
+        from crewai import Process
+
+        task = build_research_task(
+            ctx.effective_config,
+            profile=ctx.profile,
+            tools=self._research_tools,
+        )
+        crew = Crew(
+            agents=[task.agent],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        inputs = self._build_crew_inputs(request, ctx.prefetch_result)
+        raw = self._kickoff_single(crew, inputs)
+        if (
+            structured_output_mode(ctx.effective_config)
+            == StructuredOutputMode.NATIVE_PYDANTIC
+        ):
+            # Qwen：直接本地解析为 ResearchPack（Boundary 校验）
+            return _normalize_research_sources(self._to_research_pack(raw, request, ctx))
+        # DeepSeek/generic：独立 Finalizer → ResearchSelectionDraft → 确定性组装
+        finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
+        try:
+            draft = finalizer.finalize(raw, ResearchSelectionDraft, role="research")
+            assert isinstance(draft, ResearchSelectionDraft)
+            return _normalize_research_sources(
+                ResearchPackAssembler().assemble(
+                    draft,
+                    request=request,
+                    company_identity=self._resolved_identity_or_fail(request, ctx),
+                    source_filings=self._cache_filings_if_available(request, ctx),
+                )
+            )
+        except (FinalizerError, ResearchAssemblerError) as exc:
+            error_code = getattr(exc, "error_code", "SCHEMA_INVALID")
+            raise LiveFlowExecutionError(
+                str(exc), error_code=error_code, failure_stage="02_research"
+            ) from exc
+
+    def _exec_analysis_stage(
+        self, request: ResearchRequest, ctx: _RunContext
+    ) -> FinancialAnalysisPack:
+        """Analysis 阶段：Agent 工具循环 → Finalize → Validate → Assemble。"""
+        from crewai import Process
+
+        task = build_analysis_task(ctx.effective_config, profile=ctx.profile)
+        crew = Crew(
+            agents=[task.agent],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        inputs = self._build_crew_inputs(request, ctx.prefetch_result)
+        raw = self._kickoff_single(crew, inputs)
+        if (
+            structured_output_mode(ctx.effective_config)
+            == StructuredOutputMode.NATIVE_PYDANTIC
+        ):
+            return _to_packed(raw, FinancialAnalysisPack)
+        finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
+        try:
+            draft = finalizer.finalize(raw, AnalysisSelectionDraft, role="analysis")
+            assert isinstance(draft, AnalysisSelectionDraft)
+            return AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
+        except (FinalizerError, AnalysisAssemblerError) as exc:
+            error_code = getattr(exc, "error_code", "SCHEMA_INVALID")
+            failure_stage = getattr(exc, "failure_stage", None) or "04_analysis"
+            raise LiveFlowExecutionError(
+                str(exc), error_code=error_code, failure_stage=failure_stage
+            ) from exc
+
+    def _exec_writer_stage(
+        self,
+        request: ResearchRequest,
+        ctx: _RunContext,
+        state: ResearchFlowState,
+    ) -> ReportDraft:
+        """Writer 阶段：Markdown → ReportDraftAssembler（Qwen 保持原生路径）。"""
+        from crewai import Process
+
+        loader: ArtifactLoader = _staged_artifact_loader(state)
+        task = build_writer_task(
+            ctx.effective_config,
+            profile=ctx.profile,
+            artifact_loader=loader,
+        )
+        crew = Crew(
+            agents=[task.agent],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        inputs = self._build_crew_inputs(request, ctx.prefetch_result)
+        raw = self._kickoff_single(crew, inputs)
+        if (
+            structured_output_mode(ctx.effective_config)
+            == StructuredOutputMode.NATIVE_PYDANTIC
+        ):
+            return _to_packed(raw, ReportDraft)
+        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler
+        raw_text = self._extract_markdown(raw)
+        try:
+            return ReportDraftAssembler().assemble(
+                raw_text,
+                request,
+                state.research_pack,
+                state.analysis_pack,
+            )
+        except ReportAssemblerError as exc:
+            raise LiveFlowExecutionError(
+                str(exc),
+                error_code=exc.error_code,
+                failure_stage=exc.failure_stage,
+            ) from exc
+
+    def _kickoff_single(self, crew: Any, inputs: dict[str, str]) -> Any:
+        """执行单 Task Crew 并返回该 Task 输出（无事件订阅，分阶段路径内联记录）。"""
+        scope = self._subscribe_task_progress(crew)
+        llm_scope = self._subscribe_llm_calls(crew)
+        usage_before = self._agent_token_snapshots(crew)
+        try:
+            result = crew.kickoff(inputs=inputs)
+        except Exception as exc:  # noqa: BLE001 - 应用边界：统一转可读错误
+            self._record_agent_token_deltas(crew, usage_before)
+            error_code = ErrorCode.INTERNAL_BUG.value
+            exc_text = f"{type(exc).__name__}: {exc}".lower()
+            failure_stage = _structured_output_stage(exc)
+            if _is_structured_output_unsupported(exc_text):
+                error_code = ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED.value
+            elif _iteration_limit_details(crew) is not None:
+                error_code = ErrorCode.ITERATION_LIMIT.value
+            raise LiveFlowExecutionError(
+                f"分阶段 Agent 执行失败: {type(exc).__name__}: {exc}",
+                error_code=error_code,
+                failure_stage=failure_stage,
+            ) from exc
+        finally:
+            if scope is not None:
+                scope.__exit__(None, None, None)
+            if llm_scope is not None:
+                llm_scope.__exit__(None, None, None)
+        self._record_agent_token_deltas(crew, usage_before)
+        tasks_output = getattr(result, "tasks_output", None)
+        if tasks_output:
+            return tasks_output[0]
+        return result
+
+    def _to_research_pack(
+        self, raw: Any, request: ResearchRequest, ctx: _RunContext
+    ) -> ResearchPack:
+        """Research 本地解析（Qwen / 非草稿路径 + 有界收尾）。"""
+        try:
+            return _to_packed(raw, ResearchPack)
+        except LiveFlowExecutionError as exc:
+            return self._finalize_research_pack(request, ctx, exc)
+
+    def _resolved_identity_or_fail(
+        self, request: ResearchRequest, ctx: _RunContext
+    ) -> CompanyIdentity:
+        """取预取/解析公司身份；失败抛可读错误（不生成伪造 pack）。"""
+        identity = self._resolved_identity(request, ctx)
+        if identity is None:
+            raise LiveFlowExecutionError(
+                "无法确定公司身份，禁止生成伪造 ResearchPack",
+                error_code="SCHEMA_INVALID",
+                failure_stage="02_research",
+            )
+        return identity
+
+    def _cache_filings_if_available(
+        self, request: ResearchRequest, ctx: _RunContext
+    ) -> list[dict[str, Any]]:
+        """从工具缓存取可信 SEC 申报记录（供 ResearchPackAssembler 使用）。"""
+        identity = ctx.prefetch_result.company_identity if ctx.prefetch_result is not None else None
+        if identity is None or self._cache is None:
+            return []
+        forms = ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
+        key = self._cache.key(
+            "sec_submissions",
+            {
+                "cik": identity.cik,
+                "as_of_date": request.as_of_date.isoformat(),
+                "requested_forms": forms,
+            },
+        )
+        cached = self._cache.get(key)
+        if cached is None:
+            return []
+        try:
+            payload = json.loads(cached)
+        except (TypeError, ValueError):
+            return []
+        return [f for f in (payload.get("filings") or []) if isinstance(f, dict)]
+
+    @staticmethod
+    def _extract_markdown(obj: Any) -> str:
+        """从 Writer 输出提取 Markdown 正文（兼容 CrewAI TaskOutput/字符串）。"""
+        candidate = extract_candidate(obj)
+        if isinstance(candidate, str):
+            return candidate
+        raw = getattr(obj, "raw", None)
+        return raw if isinstance(raw, str) else ""
 
     def _subscribe_task_progress(
         self, crew: Crew
