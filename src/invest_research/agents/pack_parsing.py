@@ -280,10 +280,17 @@ def identify_source_kind(obj: Any) -> PackSourceKind:
     - JSON 字符串解析后是 dict：同上判断；
     - 其余无法解析为结构对象 → PLAIN_TEXT。
     """
-    if isinstance(obj, BaseModel):
-        return PackSourceKind.FINAL_ANSWER
+    # CrewAI 1.6.1 的 TaskOutput 自身也是 Pydantic BaseModel。必须先解包
+    # TaskOutput.pydantic/json_dict/raw，再把普通业务 BaseModel 当最终答案；
+    # 否则会把 TaskOutput 的 agent/description/raw 等包装字段误当成 Pack 字段。
     pydantic = getattr(obj, "pydantic", None)
     if pydantic is not None:
+        return PackSourceKind.FINAL_ANSWER
+
+    is_task_output_wrapper = all(
+        hasattr(obj, attr) for attr in ("raw", "json_dict", "output_format", "agent")
+    )
+    if isinstance(obj, BaseModel) and not is_task_output_wrapper:
         return PackSourceKind.FINAL_ANSWER
 
     data: Any = obj
@@ -301,13 +308,14 @@ def identify_source_kind(obj: Any) -> PackSourceKind:
         stripped = data.strip()
         if stripped.startswith("```"):
             stripped = re.sub(r"^```(?:json)?\s*|```\s*$", "", stripped, flags=re.DOTALL).strip()
-        # 以 { 开头的文本视为"疑似 JSON 输出"（即使 json.loads 失败也归类为最终答案，
-        # 由 _validate 层报 JSON_INVALID 并允许一次修复）；其余不可解析文本才算纯文本。
-        if stripped.startswith("{"):
-            return PackSourceKind.FINAL_ANSWER
         try:
             candidate = json.loads(stripped)
         except (ValueError, TypeError):
+            # 仅当 JSON 解析失败时，才把以 { 开头的文本视为"疑似最终答案"，
+            # 交给 _validate 报 JSON_INVALID/有限修复。合法 JSON 必须继续检查
+            # action/action_input/tool_name 等工具过程键，不能提前返回 FINAL_ANSWER。
+            if stripped.startswith("{"):
+                return PackSourceKind.FINAL_ANSWER
             return PackSourceKind.PLAIN_TEXT
         if isinstance(candidate, dict):
             data = candidate
@@ -326,17 +334,35 @@ def identify_source_kind(obj: Any) -> PackSourceKind:
 
 
 def extract_candidate(obj: Any) -> dict[str, Any] | str | None:
-    """提取候选结构化结果（dict / Pydantic 实例 / JSON 文本），复用既有读取顺序。"""
+    """提取候选结构化结果，严格遵循 Pack 与 CrewAI 包装器的读取顺序。
+
+    CrewAI 1.6.1 的 ``TaskOutput`` 继承 ``BaseModel``，但它不是业务 Pack。
+    因此必须先按 ``pydantic → json_dict/exported → raw`` 解包 TaskOutput，
+    最后才允许把普通业务 ``BaseModel`` 自身 ``model_dump``。这也与
+    ``dump_task_output`` 和 Writer ArtifactReader 的读取顺序保持一致。
+    """
     if isinstance(obj, dict):
         return obj
     if isinstance(obj, str):
         return obj
+
+    is_task_output_wrapper = all(
+        hasattr(obj, attr) for attr in ("raw", "json_dict", "output_format", "agent")
+    )
+    if is_task_output_wrapper:
+        dumped = dump_task_output(obj)
+        if isinstance(dumped, dict):
+            return dumped
+        raw = getattr(obj, "raw", None)
+        return raw if isinstance(raw, str) else None
+
     if isinstance(obj, BaseModel):
         try:
             dumped = obj.model_dump(mode="json")
         except AttributeError:
             dumped = None
         return dumped if isinstance(dumped, dict) else None
+
     dumped = dump_task_output(obj)
     if isinstance(dumped, dict):
         return dumped

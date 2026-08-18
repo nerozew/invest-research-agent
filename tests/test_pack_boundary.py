@@ -10,6 +10,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from crewai.tasks.output_format import OutputFormat
+from crewai.tasks.task_output import TaskOutput
+
 from invest_research.agents.pack_parsing import (
     BoundaryError,
     PackBoundary,
@@ -19,10 +22,14 @@ from invest_research.agents.pack_parsing import (
 from invest_research.agents.writer_task import make_artifact_reader
 from invest_research.domain.models import (
     AnalysisCompleteness,
+    CompanyIdentity,
     FinancialAnalysisPack,
     FinancialFact,
     MetricResult,
     MetricStatus,
+    ResearchPack,
+    Source,
+    SourceType,
 )
 
 _PERIOD = date(2025, 9, 27)
@@ -72,6 +79,106 @@ def _base(**overrides: object) -> dict[str, object]:
 
 def _boundary() -> PackBoundary:
     return PackBoundary(max_repairs=1)
+
+
+# ---------------------------------------------------------------------------
+# CrewAI 1.6.1 TaskOutput 包装器解包回归
+# ---------------------------------------------------------------------------
+
+
+def _task_output(**overrides: object) -> TaskOutput:
+    values: dict[str, object] = {
+        "description": "分析 SEC 财务事实并输出 FinancialAnalysisPack",
+        "expected_output": "符合 FinancialAnalysisPack schema 的 JSON",
+        "raw": "",
+        "pydantic": None,
+        "json_dict": None,
+        "agent": "财报分析 Agent",
+        "output_format": OutputFormat.RAW,
+    }
+    values.update(overrides)
+    return TaskOutput.model_validate(values)
+
+
+def test_real_crewai_task_output_prefers_nested_pydantic_pack() -> None:
+    """真实 TaskOutput 是 BaseModel，但必须读取其 pydantic，不能 dump 包装器。"""
+    expected = FinancialAnalysisPack.model_validate(_base())
+    output = _task_output(
+        pydantic=expected,
+        json_dict={"not_a_field": "不得覆盖 pydantic"},
+        raw='{"not_a_field":"不得覆盖 pydantic"}',
+        output_format=OutputFormat.PYDANTIC,
+    )
+
+    pack, errors = _boundary().parse(output, FinancialAnalysisPack, stage="analysis")
+
+    assert errors == []
+    assert pack == expected
+
+
+def test_real_crewai_task_output_unwraps_research_pack() -> None:
+    """P06-11B 回归：Research TaskOutput 包装字段不得被当成 ResearchPack 字段。"""
+    expected = ResearchPack(
+        version="research_pack_v1",
+        company_identity=CompanyIdentity(
+            cik="0000320193", ticker="AAPL", legal_name="APPLE INC"
+        ),
+        as_of_date=date(2025, 10, 31),
+        sources=[
+            Source(
+                source_type=SourceType.SEC_FILING,
+                canonical_url="https://www.sec.gov/Archives/edgar/data/320193/aapl-10k.htm",
+                title="Apple 10-K",
+                accessed_at=date(2025, 10, 31),
+                locator="10-K",
+            )
+        ],
+    )
+    output = _task_output(
+        description="收集 AAPL SEC 申报并输出 ResearchPack",
+        expected_output="符合 ResearchPack schema 的 JSON",
+        pydantic=expected,
+        output_format=OutputFormat.PYDANTIC,
+    )
+
+    pack, errors = _boundary().parse(output, ResearchPack, stage="research")
+
+    assert errors == []
+    assert pack == expected
+
+
+def test_real_crewai_task_output_reads_json_dict_pack() -> None:
+    """未绑定 output_pydantic 时，应读取 TaskOutput.json_dict。"""
+    output = _task_output(json_dict=_base(), output_format=OutputFormat.JSON)
+
+    pack, errors = _boundary().parse(output, FinancialAnalysisPack, stage="analysis")
+
+    assert errors == []
+    assert pack is not None
+    assert pack.version == "analysis_pack_v2"
+
+
+def test_real_crewai_task_output_reads_raw_json_pack() -> None:
+    """pydantic/json_dict 都为空时，最后读取 TaskOutput.raw。"""
+    output = _task_output(raw=_base_json_text())
+
+    pack, errors = _boundary().parse(output, FinancialAnalysisPack, stage="analysis")
+
+    assert errors == []
+    assert pack is not None
+    assert pack.completeness == AnalysisCompleteness.COMPLETE
+
+
+def test_real_crewai_task_output_raw_action_is_not_final_pack() -> None:
+    """TaskOutput.raw 中的工具调用过程仍必须被识别为 NOT_A_PACK。"""
+    output = _task_output(
+        raw='{"action":"ArtifactReader","action_input":{"artifact_key":"research_pack"}}'
+    )
+
+    pack, errors = _boundary().parse(output, FinancialAnalysisPack, stage="analysis")
+
+    assert pack is None
+    assert any(error.error_code == "NOT_A_PACK" for error in errors)
 
 
 # ---------------------------------------------------------------------------
