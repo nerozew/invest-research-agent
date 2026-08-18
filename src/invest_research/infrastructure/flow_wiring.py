@@ -33,6 +33,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -219,6 +220,29 @@ class LiveFlowExecutionError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.failure_stage = failure_stage
+
+
+@dataclass
+class _RunContext:
+    """P06-11E：每次 run(request) 独立的工作上下文（跨 Job 状态隔离）。
+
+    - ``finalization_count``：结构化收尾次数（每 Job 从 0 开始，禁止跨 Job 泄漏）；
+    - ``prefetch_result`` / ``analysis_facts``：本 Job 的预取结果与还原原始事实；
+    - ``profile`` / ``effective_config``：本 Job 档位与有效 LLM 配置
+      （fast 关闭思考模式等 Job 级覆盖不写回 runner 实例）；
+    - ``stats`` / ``recorder`` / ``budget``：构造注入的共享基础设施引用
+      （同一 runner 多次 run 复用合理；Job 特有计数不在此共享）。
+    """
+
+    request: ResearchRequest
+    profile: ResearchProfile
+    effective_config: LLMConfig
+    stats: dict[str, int]
+    recorder: PerformanceRecorder
+    budget: ToolBudget | None
+    prefetch_result: PrefetchResult | None = None
+    analysis_facts: list[FinancialFact] = field(default_factory=list)
+    finalization_count: int = 0
 
 
 _PackModel = TypeVar("_PackModel", bound=BaseModel)
@@ -416,24 +440,43 @@ class LiveResearchFlowRunner:
     def run(self, request: ResearchRequest) -> ResearchFlowState:
         """FlowRunner 端口实现：完整执行真实生产 Crew/Flow（同步）。
 
+        P06-11E：每次 ``run(request)`` 创建**独立** ``_RunContext``——
+        ``finalization_count`` / ``prefetch_result`` / ``analysis_facts`` 等
+        Job 特有状态全部限定在当前 Job，禁止跨 Job 泄漏
+        （修复旧版 ``_finalize_used`` 跨 Job 被复用的缺陷）。
+
         P06-07 前置修复：返回最终 ``ResearchFlowState``，供 Worker 在成功
         路径发布最终报告工件（fake/live 共用流程）。
         """
         # P06-06A：按任务档位选择当前预算（合法值由 domain.ResearchProfileMode 校验）。
         # 不在构造/全局环境做固定档位；任务不同、档位不同。
-        self._current_profile = ResearchProfile.for_mode(
+        profile = ResearchProfile.for_mode(
             "fast" if request.research_profile == "fast" else "deep"
         )
         # fast 任务显式关闭思考模式（Qwen3.5 等默认思考极慢）；deep 保留构造时配置。
-        self._effective_config = self._config
-        if self._current_profile.mode == "fast":
-            self._effective_config = self._config.model_copy(update={"enable_thinking": False})
-        state = self._run_live(request)
+        effective_config = self._config
+        if profile.mode == "fast":
+            effective_config = self._config.model_copy(update={"enable_thinking": False})
+        ctx = _RunContext(
+            request=request,
+            profile=profile,
+            effective_config=effective_config,
+            stats=self._stats,
+            recorder=self._recorder,
+            budget=self._budget,
+        )
+        # 兼容既有测试/观测辅助读取的实例字段：每次 run 重置（防跨 Job 泄漏）。
+        self._current_profile = profile
+        self._effective_config = effective_config
+        self._prefetch_result = None
+        self._analysis_facts = []
+        self._active_ctx = ctx
+        state = self._run_live(request, ctx)
         self.last_state = state
         self.run_manifest = state.run_manifest
         return state
 
-    def _run_live(self, request: ResearchRequest) -> ResearchFlowState:
+    def _run_live(self, request: ResearchRequest, ctx: _RunContext) -> ResearchFlowState:
         """P06-05：真实执行包在 ``flow.run`` OTel span 内（属性只含低基数字段）。"""
         from invest_research.infrastructure.observability.tracing import span
 
@@ -445,9 +488,9 @@ class LiveResearchFlowRunner:
                 "language": request.language,
             },
         ):
-            return self._run_live_impl(request)
+            return self._run_live_impl(request, ctx)
 
-    def _run_live_impl(self, request: ResearchRequest) -> ResearchFlowState:
+    def _run_live_impl(self, request: ResearchRequest, ctx: _RunContext) -> ResearchFlowState:
         """真实执行：Crew → 解析 → 质量门禁 → 受控反思 → manifest。
 
         严格保持顺序；任一不可恢复失败抛 ``LiveFlowExecutionError``
@@ -466,10 +509,12 @@ class LiveResearchFlowRunner:
             except Exception:
                 # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
                 prefetch_result = None
+        ctx.prefetch_result = prefetch_result
         self._prefetch_result = prefetch_result
         # P06-11C：把预取 financial_facts_summary（JSON 文本）还原为原始可信
         # FinancialFact 集合，供选择草稿现场组装（见 _extract_packs）。
-        self._analysis_facts = self._parse_prefetched_facts(prefetch_result)
+        ctx.analysis_facts = self._parse_prefetched_facts(prefetch_result)
+        self._analysis_facts = ctx.analysis_facts
         self._mark("01_company_resolve", "succeeded")
 
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
@@ -477,7 +522,7 @@ class LiveResearchFlowRunner:
 
         # 1. 运行三 Agent 顺序 Crew（默认真实模型；测试可注入 fake crew）。
         #    P06-06A：按任务档位解析后的有效配置（fast 已关闭思考模式）。
-        crew = self._crew_factory(self._effective_config, self._research_tools)
+        crew = self._crew_factory(ctx.effective_config, self._research_tools)
         #    P06-06B：用 CrewAI TaskStartedEvent 标记 Task 开始（task.py:521 可靠 emit）；
         #    P06-11A：用 CrewAI LLMCall*Event 记录每次真实模型调用（指标 + Jaeger span）。
         #    scope 在 kickoff 期间保持活跃，结束后显式退出清除本轮 handler。
@@ -542,7 +587,7 @@ class LiveResearchFlowRunner:
         self._mark("03_documents", "succeeded")
 
         # 2. 解析三个 pack 写入 state
-        state = self._extract_packs(result, request)
+        state = self._extract_packs(result, request, ctx)
 
         # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界）
         self._mark("06_quality_gate", "running")
@@ -875,7 +920,9 @@ class LiveResearchFlowRunner:
         except (KeyError, TypeError, ValueError):
             return []
 
-    def _extract_packs(self, result: Any, request: ResearchRequest) -> ResearchFlowState:
+    def _extract_packs(
+        self, result: Any, request: ResearchRequest, ctx: _RunContext
+    ) -> ResearchFlowState:
         """从 Crew 结果解析三个 pack 到 state。
 
         - CrewAI 1.6.1 的 ``CrewOutput`` 通过 ``tasks_output`` 按顺序暴露各 Task 输出；
@@ -895,9 +942,9 @@ class LiveResearchFlowRunner:
 
         # 按顺序：research, analysis, writer
         if len(outputs) >= 1:
-            state.research_pack = self._extract_research_pack(outputs[0], request)
+            state.research_pack = self._extract_research_pack(outputs[0], request, ctx)
         if len(outputs) >= 2:
-            state.analysis_pack = self._extract_analysis_pack(outputs[1])
+            state.analysis_pack = self._extract_analysis_pack(outputs[1], ctx)
             # P06-09C：Analysis pack 完整性分布（尽力而为）
             try:
                 from invest_research.infrastructure.observability.metrics_events import (
@@ -974,7 +1021,7 @@ class LiveResearchFlowRunner:
                 failure_stage=exc.failure_stage,
             ) from exc
 
-    def _extract_analysis_pack(self, obj: Any) -> FinancialAnalysisPack:
+    def _extract_analysis_pack(self, obj: Any, ctx: _RunContext) -> FinancialAnalysisPack:
         """解析 Analysis 输出；P06-11C：先检测 SelectionDraft，再走 PackBoundary。
 
         - 输出含 ``selected_fact_refs`` 键（AnalysisSelectionDraft）→ 现场组装；
@@ -991,7 +1038,7 @@ class LiveResearchFlowRunner:
                     failure_stage="04_analysis",
                 ) from exc
             try:
-                return AnalysisPackAssembler().assemble(draft, self._analysis_facts)
+                return AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
             except AnalysisAssemblerError as exc:
                 raise LiveFlowExecutionError(
                     str(exc),
@@ -1000,25 +1047,31 @@ class LiveResearchFlowRunner:
                 ) from exc
         return _to_packed(obj, FinancialAnalysisPack)
 
-    def _extract_research_pack(self, obj: Any, request: ResearchRequest) -> ResearchPack:
+    def _extract_research_pack(
+        self, obj: Any, request: ResearchRequest, ctx: _RunContext
+    ) -> ResearchPack:
         """解析 Research 输出；失败时尝试一次有界结构化收尾（不伪造来源）。"""
         try:
             pack = _to_packed(obj, ResearchPack)
         except LiveFlowExecutionError as exc:
-            pack = self._finalize_research_pack(request, exc)
+            pack = self._finalize_research_pack(request, ctx, exc)
         return _normalize_research_sources(pack)
 
-    def _finalize_research_pack(self, request: ResearchRequest, cause: Exception) -> ResearchPack:
+    def _finalize_research_pack(
+        self, request: ResearchRequest, ctx: _RunContext, cause: Exception
+    ) -> ResearchPack:
         """有界结构化收尾：从缓存中的 SEC 申报结果构建 ResearchPack（只允许一次）。
 
-        - 只允许一次；使用 Agent 已经取得的工具结果（缓存），不重新执行整套 Research；
+        - 只允许一次（计数限定在当前 Job 的 ``ctx.finalization_count``，
+          禁止跨 Job 复用旧实例的 ``_finalize_used``）；使用 Agent 已经取得的
+          工具结果（缓存），不重新执行整套 Research；
         - 不伪造来源：无有效 SEC 来源时明确抛 LiveFlowExecutionError。
         """
-        if self._finalize_used:
+        if ctx.finalization_count >= 1:
             raise LiveFlowExecutionError("结构化收尾已使用过一次，禁止重复收尾") from cause
-        self._finalize_used = True
+        ctx.finalization_count += 1
 
-        identity = self._resolved_identity(request)
+        identity = self._resolved_identity(request, ctx)
         if identity is None:
             raise LiveFlowExecutionError(
                 "Research 输出不可解析且无法确定公司身份，无法结构化收尾；禁止生成伪造 ResearchPack"
@@ -1086,10 +1139,20 @@ class LiveResearchFlowRunner:
             ),
         )
 
-    def _resolved_identity(self, request: ResearchRequest) -> CompanyIdentity | None:
-        """优先取预取结果中的公司身份；否则确定性本地解析（不联网）。"""
-        if self._prefetch_result is not None and self._prefetch_result.company_identity is not None:
-            return self._prefetch_result.company_identity
+    def _resolved_identity(
+        self, request: ResearchRequest, ctx: _RunContext | None = None
+    ) -> CompanyIdentity | None:
+        """优先取预取结果中的公司身份；否则确定性本地解析（不联网）。
+
+        ``ctx`` 为本 Job 上下文；缺省时回退实例字段（兼容既有测试）。
+        """
+        prefetch_result = (
+            ctx.prefetch_result
+            if ctx is not None
+            else self._prefetch_result
+        )
+        if prefetch_result is not None and prefetch_result.company_identity is not None:
+            return prefetch_result.company_identity
         from invest_research.tools.company_resolver import (
             CompanyResolverTool,
             ResolveCompanyRequest,
