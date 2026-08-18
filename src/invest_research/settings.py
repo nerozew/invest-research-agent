@@ -57,7 +57,7 @@ class ResearchProfile(BaseModel):
             return cls(
                 mode="fast",
                 research_max_iter=8,
-                analysis_max_iter=2,
+                analysis_max_iter=6,
                 # P06-11B：Writer 只需一次 WriterContextReader + 最终输出；5 保留为
                 # 有界安全余量，不能再通过无限提高 max_iter 掩盖工具编排问题。
                 writer_max_iter=5,

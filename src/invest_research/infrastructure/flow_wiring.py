@@ -162,6 +162,34 @@ def _looks_like_tool_input(exc: Exception) -> bool:
     )
 
 
+def _is_structured_output_unsupported(exc_text: str) -> bool:
+    """判断异常文本是否表示供应商拒绝远程结构化输出（P06-11B）。
+
+    匹配 DeepSeek 实测错误 "HTTP 400: This response_format type is
+    unavailable now"（普通 Chat Completion 不支持 OpenAI json_schema
+    response_format）。输入为已脱敏文本，仅用于分类，不进入用户可见消息。
+    """
+    return (
+        "response_format" in exc_text
+        or "response format" in exc_text
+        or "json_schema" in exc_text
+        or "this response_format type is unavailable" in exc_text
+        or ("structured output" in exc_text and "not support" in exc_text)
+    )
+
+
+def _structured_output_stage(exc: Exception) -> str | None:
+    """从异常确定结构化输出失败阶段（P06-11B）。
+
+    优先复用 Pydantic ValidationError 标题推导；否则回退到最后执行的 Agent
+    （转换阶段通常在最后一个 Task 输出时触发，默认 writer）。
+    """
+    role = _validation_role(exc)
+    if role is not None:
+        return _AGENT_ROLE_TO_STEP[role]
+    return "05_writer"
+
+
 class LiveFlowExecutionError(RuntimeError):
     """live 模式执行失败（上游/质量门禁不可恢复）。
 
@@ -440,24 +468,37 @@ class LiveResearchFlowRunner:
         except Exception as exc:  # noqa: BLE001 - 应用边界：记录并转 fail-fast
             error_code = ErrorCode.INTERNAL_BUG.value
             failure_stage: str | None = None
-            exhausted = _iteration_limit_details(
-                crew,
-                preferred_role=_validation_role(exc),
-            )
-            if exhausted is not None:
-                role, failure_stage = exhausted
-                error_code = ErrorCode.ITERATION_LIMIT.value
-                try:
-                    from invest_research.infrastructure.observability.metrics_events import (
-                        count_agent_iteration_limit,
+            # P06-11B：先判断是否为供应商拒绝远程结构化输出（response_format 400）。
+            # 这是最接近失败根因的分类，优先于迭代耗尽/网络瞬态等间接原因；
+            # 若同时发生迭代耗尽，也保留 response_format 根因并记录前置信息。
+            exc_text = f"{type(exc).__name__}: {exc}".lower()
+            if _is_structured_output_unsupported(exc_text):
+                error_code = ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED.value
+                failure_stage = _structured_output_stage(exc)
+                if _iteration_limit_details(crew) is not None:
+                    _LOGGER.warning(
+                        "kickoff 同时出现迭代耗尽与 response_format 拒绝，"
+                        "按最接近根因分类为 STRUCTURED_OUTPUT_UNSUPPORTED"
                     )
+            else:
+                exhausted = _iteration_limit_details(
+                    crew,
+                    preferred_role=_validation_role(exc),
+                )
+                if exhausted is not None:
+                    role, failure_stage = exhausted
+                    error_code = ErrorCode.ITERATION_LIMIT.value
+                    try:
+                        from invest_research.infrastructure.observability.metrics_events import (
+                            count_agent_iteration_limit,
+                        )
 
-                    count_agent_iteration_limit(role, self._current_profile.mode)
-                except Exception:  # noqa: BLE001 - 指标尽力而为
-                    pass
-            elif _looks_like_tool_input(exc):
-                error_code = ErrorCode.NOT_A_PACK.value
-                failure_stage = "05_writer"
+                        count_agent_iteration_limit(role, self._current_profile.mode)
+                    except Exception:  # noqa: BLE001 - 指标尽力而为
+                        pass
+                elif _looks_like_tool_input(exc):
+                    error_code = ErrorCode.NOT_A_PACK.value
+                    failure_stage = "05_writer"
             raise LiveFlowExecutionError(
                 f"真实 Crew 执行失败: {type(exc).__name__}: {exc}",
                 error_code=error_code,

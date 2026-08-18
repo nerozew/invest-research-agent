@@ -29,6 +29,10 @@ class ErrorCode(StrEnum):
     ITERATION_LIMIT = "ITERATION_LIMIT"
     DATA_AMBIGUOUS = "DATA_AMBIGUOUS"
     QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
+    # P06-11B：供应商拒绝远程结构化输出（response_format/JSON Schema 不受支持）。
+    # 例如 DeepSeek 普通 Chat Completion 返回 HTTP 400 "This response_format type
+    # is unavailable now"。归类为不可重试：重试同样会失败，等待配置/适配修复。
+    STRUCTURED_OUTPUT_UNSUPPORTED = "STRUCTURED_OUTPUT_UNSUPPORTED"
     INTERNAL_BUG = "INTERNAL_BUG"
 
 
@@ -62,6 +66,8 @@ _NON_RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         ErrorCode.ITERATION_LIMIT,
         ErrorCode.DATA_AMBIGUOUS,
         ErrorCode.QUALITY_GATE_FAILED,
+        # P06-11B：供应商不支持结构化输出 response_format → 立即终态失败（不可重试）。
+        ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED,
         ErrorCode.INTERNAL_BUG,
     }
 )

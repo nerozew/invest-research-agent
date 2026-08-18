@@ -42,7 +42,7 @@ def test_fast_profile_budgets() -> None:
     p = ResearchProfile.for_mode("fast")
     assert p.mode == "fast"
     assert p.research_max_iter == 8
-    assert p.analysis_max_iter == 2
+    assert p.analysis_max_iter == 6
     # P06-11B：一次 WriterContextReader + 最终输出；5 是有界安全余量。
     assert p.writer_max_iter == 5
     assert p.max_retry_limit == 1
@@ -120,7 +120,7 @@ def test_analysis_and_writer_agents_apply_own_max_iter() -> None:
     analysis = build_analysis_agent(_config(), fake=_fake(LLMRole.ANALYSIS), profile=fast)
     writer = build_writer_agent(_config(), fake=_fake(LLMRole.WRITER), profile=fast)
     try:
-        assert analysis.max_iter == 2
+        assert analysis.max_iter == 6
         # P06-11B：聚合上下文读取后保留 max_iter=5 的有界安全余量。
         assert writer.max_iter == 5
         assert analysis.max_retry_limit == 1

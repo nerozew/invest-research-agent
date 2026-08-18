@@ -18,7 +18,14 @@ from typing import Any, Callable
 from crewai import Agent, Task
 from crewai.tools import tool
 
-from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
+from invest_research.agents.llm_factory import (
+    AnyLLM,
+    LLMConfig,
+    LLMRole,
+    StructuredOutputMode,
+    build_real_llm,
+    structured_output_mode,
+)
 from invest_research.domain.models import ReportDraft
 from invest_research.prompts.loader import PromptName, load_prompt
 from invest_research.settings import ResearchProfile
@@ -141,6 +148,17 @@ def template_guide(section_name: str | None = None) -> dict[str, object]:
 # 必需章节与 citation_keys 结构检查，修订流程仍可使用 CitationVerifier；
 # 不在此虚构“已实现所有引用语义校验”。
 
+# P06-11B：JSON 文本输出阶段附加约束（只用于 deepseek/generic 本地校验路径）；
+# 不修改金融业务含义，只约束序列化格式。
+_JSON_TEXT_INSTRUCTION = (
+    "\n"
+    "输出格式严格要求：\n"
+    "1. 最终答案只能是一个 JSON object（可直接被 json.loads 解析）；\n"
+    "2. 不要输出 Markdown 代码围栏（不要使用 ```json 或 ```）；\n"
+    "3. 不要输出任何解释文字、前后缀或自然语言说明；\n"
+    "4. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
+)
+
 
 def build_writer_agent(
     config: LLMConfig,
@@ -185,7 +203,14 @@ def build_writer_task(
     profile: ResearchProfile | None = None,
     artifact_loader: ArtifactLoader | None = None,
 ) -> Task:
-    """构建 Writer Task：fake LLM + 写作工具白名单，输出绑定 ReportDraft。"""
+    """构建 Writer Task：按供应商结构化输出能力决策输出路径（P06-11B）。
+
+    - qwen（NATIVE_PYDANTIC）：绑定 ``output_pydantic=ReportDraft``，保留原路径；
+    - deepseek/generic（JSON_TEXT_LOCAL_VALIDATION）：**不绑定 output_pydantic**
+      （也不改用 output_json —— CrewAI 1.6.1 中二者进入同一 ``convert_to_model``），
+      Agent 返回普通 JSON 文本；Crew 完成后由 ``PackBoundary`` 本地解析为
+      ``ReportDraft``。
+    """
     task_agent = (
         agent
         if agent is not None
@@ -193,19 +218,36 @@ def build_writer_task(
             config, fake=fake, profile=profile, artifact_loader=artifact_loader
         )
     )
+    description = (
+        "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
+        "按 writer_prompt_v2 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
+        "写作开始时只调用一次 WriterContextReader，读取 research_pack、analysis_pack 与"
+        " required_sections；不要重复调用工具。若 status=partial，必须把 missing 中的"
+        "缺失项写入数据限制章节，不得编造。读取后立即输出最终 ReportDraft。\n"
+        "必须读取 analysis_pack.completeness 并按状态组织报告：complete 正常撰写财务表现；"
+        "partial 把 limitations 中的缺失数据及原因写入数据限制章节；unavailable 在财务/"
+        "指标章节仅说明数据不可用（引用 unavailable_reason），不得推断或编造财务数据。\n"
+        "要求：每个事实带 citation key，区分事实/分析/风险/数据限制，"
+        "包含非投资建议声明与数据截止日。"
+    )
+    if (
+        structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    ):
+        # P06-11B：deepseek/generic 走 JSON 文本 + 本地校验路径。
+        # 提示词明确要求只输出 JSON object；不触发 CrewAI 远程 Pydantic parse。
+        description = description + _JSON_TEXT_INSTRUCTION
+        return Task(
+            description=description,
+            expected_output=(
+                "一个可被 ReportDraft 校验通过的 JSON object（非自由文本）"
+            ),
+            agent=task_agent,
+            # 不绑定 output_pydantic：避免 CrewAI 在输出转换阶段调用
+            # beta.chat.completions.parse(response_model=...)（DeepSeek HTTP 400）。
+            # 由本地 PackBoundary 解析。
+        )
     return Task(
-        description=(
-            "撰写任务输入：input_company={input_company}，as_of_date={as_of_date}，language={language}。\n"
-            "按 writer_prompt_v2 规则撰写符合 ReportDraft 契约的中文投资研究初稿。\n"
-            "写作开始时只调用一次 WriterContextReader，读取 research_pack、analysis_pack 与"
-            " required_sections；不要重复调用工具。若 status=partial，必须把 missing 中的"
-            "缺失项写入数据限制章节，不得编造。读取后立即输出最终 ReportDraft。\n"
-            "必须读取 analysis_pack.completeness 并按状态组织报告：complete 正常撰写财务表现；"
-            "partial 把 limitations 中的缺失数据及原因写入数据限制章节；unavailable 在财务/"
-            "指标章节仅说明数据不可用（引用 unavailable_reason），不得推断或编造财务数据。\n"
-            "要求：每个事实带 citation key，区分事实/分析/风险/数据限制，"
-            "包含非投资建议声明与数据截止日。"
-        ),
+        description=description,
         expected_output="一个可被 ReportDraft 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,
         output_pydantic=ReportDraft,

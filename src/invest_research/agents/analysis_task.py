@@ -1,10 +1,16 @@
 """P03-06 构建 Analysis Task（CrewAI 1.6.1；P05-12B 起支持统一 LLM 接口）。
 
-目标（docs/05 P03-06 验收）：
+目标（docs/05 P03-06 验收；P06-11B 起支持供应商结构化输出路径）：
 - 组装财报分析 Agent（注入 ``AnyLLM``：FakeLLM 或 crewai.BaseLLM）与 ``Task``；
-- Task 绑定 ``output_pydantic=FinancialAnalysisPack``；
 - **只暴露允许的分析工具**（least-privilege）：FinancialFactQuery + FinancialCalculator，
-  不暴露搜索/下载等无关工具；LLM 不自算，算术经确定性 FinancialCalculator 工具。
+  不暴露搜索/下载等无关工具；LLM 不自算，算术经确定性 FinancialCalculator 工具；
+- 结构化输出路径按 ``LLM_VENDOR`` 决策（P06-11B）：
+  - qwen（NATIVE_PYDANTIC）：Task 绑定 ``output_pydantic=FinancialAnalysisPack``
+    （CrewAI 原生远程 Pydantic parse，供应商支持 response_format）；
+  - deepseek/generic（JSON_TEXT_LOCAL_VALIDATION）：**不绑定 output_pydantic**
+    （DeepSeek 普通 Chat Completion 不支持 OpenAI json_schema response_format，
+    绑定时会在输出转换阶段触发 beta.chat.completions.parse 导致 HTTP 400），
+    Agent 返回普通 JSON 文本，由 PackBoundary/PackBoundary 本地校验。
 
 CrewAI 1.6.1 关键 API（依据官方 docs/edge 的 AGENTS 模板）：
 - ``@tool("Name")`` 装饰器把函数包成 CrewAI 工具；
@@ -21,7 +27,14 @@ from pathlib import Path
 from crewai import Agent, Task
 from crewai.tools import tool
 
-from invest_research.agents.llm_factory import AnyLLM, LLMConfig, LLMRole, build_real_llm
+from invest_research.agents.llm_factory import (
+    AnyLLM,
+    LLMConfig,
+    LLMRole,
+    StructuredOutputMode,
+    build_real_llm,
+    structured_output_mode,
+)
 from invest_research.domain.models import FinancialAnalysisPack
 from invest_research.financial.concept_mapping import (
     ConceptMapping,
@@ -167,6 +180,17 @@ def financial_calculator(
 # Analysis Agent 最小工具白名单（least-privilege：只有"查事实"和"算指标"两个确定性能力）
 _ANALYSIS_TOOLS = [financial_fact_query, financial_calculator]
 
+# P06-11B：JSON 文本输出阶段附加约束（只用于 deepseek/generic 本地校验路径）；
+# 不修改金融业务含义，只约束序列化格式。
+_JSON_TEXT_INSTRUCTION = (
+    "\n"
+    "输出格式严格要求：\n"
+    "1. 最终答案只能是一个 JSON object（可直接被 json.loads 解析）；\n"
+    "2. 不要输出 Markdown 代码围栏（不要使用 ```json 或 ```）；\n"
+    "3. 不要输出任何解释文字、前后缀或自然语言说明；\n"
+    "4. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
+)
+
 
 def build_analysis_agent(
     config: LLMConfig,
@@ -206,29 +230,55 @@ def build_analysis_task(
     agent: Agent | None = None,
     profile: ResearchProfile | None = None,
 ) -> Task:
-    """构建 Analysis Task：用 fake LLM + 分析工具白名单，输出绑定 FinancialAnalysisPack。"""
+    """构建 Analysis Task：按供应商结构化输出能力决策输出路径（P06-11B）。
+
+    - qwen（NATIVE_PYDANTIC）：绑定 ``output_pydantic=FinancialAnalysisPack``，
+      保留原有远程 Pydantic 转换路径（Qwen 支持 response_format）；
+    - deepseek/generic（JSON_TEXT_LOCAL_VALIDATION）：**不绑定 output_pydantic**
+      （也不改用 output_json —— CrewAI 1.6.1 中 output_json 与 output_pydantic
+      都进入同一个 ``convert_to_model``），Agent 返回普通 JSON 文本；
+      Crew 完成后由 ``PackBoundary``/``pack_parsing`` 统一本地解析为
+      ``FinancialAnalysisPack``。
+    """
     task_agent = (
         agent if agent is not None else build_analysis_agent(config, fake=fake, profile=profile)
     )
+    description = (
+        "分析任务输入：input_company={input_company}，as_of_date={as_of_date}，requested_forms={requested_forms}。\n"
+        "以下 financial_facts 是确定性预取并按 as_of_date 截断的 SEC XBRL JSON（可能是 "
+        "合法 JSON 数组，也可能是空数组 [] 表示未取到任何事实）：\n"
+        "{financial_facts}\n"
+        "只允许使用该 JSON 中的 value/unit/period/concept/locator 生成 facts；"
+        "禁止从模型知识、新闻摘要或推测填数。\n"
+        "如果 financial_facts 是空数组 []：必须输出 schema_version=analysis_pack_v2、"
+        "completeness=unavailable、facts=[]、metrics=[]，并在 unavailable_reason 中说明"
+        "未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的工具错误结构，也不得把"
+        "该 JSON 当作文本原样输出。\n"
+        "若只有部分可用事实或指标口径缺失：completeness=partial 并在 limitations 说明"
+        "缺哪些数据及原因；不得把缺失伪装成 complete。\n"
+        "基于上游 ResearchPack 与上述 FinancialFact，选择可比期间与 concept，"
+        "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
+        "产出可被 FinancialAnalysisPack(schema v2) 校验通过的结构化对象（只含合法字段）"
+        "；completeness=unavailable 是合法业务结果，不是系统异常。"
+    )
+    if (
+        structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    ):
+        # P06-11B：deepseek/generic 走 JSON 文本 + 本地校验路径。
+        # 提示词明确要求只输出 JSON object；不得触发 CrewAI 远程 Pydantic parse。
+        description = description + _JSON_TEXT_INSTRUCTION
+        return Task(
+            description=description,
+            expected_output=(
+                "一个可被 FinancialAnalysisPack 校验通过的 JSON object（非自由文本）"
+            ),
+            agent=task_agent,
+            # 不绑定 output_pydantic：避免 CrewAI 在输出转换阶段调用
+            # beta.chat.completions.parse(response_model=...) 发送不支持的
+            # response_format（DeepSeek HTTP 400）。由本地 PackBoundary 解析。
+        )
     return Task(
-        description=(
-            "分析任务输入：input_company={input_company}，as_of_date={as_of_date}，requested_forms={requested_forms}。\n"
-            "以下 financial_facts 是确定性预取并按 as_of_date 截断的 SEC XBRL JSON（可能是 "
-            "合法 JSON 数组，也可能是空数组 [] 表示未取到任何事实）：\n"
-            "{financial_facts}\n"
-            "只允许使用该 JSON 中的 value/unit/period/concept/locator 生成 facts；"
-            "禁止从模型知识、新闻摘要或推测填数。\n"
-            "如果 financial_facts 是空数组 []：必须输出 schema_version=analysis_pack_v2、"
-            "completeness=unavailable、facts=[]、metrics=[]，并在 unavailable_reason 中说明"
-            "未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的工具错误结构，也不得把"
-            "该 JSON 当作文本原样输出。\n"
-            "若只有部分可用事实或指标口径缺失：completeness=partial 并在 limitations 说明"
-            "缺哪些数据及原因；不得把缺失伪装成 complete。\n"
-            "基于上游 ResearchPack 与上述 FinancialFact，选择可比期间与 concept，"
-            "调用 FinancialFactQuery 确定口径、FinancialCalculator 完成所有算术，"
-            "产出可被 FinancialAnalysisPack(schema v2) 校验通过的结构化对象（只含合法字段）"
-            "；completeness=unavailable 是合法业务结果，不是系统异常。"
-        ),
+        description=description,
         expected_output="一个可被 FinancialAnalysisPack 校验通过的结构化对象（非自由文本）。",
         agent=task_agent,
         output_pydantic=FinancialAnalysisPack,

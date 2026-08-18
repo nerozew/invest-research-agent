@@ -213,3 +213,50 @@ scripts/render_report_pdf.py                   # 示例重新生成脚本
 - deploy/compose.benchmark.yml: isolated project
 - calibrate run_id=7b17ca17a109: 10/10 = 100%, P50=0.334s P95=0.393s
 - P06-10 official 100 runs NOT executed (await approval)
+
+## P06-11A: LLM Token、延迟与调用链可观测性准确性收口（DONE, not pushed）
+- `infrastructure/observability/llm_call_observer.py`: 订阅 CrewAI LLMCall* 事件，每次真实模型调用只计数一次；token 取事件 `usage` 正式字段；duration 用 Started→Completed/Failed 本地实测；Jaeger `llm.request` span 属性仅 provider/model/role/status + duration/tokens。
+- `flow_wiring.py`: kickoff 集成 observer；删除 CrewOutput.token_usage 复制给三角色的 三倍计数。
+- `deploy/.../research.json`: LLM Row 增加 Token 1h/24h、成功/失败 1h/24h、P50/P95/P99、 usage missing 1h、provider/model/role 筛选变量；PromQL 用 rate/increase。
+- `tests/test_llm_observability.py` 20 用例通过 + `test_grafana_dashboard.py` PromQL 可解析； 回归 55（flow_wiring/metrics）+ 46（observability/tracing）全绿；未执行真实付费调用。
+- 未 push；未运行 100 次基准；未 docker compose down -v。
+
+## P06-11B: 修复 DeepSeek 与 CrewAI 结构化输出不兼容（DONE, not pushed）
+
+- **根因**：CrewAI 1.6.1 `task.py:_export_output`（L768）中 `output_pydantic` 与 `output_json`
+  都进入同一个 `convert_to_model`；Agent 最终文本无法直接通过 Pydantic 校验时进入
+  `Converter.to_pydantic`，在 `llm.supports_function_calling()` 时调用
+  `llm.call(..., response_model=...)` → OpenAI SDK beta.chat.completions.parse →
+  json_schema response_format → DeepSeek 普通 Chat Completion HTTP 400
+  （"This response_format type is unavailable now"）。
+- **修复（按 LLM_VENDOR 集中决策，不靠 base_url 猜测）**：
+  - `agents/llm_factory.py`：新增 `StructuredOutputMode`（NATIVE_PYDANTIC /
+    JSON_TEXT_LOCAL_VALIDATION）与 `structured_output_mode(config)`（qwen→原生、
+    deepseek/generic→JSON 文本 + 本地校验）。
+  - `agents/analysis_task.py` / `agents/writer_task.py`：JSON 文本路径下不绑定
+    `output_pydantic`（也不改用 `output_json`——同一 Converter 路径）；提示词追加
+    "最终答案只能是一个 JSON object、不要 Markdown 围栏、不要解释文字、
+    工具参数不能作为最终答案"；Crew 完成后由现有 `PackBoundary` 本地解析。
+  - `domain/errors.py`：新增稳定错误码 `STRUCTURED_OUTPUT_UNSUPPORTED`（非重试）。
+  - `application/failure_classifier.py`：识别 response_format/json_schema 拒绝，
+    优先于迭代耗尽分类。
+  - `infrastructure/flow_wiring.py`：kickoff 异常优先分类为
+    `STRUCTURED_OUTPUT_UNSUPPORTED`；同一次执行同时迭代耗尽时保留根因并记录前置信息。
+- **验证**：`tests/test_p06_11b_deepseek_structured_output.py` 27 用例通过
+  （DeepSeek 三角色不绑 output_pydantic/output_json、Qwen 保留原生路径、
+  本地解析为三个 Pack、缺字段仍失败、工具参数不被当 Pack、response_format 400
+  分类为 STRUCTURED_OUTPUT_UNSUPPORTED、API Key 不泄露、三角色模型配置生效）；
+  回归 143 passed（pack boundary/contracts、research/analysis/writer task、
+  llm_factory、crew_factory、flow_wiring、final_report_artifacts）；Ruff 全绿；
+  `mypy src` 116 个源文件全绿。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；未 push；未启动 Docker；
+  未运行 100 次基准；未进入下一任务。
+- **下一候选任务**：`P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。
+- **Docker 重建与一次 fast live 验收步骤**（供后续执行）：
+  1. `docker compose build api worker`（重建镜像使 flow_wiring 变更生效）；
+  2. `docker compose up -d prometheus grafana jaeger api worker`（jaeger 需已含于 compose）；
+  3. 以 `research_profile=fast` 创建一个真实任务（需有效 LLM_API_KEY），等待 succeeded；
+  4. 验证 Prometheus `llm_requests_total{status="success"}` 计数 > 0 且按 role 正确、 `llm_tokens_total` 有 input/output、`llm_usage_missing_total` 仅在真实无 usage 时出现；
+  5. Jaeger 搜索含 `llm.request` span，属性仅含 llm.provider/model/role/status/duration_s/tokens_total；
+  6. Grafana LLM Row 中 Token 1h/24h 面板有非空数据、P50/P95/P99 有曲线、筛选变量可用；
+  7. 完成后把结果追加到 docs/18 或本文件（不得自行 push）。

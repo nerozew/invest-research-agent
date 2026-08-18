@@ -48,6 +48,40 @@ class LLMRole(StrEnum):
         return f"llm_model_{self.value}"
 
 
+class StructuredOutputMode(StrEnum):
+    """供应商结构化输出能力（P06-11B，Task 输出路径决策）。
+
+    决定 Task 是否绑定 CrewAI 原生 ``output_pydantic``（会触发远程 Pydantic
+    parse / OpenAI response_format json_schema）：
+
+    - ``NATIVE_PYDANTIC``：允许使用 CrewAI 原生 output_pydantic 路径
+      （由供应商原生支持 response_format schema）；
+    - ``JSON_TEXT_LOCAL_VALIDATION``：禁止 CrewAI 原生 Pydantic parse，
+      由 Agent 返回普通 JSON 文本，再经本地 PackBoundary/Pydantic 校验。
+    """
+
+    NATIVE_PYDANTIC = "native_pydantic"
+    JSON_TEXT_LOCAL_VALIDATION = "json_text_local_validation"
+
+
+def structured_output_mode(config: LLMConfig) -> StructuredOutputMode:
+    """按显式 ``LLM_VENDOR`` 决定供应商的结构化输出路径（P06-11B，集中决策）。
+
+    - ``qwen``：允许当前原生 output_pydantic 路径（供应商支持 response_format）；
+    - ``deepseek``：禁止 CrewAI 原生 Pydantic parse，改用 JSON 文本 + 本地校验
+      （DeepSeek 普通 Chat Completion 不支持 OpenAI json_schema response_format，
+      已实测 HTTP 400 “This response_format type is unavailable now”）；
+    - ``generic``：默认采用安全的 JSON 文本 + 本地校验，除非未来明确声明支持。
+
+    不根据 base_url 猜测 —— 一律使用显式 ``LLMConfig.vendor``。
+    """
+    if config.vendor == "qwen":
+        return StructuredOutputMode.NATIVE_PYDANTIC
+    if config.vendor == "deepseek":
+        return StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    return StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+
+
 class LLMConfig(BaseModel):
     """供应商无关的 LLM 配置契约（纯数据，无外部依赖）。
 

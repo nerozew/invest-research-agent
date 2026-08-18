@@ -2417,3 +2417,69 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 - Learning: e2e HTTP benchmark vs in-process; denominator isolation; binary PDF download
 - Question: why not claim workflow_success_rate as live_agent_success_rate?
 - Limits: prometheus snapshot not queried yet; control scenarios only cancel
+
+## P06-11A: LLM Token、延迟与调用链可观测性准确性收口（✅ 已完成 2026-08-18）
+
+**任务目标**：修复 Prometheus/Grafana 的 LLM 指标不准确问题（Crew 汇总 usage 三倍计数、duration 未 observe、失败次数缺失、dashboard 缺 Token 总量/分位数），并补齐 Jaeger 真实 LLM 调用 span。
+
+**修改文件**：
+- `infrastructure/observability/llm_call_observer.py`（新增）：LlmCallObserver 订阅 CrewAI 官方 LLMCallStarted/Completed/Failed 事件，在每次真实模型调用边界写 llm_requests_total / llm_request_duration_seconds / llm_tokens_total / llm_usage_missing_total 与 `llm.request` span；role 由 Agent.role 可读名映射为 research/analysis/writer；token 只从事件 `usage` 正式字段提取（input/output/cached_input）。
+- `infrastructure/flow_wiring.py`：kickoff 时订阅 LLM 事件；`_record_agent_metrics` 删除把 CrewOutput.token_usage 复制给三个角色的三倍计数逻辑（保留 Agent 耗时指标）。
+- `deploy/grafana/provisioning/dashboards/research.json`：LLM Row 增加 Token 1h/24h 总量、调用成功/失败 1h/24h、P50/P95/P99 延迟、usage missing 1h、provider/model/role 筛选变量；全部 PromQL 使用 rate/increase，无数据时 Grafana 显示 No data（不伪造 0）。
+- `tests/test_llm_observability.py`（新增 20 用例）+ `tests/test_grafana_dashboard.py`（P06-11A 校验已含）。
+
+### 3 个知识点
+
+1. **CrewAI 1.6.1 有官方 LLM 事件总线（非 monkey patch）**：`crewai.llm.LLM` 在每次真实 模型调用边界经 `crewai_event_bus` emit `LLMCallStartedEvent` / `LLMCallCompletedEvent` / `LLMCallFailedEvent`；事件 `LLMEventBase.__init__` 把 `from_agent` 转换为 `agent_role` （Agent.role 可读名），再映射回内部稳定 role。这是比任务级 token_usage 汇总更精确的 “每次真实调用”入口。
+2. **事件字段必须对照安装版本源码验证**：实际 `LLMCallCompletedEvent` 的 `usage` 是正式 字段（`usage: dict | None`），`LLMCallFailedEvent` 有 `model` 字段，而**都没有** `duration` 字段；不要依赖 `get_extra()`（BaseEvent 默认忽略 extra）。耗时用 Started→Completed/Failed 的本地 `time.monotonic()` 配对实测。
+3. **准确计数不等于把汇总拆分**：修复方案不是“把 Crew 汇总 usage 平均/复制到三个角色”，而是订阅每次真实调用事件，让 usage/token/耗时天然落在发起该调用的 Agent 角色上——一次调用只在 Completed 或 Failed 中记录一次，从根本上消除三倍计数。
+
+### 检查问题（请用自己的话回答）
+
+为什么说“把 CrewOutput.token_usage 复制给三个角色”是语义错误而不只是数值错误？提示：一次 research task 内可能发生多次真实模型调用（plan/tool 循环/final answer），Crew 汇总 usage 无法告诉我们是哪次调用、哪个角色消耗了多少。
+
+### 已知限制与风险
+
+- 事件总线只覆盖 CrewAI 1.6.1 官方 emit 点；若 CrewAI 内部某些调用路径不 emit （如缓存命中/内部重试），该次调用不计入（保守不伪造）。
+- Failed 事件若 `model` 字段缺失，回退最近一次 Started 的 model 配对；完全无 Started 配对时丢弃（不猜测模型名）。
+- duration 用本地实测，不依赖事件字段；同 (role, model) 串行调用冲突时取最近一次。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；未 push；未运行 100 次基准；未执行 docker compose down -v。
+
+### 下一任务建议
+
+- 按 docs/12 末尾给出的 Docker 重建与一次 fast live 验收步骤验证真实调用下的指标/span 准确性后，再评估 P06-12（README 演示）或 Checkpoint 升级。
+
+## P06-11B: 修复 DeepSeek 与 CrewAI 结构化输出不兼容（✅ 已完成 2026-08-18）
+
+**任务目标**：修复 DeepSeek 普通 Chat Completion 在 CrewAI output_pydantic 输出转换阶段触发 `beta.chat.completions.parse(response_model=...)` 发送不支持的 response_format 导致 HTTP 400（"This response_format type is unavailable now"）。不修改金融业务含义、不放宽 Pack 必填字段、不触碰工具调用能力。
+
+**根因**：CrewAI 1.6.1 的 `task.py:_export_output`（L768）中 `output_pydantic` 与 `output_json` 都进入同一个 `convert_to_model`；当 Agent 最终文本无法直接通过 Pydantic 校验时进入 `Converter.to_pydantic`（`converter.py`），在 `llm.supports_function_calling()` 时调用 `llm.call(..., response_model=self.model)`，触发 OpenAI SDK `beta.chat.completions.parse` 并发送 json_schema 类型的 response_format。DeepSeek 普通 Chat Completion 不支持该 response_format → 请求阶段 400。这不是 Pack 字段设计问题，也不是 max_iter / 网络重试能解决的。
+
+**修改文件**：
+- `agents/llm_factory.py`：新增 `StructuredOutputMode`（NATIVE_PYDANTIC / JSON_TEXT_LOCAL_VALIDATION）与 `structured_output_mode(config)`，按显式 `LLM_VENDOR` 集中决策（qwen→原生，deepseek/generic→JSON 文本 + 本地校验），不根据 base_url 猜测。
+- `agents/analysis_task.py`、`agents/writer_task.py`：JSON 文本路径下不绑定 `output_pydantic`（也不改用 `output_json`——CrewAI 1.6.1 中二者同一 Converter 路径）；提示词追加"最终答案只能是一个 JSON object、不要 Markdown 围栏、不要解释文字、工具参数不能作为最终答案"；Crew 完成由现有 `PackBoundary` 本地解析。
+- `domain/errors.py`：新增稳定错误码 `STRUCTURED_OUTPUT_UNSUPPORTED`（非重试）。
+- `application/failure_classifier.py`：识别 response_format/json_schema 拒绝，优先于迭代耗尽分类。
+- `infrastructure/flow_wiring.py`：kickoff 异常优先分类为 `STRUCTURED_OUTPUT_UNSUPPORTED`；同一次执行同时迭代耗尽时保留根因并记录前置信息。
+- `tests/test_p06_11b_deepseek_structured_output.py`（新增 27 用例）。
+
+### 3 个知识点
+
+1. **CrewAI 的 output_json 与 output_pydantic 进入同一条远程转换路径**：`task.py` 中二者都是 `convert_to_model(result, output_pydantic, output_json, ...)`；不要以为换 `output_json` 就能避开 beta parse。对不支持 response_format 的供应商，唯一安全路径是不绑定任何 output_*，让 Agent 返回 JSON 文本，再由本地 Pydantic/PackBoundary 校验。
+2. **"供应商能力"必须用显式标识决策，而不是 base_url 猜测**：同一 OpenAI-compatible base_url 可能同时被不同网关使用；用 `LLMConfig.vendor`（来自 `LLM_VENDOR` env）集中决定结构化输出能力，保证可测试、可审计。
+3. **错误分类要保留最接近失败根因的一层**：response_format 400 发生在请求阶段，是比"迭代耗尽/网络瞬态"更直接的根因；即使同一次执行同时出现迭代耗尽，也应分类为 `STRUCTURED_OUTPUT_UNSUPPORTED`（不可重试）并在日志记录前置迭代信息。
+
+### 检查问题（请用自己的话回答）
+
+为什么在 CrewAI 1.6.1 中，即使把 Task 的 `output_json` 换成 `output_pydantic`（或反过来），DeepSeek 依然可能在输出转换阶段发出带 json_schema response_format 的请求？提示：两个参数最终进入哪一个函数，判断依据是什么？
+
+### 已知限制与风险
+
+- DeepSeek 输出质量仍依赖提示词约束（JSON object 无围栏/无解释）；本地 PackBoundary 会拒绝非法结构，但不会修复语义缺失。
+- 未执行真实 DeepSeek/Qwen 付费调用（遵守限制）；真实行为差异需通过受控 live smoke 验证。
+- `structured_output_mode` 是静态能力声明；若某供应商未来支持 response_format，需显式更新该函数（不允许静默放宽）。
+- 未 push；未启动 Docker；未运行 100 次基准；未进入下一任务。
+
+### 下一任务建议
+
+- 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Analysis/Writer 的 JSON 文本输出能被本地 PackBoundary 正常解析；再评估 P06-12（README 演示）或 Checkpoint 升级。

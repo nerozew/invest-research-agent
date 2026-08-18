@@ -81,6 +81,22 @@ def classify_failure(exc: Exception, *, stage: str | None = None) -> FailureInfo
 
     text = f"{type(exc).__name__}: {exc}".lower()
 
+    # P06-11B：供应商拒绝远程结构化输出（response_format/JSON Schema 不受支持）。
+    # 必须优先于迭代耗尽判断——请求阶段 400 是更接近失败根因的分类；
+    # 即使同一次执行同时出现迭代耗尽，也保留 response_format 根因。
+    if (
+        "response_format" in text
+        or "response format" in text
+        or "json_schema" in text
+        or "this response_format type is unavailable" in text
+        or "structured output" in text and "not support" in text
+    ):
+        return FailureInfo(
+            error_code=ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED.value,
+            error_message=sanitize_message(str(exc)),
+            failure_stage=stage,
+        )
+
     # P06-11-fix：CrewAI 迭代预算耗尽（force_final_answer 提示后仍拿不到最终答案）。
     if "force_final_answer" in text or "maximum iterations reached" in text:
         return FailureInfo(
