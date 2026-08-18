@@ -2566,3 +2566,39 @@ Token Bucket 凭什么能"允许短时突发"又不违反长期平均速率？�
 ### 下一任务建议
 
 - 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Writer 输出 Markdown 能被 ReportDraftAssembler 组装、质量门禁照常工作；随后 P06-11（10 家公司效率对照实验）或 P06-12（README 演示）。
+
+## P06-11E: 实现 DeepSeek 原生 JSON Finalizer，再拆阶段执行（✅ 已完成 2026-08-19）
+
+**任务目标**：不增加 Agent；为 DeepSeek 建立真正的供应商原生结构化输出层——普通 Agent 工具循环 → 独立 JSON Finalizer → BoundaryCanonicalizer → Pydantic → 确定性 PackAssembler，并把一次 kickoff 拆成 Research/Analysis/Writer 三阶段短路执行。
+
+**根因**：DeepSeek Task 无 output_pydantic/output_json，仅靠提示词要求 JSON 不是服务端强制；P06-11D 已让 Writer 走 Markdown 路径，但 Research/Analysis 仍是一次 kickoff 后统一解析三次输出——Analysis 出现 `completeness=complete + unavailable_reason=""` 时，`finalize` 修复尝试跨 Job 复用（`_finalize_used` 是 runner 实例状态）导致状态污染。
+
+**修改文件**：
+- `application/structured_finalizer.py`（新增）：`StructuredFinalizer` 供应商无关端口（Protocol[T]）——输入原始 Agent 输出 + 目标草稿类型，输出经本地 Pydantic 校验的草稿；不执行工具、不修改原始事实、最多一次格式修复、状态限定当前 Job；`FinalizerError`（稳定 error_code）。
+- `infrastructure/finalizers/deepseek_json_object_finalizer.py`（新增）：`DeepSeekJsonObjectFinalizer`——普通 `chat.completions.create` + `response_format={"type":"json_object"}`；`tools=[]`、`thinking=false`（deepseek `extra_body={"thinking":{"type":"disabled"}}`）；检查 `finish_reason`（length 稳定失败）、空 content 稳定失败；`json.loads` → BoundaryCanonicalizer → Pydantic；第一次 Schema 失败只携带字段错误修复一次，第二次失败立即终止；可注入 mock client（零真实网络）。
+- `application/boundary_canonicalizer.py`（新增）：仅语义等价规范化——Optional[str] `""`/纯空白→None、strip、不修改数字/枚举、不补 company_id/source_id、不生成不存在的事实；`unavailable + 空原因` 仍失败；只覆盖 AnalysisSelectionDraft/FinancialAnalysisPack 的 unavailable_reason/analysis_notes/limitations 白名单。
+- `domain/models.py`：新增 `ResearchSelectionDraft`（只含 selected_source_urls/coverage_notes/conflicts；校验 strip URL 并过滤空项）。
+- `application/research_assembler.py`（新增）：`ResearchPackAssembler`——LLM 只选择 URL，本地从可信 SEC 申报记录确定性构造 Source（canonical_url 必须命中 primary_document_url）；无有效来源 → ResearchAssemblerError（禁止伪造 ResearchPack）。
+- `infrastructure/flow_wiring.py`：新增 `_RunContext`（每次 run(request) 独立：finalization_count/prefetch_result/analysis_facts/profile/effective_config/stats/recorder/budget）；`_finalize_research_pack` 改用 `ctx.finalization_count`（修复跨 Job 泄漏）；生产路径（未注入 crew_factory）走三阶段 `_run_staged`（Research→Finalize/Validate/Assemble→Analysis→Writer，前序成功才执行下一步）；注入 fake crew 保持一次 kickoff 兼容；`_staged_artifact_loader` 让 Writer 只读到已组装 pack。
+- `tests/test_p06_11e_deepseek_json_finalizer.py`（新增 22 用例，覆盖 20 项契约）。
+
+### 3 个知识点
+
+1. **服务端结构化约束与提示词承诺的区别（P06-11B/D 的延续）**：DeepSeek 普通 Chat Completion 支持的 `response_format={"type":"json_object"}` 只强制"输出是 JSON 对象"，不强制"符合特定 schema"。因此 Finalizer 提示词仍要携带目标草稿的完整 JSON 示例，且输出必须经**本地 Pydantic** 校验——服务端强制 JSON、本地强制 schema，两层缺一不可。
+2. **"每次 run 独立上下文"才能隔离跨 Job 状态**：`_finalize_used`、`_prefetch_result`、`_analysis_facts` 放在 runner 实例上，会在同一 runner 连续处理两个 Job 时泄漏（Job A 的 finalization_count 影响 Job B）。`_RunContext` dataclass 每次 `run(request)` 新建，把 Job 特有状态全部限定在当前 Job；测试用两个连续 run 验证 `_active_ctx` 不是同一对象。
+3. **阶段短路让失败更早且归因更干净**：一次 kickoff 三输出统一解析的问题在于——Analysis 失败时 Research 已经执行完，但 Runner 很难告诉用户"问题出在 Analysis 而不是更早"。拆成 Research→Analysis→Writer 三阶段后，任一阶段失败立即抛 `LiveFlowExecutionError`（带 failure_stage），后续阶段根本不执行（节省费用、错误归因清晰）。
+
+### 检查问题（请用自己的话回答）
+
+DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_format={"type":"json_schema"}` 有什么区别？为什么 Finalizer 在拿到 `finish_reason=length` 时选择"稳定失败"而不是"重跑整个 Agent"？提示：length 截断说明 max_tokens 预算不足，重跑同样的 prompt/max_tokens 大概率还会截断。
+
+### 已知限制与风险
+
+- Finalizer 的"修复"只携带字段错误文本（当前 `_extract_field_errors` 返回空列表），未把 Pydantic 结构化错误喂回模型；真实 live 下模型修复成功率有待验证。
+- 分阶段生产路径尚未在真实 DeepSeek 下运行（遵守"不执行 live"限制）；测试用 mock client 断言请求体契约，未验证真实供应商响应。
+- `_staged_artifact_loader` 只返回 research_pack/analysis_pack 两个 key，未扩展其他 key（Writer 默认白名单只用这两个）。
+- 未 push；未启动 Docker；未运行 100 次基准；未进入下一任务。
+
+### 下一任务建议
+
+- 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Finalizer 把真实 Agent 输出转成 SelectionDraft 并被本地 Assembler 组装；随后评估 P06-11（10 家公司效率对照实验）或 P06-12（README 演示）。
