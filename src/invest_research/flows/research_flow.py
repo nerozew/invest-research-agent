@@ -54,17 +54,51 @@ class ResearchFlow(Flow[ResearchFlowState]):
         self._job_id: uuid.UUID | None = None
 
     def _mark_running(self, step: str) -> None:
-        """步骤开始钩子（progress 未注入时静默跳过；写入失败不中断任务）。"""
+        """步骤开始钩子（progress 未注入时静默跳过；写入失败不中断任务）。
+
+        P06-11J：同时开启真实阶段 span，覆盖 step 方法真实执行窗口。
+        """
+        self._stage_span_start(step)
         if self._progress is None or self._job_id is None:
             return
         try:
             self._progress.mark_step_running(self._job_id, step)
         except Exception:
-            # 进度写入尽力而为：任何失败都不得中断任务（脱敏日志由调用方负责）
+            pass
+
+    def _stage_span_start(self, step: str) -> None:
+        """开启该 step 的真实执行 span（尽力而为）。"""
+        self._active_stage_span = None
+        self._active_stage_token = None
+        try:
+            from opentelemetry import trace
+
+            from invest_research.infrastructure.observability.tracing import get_tracer
+
+            span = get_tracer("stages").start_span(f"step.{step}", attributes={"step": step})
+            self._active_stage_span = span
+        except Exception:
+            self._active_stage_span = None
+
+    def _stage_span_end(self, status: str) -> None:
+        """结束 step 真实执行 span（尽力而为）。"""
+        try:
+            from opentelemetry import trace
+
+            if getattr(self, "_active_stage_token", None) is not None:
+                trace.detach(self._active_stage_token)
+            span = getattr(self, "_active_stage_span", None)
+            if span is not None:
+                span.set_attribute("status", status)
+                span.end()
+            self._active_stage_span = None
+            self._active_stage_token = None
+        except Exception:
             pass
 
     def _mark_succeeded(self, step: str) -> None:
         """步骤成功钩子。"""
+        self._stage_span_end("success")
         if self._progress is None or self._job_id is None:
             return
         try:
@@ -254,4 +288,16 @@ class ResearchFlow(Flow[ResearchFlowState]):
         self._progress = progress
         self.state.request = request
         self.kickoff()
+        self._flush_span_exports()
         return self.state
+
+    def _flush_span_exports(self) -> None:
+        try:
+            from opentelemetry import trace
+
+            provider = trace.get_tracer_provider()
+            force_flush = getattr(provider, "force_flush", None)
+            if callable(force_flush):
+                force_flush(timeout_millis=5000)
+        except Exception:
+            pass

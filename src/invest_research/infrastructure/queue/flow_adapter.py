@@ -73,6 +73,22 @@ class ResearchJobExecutionHandler:
         self._recorder = recorder
 
     def process(self, job_id: uuid.UUID) -> None:
-        self._service.process(job_id)
+        try:
+            self._service.process(job_id)
+        finally:
+            self._flush_traces()
         if self._recorder is not None:
             self._recorder(job_id)
+
+    @staticmethod
+    def _flush_traces() -> None:
+        """P06-11J：Job 处理完成后立即导出并 flush 残留 span（尽力而为）。"""
+        try:
+            from opentelemetry import trace
+
+            provider = trace.get_tracer_provider()
+            force_flush = getattr(provider, "force_flush", None)
+            if callable(force_flush):
+                force_flush(timeout_millis=5000)
+        except Exception:
+            pass
