@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date
-from typing import Iterable
+from typing import Any, Iterable
 
 from invest_research.application.analysis_assembler import build_fact_ref
 from invest_research.domain.models import (
@@ -120,13 +120,19 @@ class ReportAssemblerError(RuntimeError):
         self.failure_stage = "05_writer"
 
 
-def _source_citation_key(source: Source) -> str:
+def build_source_citation_key(source: Source) -> str:
     """为单个来源生成确定性 citation key（``src_`` + URL sha256 前 12 位 hex）。
 
     只依赖来源 canonical_url，不包含任何密钥/路径；与 fact_ref 风格一致。
+    本函数是 ``src_`` key 的唯一算法来源：CitationRegistry 与
+    ReportDraftAssembler 都复用此实现，禁止在其它位置重写第二套 URL hash。
     """
     digest = hashlib.sha256(source.canonical_url.encode("utf-8")).hexdigest()
     return f"src_{digest[:12]}"
+
+
+# 向后兼容别名（P06-11D 测试引用私有名；新代码一律使用 build_source_citation_key）。
+_source_citation_key = build_source_citation_key
 
 
 def build_report_title(
@@ -197,13 +203,21 @@ def _extract_cited_keys(
     research_pack: ResearchPack | None,
     analysis_pack: FinancialAnalysisPack | None,
     claim_keys: Iterable[str] | None,
+    registry: Any | None = None,
 ) -> list[str]:
     """确定性提取正文中实际出现的 citation key（去重保序，不伪造）。
+
+    - 传入 ``registry``（P06-11F CitationRegistry）时，候选键**只来自注册表**
+      ——注册表是唯一生成来源，禁止在此重算第二套 hash；
+    - 未传 registry 时回退旧候选集合（向后兼容既有测试/调用方）。
 
     候选键带 ``src_`` / ``fr_`` 等特殊前缀，普通 Markdown 文本误命中概率极低；
     逐 key 做子串匹配即可（key 长度短、前缀独特）。
     """
-    candidates = _candidate_citation_keys(research_pack, analysis_pack, claim_keys)
+    if registry is not None:
+        candidates = sorted(registry.keys(), key=lambda k: k)
+    else:
+        candidates = _candidate_citation_keys(research_pack, analysis_pack, claim_keys)
     return [key for key in candidates if key in markdown]
 
 
@@ -246,6 +260,7 @@ class ReportDraftAssembler:
         *,
         claim_keys: Iterable[str] | None = None,
         finish_reason: str | None = None,
+        registry: Any | None = None,
     ) -> ReportDraft:
         """把 Writer 的原始 Markdown 组装为合法 ReportDraft。
 
@@ -254,7 +269,9 @@ class ReportDraftAssembler:
         - ``research_pack`` / ``analysis_pack``：上游两个 pack（缺失时仍可组装，
           但 citation_keys 会相应减少，完整性交给 Quality Gate）；
         - ``claim_keys``：现有引用/claim 信息（可选），并入 citation 候选；
-        - ``finish_reason``：供应商返回的 finish_reason（"length" → 截断拒绝）。
+        - ``finish_reason``：供应商返回的 finish_reason（"length" → 截断拒绝）；
+        - ``registry``（P06-11F）：CitationRegistry——传入时 citation key
+          候选**只来自注册表**（不在此重算第二套 hash）；未传时回退旧逻辑。
         """
         text = str(writer_output or "").strip()
         if not text:
@@ -291,7 +308,7 @@ class ReportDraftAssembler:
             fallback=request.input_company if request is not None else "未知公司",
         )
         citation_keys = _extract_cited_keys(
-            text, research_pack, analysis_pack, claim_keys
+            text, research_pack, analysis_pack, claim_keys, registry=registry
         )
         return ReportDraft(
             version=_REPORT_DRAFT_VERSION,

@@ -2602,3 +2602,25 @@ DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_forma
 ### 下一任务建议
 
 - 在受控 live 环境下用 `LLM_VENDOR=deepseek` 跑一次 fast 任务，验证 Finalizer 把真实 Agent 输出转成 SelectionDraft 并被本地 Assembler 组装；随后评估 P06-11（10 家公司效率对照实验）或 P06-12（README 演示）。
+---
+
+## P06-11F：Writer 引用注册表 + 质量门禁准确性 + 有界修订 ✅
+
+**产物**：CitationRegistry / EmptyValuePolicy / DeterministicRevision / 修正后 quality_classifier
+
+### 3 个知识点
+
+1. **唯一生成来源原则**：`src_<hash>` 与 `fr_<hash>` 只能由一个确定性算法生成（`build_source_citation_key` / `build_fact_ref`），CitationRegistry、ReportDraftAssembler、Quality Gate 全部复用同一来源，禁止在某处重写第二套 hash。这保证了 Writer 看到的 key 与最终提取/校验的 key 严格一致。
+
+2. **免责声明语境的句子分隔符回溯**：禁止项检测不能只做子串匹配。用句子分隔符（。！？；\n）回溯到同句起点，再判断同句内是否有否定词（"不构成"等），才能区分"建议买入该股票。本报告不构成…"（真实建议）与"本报告不构成买入、卖出或目标价建议"（免责声明）。
+
+3. **确定性有界修订的约束**：修订只做"删除"（删除伪造 key / 删除建议行）与"格式包装"（把已出现的合法 key 加括号），绝不新增事实；注册表为空时修订返回 None（不伪造引用）；revision_attempted 标志保证最多尝试一次，第二次失败保持 rejected。
+
+### 检查问题（请用自己的话回答）
+为什么 ReportDraftAssembler 在 P06-11D 时"从可信集合 ∩ 正文提取 citation_keys"仍会得到空列表？修复为什么必须把注册表放在 Writer 执行**之前**而不是继续依赖"输出后提取"？
+
+### 已知限制与下一任务建议
+
+- 本任务未修改 P06-11E Finalizer 与 staged flow 结构；DeepSeek/Qwen 供应商路径保持不变。
+- 修订器目前只修复三类可修复 issue（missing_citation_keys / invalid_citation_key / forbidden_advice）；missing_section 不自动补造章节。
+- 下一候选：受控 live fast smoke（`LLM_VENDOR=deepseek` 一次真实任务验证注册表交付 + 引用非空 + 禁止项不误判）；随后 P06-11（10 家公司效率对照实验）。

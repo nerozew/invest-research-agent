@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from invest_research.application.citation_registry import CitationRegistry
 from invest_research.domain.models import (
     CompanyIdentity,
     FinancialAnalysisPack,
@@ -48,6 +49,17 @@ class ResearchFlowState(BaseModel):
 
     # 步骤 06：质量门禁
     quality_report: QualityReport | None = None
+
+    # P06-11F：确定性引用注册表（Writer 执行前生成，Quality Gate 用它校验
+    # 非法 citation key；模型不得自行生成 key）。注册表为空时 Writer 必须
+    # 进入"数据限制"表达，不能伪造引用。
+    citation_registry: CitationRegistry | None = None
+
+    # P06-11F：修订审计元数据（原稿/是否尝试/是否成功，供 manifest 与报告页
+    # 展示）。revision_attempted/succeeded 为确定性布尔标记。
+    revision_original_markdown: str | None = None
+    revision_attempted: bool = False
+    revision_succeeded: bool = False
 
     # 步骤 07：发布 manifest 摘要（由 P03-14 补全版本/耗时/模型等）
     run_manifest: dict[str, object] = {}

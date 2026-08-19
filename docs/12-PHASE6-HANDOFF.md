@@ -417,3 +417,31 @@ Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E�
 **下一候选任务**：受控 live 下持续观察 DeepSeek 报告的引用与禁止项质量（本次报告被
 门禁 rejected——缺 citation_keys 且含买入/卖出/目标价），优化 Writer 提示词后重测；
 随后 `P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。
+---
+
+## P06-11F：Writer 引用注册表 + 质量门禁准确性 + 有界修订（✅ 已完成 2026-08-19）
+
+**任务目标**：不修改 DeepSeek 结构化输出、不增加第二个模型；修复 Writer 看不到合法 citation key、禁止项误判、质量失败后缺少有界修订三个问题。
+
+**根因审计结论**：
+- `citation_keys` 为空根因：`WriterContextReader` 只返回 research_pack/analysis_pack/required_sections，**没有把最终 src_<hash>/fr_<hash> key 交给 Writer**。这些 key 是 Writer 输出 Markdown **之后**才由 ReportDraftAssembler 从 pack 计算，导致 Writer 无法写出合法 key → 提取为空。
+- 禁止项误判确认存在：`FORBIDDEN_PATTERNS=("买入","卖出","目标价","建议持仓")` 纯子串匹配，"本报告不构成买入、卖出或目标价建议"必然被误判为 CRITICAL。
+- 修订未接入：`_run_reflection` 只做路由记录，从未实际执行定向修订；且 `build_revision_task` 绑 `output_pydantic=ReportDraft`（DeepSeek 400）。
+
+**新增文件**：
+- `application/citation_registry.py`：`CitationRegistry/CitationRegistryEntry`——src 复用 `build_source_citation_key`（URL sha256 前 12 位）、fr 复用 `build_fact_ref`；`build_citation_registry()` 是唯一生成来源；`as_writer_payload()` 完整交给 Writer。
+- `application/empty_value_policy.py`：`EmptyPolicy`（REQUIRED/CONDITIONALLY_OPTIONAL/OPTIONAL）+ `check_analysis_completeness`——集中式空值策略；complete 缺核心事实 REJECT、partial 缺 limitations REJECT、partial/unavailable 有说明 → PUBLISH_PARTIAL。
+- `application/deterministic_revision.py`：纯函数有界修订（不调用 LLM/不走网络）——missing_citation_keys 包装合法 key、invalid_citation_key 删除伪造 key、forbidden_advice 删除建议行；注册表为空不伪造。
+
+**修改**：`report_draft_assembler.py`（`build_source_citation_key` 公共化 + `assemble(registry=...)`）、`writer_task.py`（WriterContextReader 交付完整注册表 + prompt 引用格式 [src_<hash>]/[fr_<hash>]）、`flows/quality_classifier.py`（禁止项上下文正则 + 句子分隔符回溯免责语境 + 非法 key CRITICAL + v1 兼容）、`flows/state.py`（citation_registry + revision_attempted/succeeded）、`infrastructure/flow_wiring.py`（`_apply_bounded_revision` 有界一次修订 + 重新组装 + 重新门禁 + revision 指标）、`metrics.py/metrics_events.py`（`revision_total` Counter）。
+
+**验证**：
+- `tests/test_p06_11f_citation_registry_quality_revision.py` 22 用例全绿（WriterContextReader 可见 key / 同一算法 / 合法 key 非空 / 伪造拒绝 / 外部事实空引用 REVISE / 建议买入与目标价拒绝 / 免责声明不误判 / 一次修订通过 / 二次停止 / 纯确定性 / fake E2E 门禁通过）。
+- 回归：quality_classifier+flow_wiring+flow_quality+metrics 89 passed；P06-11B~E+writer+revision+models 168 passed；e2e_fake+final_report_artifacts+pack 66 passed。合计 22+89+168+66 = 345 passed。
+- `ruff check src` 全绿；`mypy src` 全绿。
+
+**commits（本地，未 push）**：P06-11F 独立 commit（见本轮 git log）。
+
+**限制**：修订器只修复三类可修复 issue；missing_section 不自动补造章节；未修改 P06-11E Finalizer 与 staged flow。
+
+**下一候选任务**：受控 live fast smoke（`LLM_VENDOR=deepseek` 一次真实任务验证注册表交付 + 引用非空 + 禁止项不误判）；随后 `P06-11`（10 家公司效率对照实验）。

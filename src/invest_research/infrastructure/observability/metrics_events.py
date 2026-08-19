@@ -33,6 +33,7 @@ from invest_research.infrastructure.observability.metrics import (
     research_job_duration_seconds,
     research_jobs_in_progress,
     research_jobs_total,
+    revision_total,
     schema_repair_total,
     stale_recovery_total,
     stale_running_steps,
@@ -307,6 +308,17 @@ def count_agent_iteration_limit(role: str, profile: str) -> None:
     if role not in _AGENT_ROLES or profile not in ("fast", "deep"):
         return
     _safe_inc(agent_iteration_limit_total, label_values=(role, profile))
+
+
+def count_revision_attempted() -> None:
+    """记录一次有界 Writer 修订尝试（P06-11F，result=attempted）。"""
+    _safe_inc(revision_total, label_values=("attempted",))
+
+
+def count_revision_succeeded(succeeded: bool) -> None:
+    """记录有界 Writer 修订结果（result=succeeded；失败时仅 attempted 已计数）。"""
+    if succeeded:
+        _safe_inc(revision_total, label_values=("succeeded",))
 
 
 # ---- 四、PackBoundary 维度 ----

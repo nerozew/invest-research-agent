@@ -77,18 +77,25 @@ def make_artifact_reader(loader: ArtifactLoader | None = None) -> Any:
     return artifact_reader
 
 
-def make_writer_context_reader(loader: ArtifactLoader | None = None) -> Any:
+def make_writer_context_reader(
+    loader: ArtifactLoader | None = None,
+    citation_registry: Any | None = None,
+) -> Any:
     """构造 WriterContextReader：一次返回写作所需的完整确定性上下文。
 
     P06-11B 将两个 ArtifactReader 调用和 TemplateGuide 调用合并为一次读取，
     避免 Writer 在真正输出 ``ReportDraft`` 前耗尽 ``max_iter``。返回值只来自
     已完成的上游 Task 与代码内版本化章节常量，不发起网络请求、不新增事实。
+
+    P06-11F：``citation_registry`` 把合法 citation key（src_<hash>/fr_<hash>）
+    的**完整注册表**交给 Writer——模型只能从注册表复制 key，不得自行生成。
+    注册表为空（is_empty）时，Writer 必须进入"数据限制"表达，不能伪造引用。
     """
     resolver = loader if loader is not None else _placeholder_loader
 
     @tool("WriterContextReader")
     def writer_context_reader() -> dict[str, object]:
-        """一次读取 ResearchPack、FinancialAnalysisPack 与报告必需章节。"""
+        """一次读取 ResearchPack、FinancialAnalysisPack、引用注册表与必需章节。"""
         research_pack = resolver("research_pack")
         analysis_pack = resolver("analysis_pack")
         missing: list[str] = []
@@ -96,10 +103,16 @@ def make_writer_context_reader(loader: ArtifactLoader | None = None) -> Any:
             missing.append("research_pack")
         if analysis_pack is None:
             missing.append("analysis_pack")
+        registry_payload: dict[str, object] = (
+            citation_registry.as_writer_payload()
+            if citation_registry is not None
+            else {"format": "[src_<hash>] 或 [fr_<hash>]", "entries": []}
+        )
         return {
             "status": "ready" if not missing else "partial",
             "research_pack": research_pack,
             "analysis_pack": analysis_pack,
+            "citation_registry": registry_payload,
             "required_sections": list(REPORT_SECTIONS),
             "missing": missing,
         }
@@ -157,11 +170,16 @@ _MARKDOWN_OUTPUT_INSTRUCTION = (
     "1. 直接输出一份完整的 Markdown 报告正文（章节标题用 ## 或 ###）；\n"
     "2. 不要输出 JSON object，不要使用 ```json/```markdown 代码围栏，"
     "不要把正文包装成任何结构字段；\n"
-    "3. 正文中引用上游来源/财务事实时，直接写出其 citation key"
-    "（src_<hash> / fr_<hash> / 现有 claim key），这些 key 会由本地"
-    "ReportDraftAssembler 从正文中确定性提取；\n"
-    "4. 不要输出任何解释文字、前后缀或自然语言说明——正文本身就是最终答案；\n"
-    "5. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
+    "3. 正文中引用上游来源/财务事实时，只能从 WriterContextReader 返回的"
+    " citation_registry.entries[].citation_key 复制合法 key，并写成固定格式"
+    " [src_<hash>] 或 [fr_<hash>]；禁止自行生成、拼接或猜测任何 key；\n"
+    "4. 如果 citation_registry.entries 为空，不要伪造任何 key，"
+    "在数据限制章节如实说明没有可用来源或事实；\n"
+    "5. 每个来自 SEC、搜索结果或财务事实的关键陈述都必须带上述格式的引用；\n"
+    "6. 不得给出买入/卖出建议、持仓比例、目标价或确定性收益承诺；"
+    "必须保留非投资建议声明；\n"
+    "7. 不要输出任何解释文字、前后缀或自然语言说明——正文本身就是最终答案；\n"
+    "8. 工具调用的 Action/Action Input/参数绝不能作为最终答案。"
 )
 
 
@@ -170,19 +188,22 @@ def build_writer_agent(
     fake: AnyLLM | None = None,
     profile: ResearchProfile | None = None,
     artifact_loader: ArtifactLoader | None = None,
+    citation_registry: Any | None = None,
 ) -> Agent:
     """构建报告撰写 Agent（统一 LLM 接口）。
 
     - 只注入 WriterContextReader；一次读取两个 Pack 与模板章节；
     - ``artifact_loader``：可选注入上游工件读取器（生产从 Task 输出读取真实 pack）；
       未注入时 WriterContextReader 用占位实现（向后兼容 fake 测试）；
+    - ``citation_registry``（P06-11F）：确定性引用注册表——Writer 只能从注册表
+      复制合法 citation key，不得自行生成；为空时进入"数据限制"表达；
     - backstory 使用 writer_prompt_v2（P06-09A：按 completeness 如实组织报告）；
     - 未传 fake 时用 build_real_llm 构造真实 LLM（P05-12B 删除 NotImplementedError）。
     """
     prompt = load_prompt(PromptName.WRITER)
     llm = fake if fake is not None else build_real_llm(config, LLMRole.WRITER)
     resolved = profile if profile is not None else ResearchProfile.for_mode("deep")
-    context_reader = make_writer_context_reader(artifact_loader)
+    context_reader = make_writer_context_reader(artifact_loader, citation_registry)
     return Agent(
         role="报告撰写 Agent",
         goal=(
@@ -207,6 +228,7 @@ def build_writer_task(
     agent: Agent | None = None,
     profile: ResearchProfile | None = None,
     artifact_loader: ArtifactLoader | None = None,
+    citation_registry: Any | None = None,
 ) -> Task:
     """构建 Writer Task：按供应商结构化输出能力决策输出路径（P06-11B）。
 
@@ -214,13 +236,18 @@ def build_writer_task(
     - deepseek/generic（JSON_TEXT_LOCAL_VALIDATION）：**不绑定 output_pydantic**
       （也不改用 output_json —— CrewAI 1.6.1 中二者进入同一 ``convert_to_model``），
       Agent 只输出 Markdown 报告正文；Crew 完成后由 ``ReportDraftAssembler``
-      本地确定性组装为 ``ReportDraft``（P06-11D）。
+      本地确定性组装为 ``ReportDraft``（P06-11D）；
+    - ``citation_registry``（P06-11F）：确定性引用注册表，透传给 WriterContextReader。
     """
     task_agent = (
         agent
         if agent is not None
         else build_writer_agent(
-            config, fake=fake, profile=profile, artifact_loader=artifact_loader
+            config,
+            fake=fake,
+            profile=profile,
+            artifact_loader=artifact_loader,
+            citation_registry=citation_registry,
         )
     )
     description = (
@@ -264,12 +291,22 @@ def build_writer_pair(
     fake: AnyLLM,
     profile: ResearchProfile | None = None,
     artifact_loader: ArtifactLoader | None = None,
+    citation_registry: Any | None = None,
 ) -> tuple[Agent, Task]:
     """返回 (agent, task) 元组（同一 Agent 实例），供 P03-08 组合 Crew。"""
     agent = build_writer_agent(
-        config, fake=fake, profile=profile, artifact_loader=artifact_loader
+        config,
+        fake=fake,
+        profile=profile,
+        artifact_loader=artifact_loader,
+        citation_registry=citation_registry,
     )
     task = build_writer_task(
-        config, fake=fake, agent=agent, profile=profile, artifact_loader=artifact_loader
+        config,
+        fake=fake,
+        agent=agent,
+        profile=profile,
+        artifact_loader=artifact_loader,
+        citation_registry=citation_registry,
     )
     return agent, task

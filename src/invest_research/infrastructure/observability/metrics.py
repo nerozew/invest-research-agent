@@ -60,6 +60,8 @@ __all__ = [
     "llm_request_duration_seconds",
     "llm_tokens_total",
     "llm_usage_missing_total",
+    # P06-11F
+    "revision_total",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -269,6 +271,13 @@ agent_iteration_limit_total = Counter(
     "agent_iteration_limit_total",
     "Agent 达到最大迭代次数的总数（稳定角色 + fast/deep 档位）",
     ["role", "profile"],
+)
+
+# P06-11F：有界 Writer 修订指标（result=attempted/succeeded；succeeded 表示修订后质量门禁通过）。
+revision_total = Counter(
+    "revision_total",
+    "有界 Writer 修订次数（result=attempted/succeeded）",
+    ["result"],
 )
 
 # 四、PackBoundary 维度

@@ -87,6 +87,7 @@ from invest_research.domain.models import (
 from invest_research.domain.quality import QualityAction, QualityRecommendation
 from invest_research.flows.manifest import build_run_manifest
 from invest_research.flows.quality import run_quality_gate
+from invest_research.flows.quality_classifier import classify_state
 from invest_research.flows.reflection import ReflectionController
 from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.finalizers.deepseek_json_object_finalizer import (
@@ -587,6 +588,10 @@ class LiveResearchFlowRunner:
         state.quality_report = run_quality_gate(state)
         self._mark("06_quality_gate", "succeeded")
 
+        # 3.5 P06-11F：一次有界 Writer 修订（不重新执行 Research/Analysis/外部工具，
+        # 不增加事实；修订后重新组装 + 重新质量门禁；第二次仍失败保持 rejected）。
+        self._apply_bounded_revision(state)
+
         # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
         reflection = self._run_reflection(state)
 
@@ -799,14 +804,25 @@ class LiveResearchFlowRunner:
         ctx: _RunContext,
         state: ResearchFlowState,
     ) -> ReportDraft:
-        """Writer 阶段：Markdown → ReportDraftAssembler（Qwen 保持原生路径）。"""
+        """Writer 阶段：Markdown → ReportDraftAssembler（Qwen 保持原生路径）。
+
+        P06-11F：Writer 执行前先构建确定性 CitationRegistry 并注入 state；
+        - WriterContextReader 把完整注册表交给 Writer（只能复制 key）；
+        - ReportDraftAssembler 使用**同一个 registry**提取正文实际出现的 key；
+        - Quality Gate 用 state.citation_registry 校验非法 key。
+        """
         from crewai import Process
 
+        from invest_research.application.citation_registry import build_citation_registry
+
+        registry = build_citation_registry(state.research_pack, state.analysis_pack)
+        state.citation_registry = registry
         loader: ArtifactLoader = _staged_artifact_loader(state)
         task = build_writer_task(
             ctx.effective_config,
             profile=ctx.profile,
             artifact_loader=loader,
+            citation_registry=registry,
         )
         crew = Crew(
             agents=[task.agent],
@@ -821,7 +837,7 @@ class LiveResearchFlowRunner:
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             return _to_packed(raw, ReportDraft)
-        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler
+        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler（复用同一 registry）
         raw_text = self._extract_markdown(raw)
         try:
             return ReportDraftAssembler().assemble(
@@ -829,6 +845,7 @@ class LiveResearchFlowRunner:
                 request,
                 state.research_pack,
                 state.analysis_pack,
+                registry=registry,
             )
         except ReportAssemblerError as exc:
             raise LiveFlowExecutionError(
@@ -1467,6 +1484,101 @@ class LiveResearchFlowRunner:
         if result.kind == "success" and result.value.resolved:
             return result.value.candidates[0]
         return None
+
+    def _apply_bounded_revision(self, state: ResearchFlowState) -> None:
+        """P06-11F：质量失败时执行**至多一次**确定性修订。
+
+        约束：
+        - 仅当报告只因可修复 issue（missing_citation_keys / invalid_citation_key /
+          forbidden_advice）且 revision 未被尝试过时执行；
+        - 修订输入只含原稿、issue codes、CitationRegistry、必需章节；
+        - 不重新执行 Research/Analysis，不调用 SEC/Serper/FinancialCalculator，
+          不增加事实（确定性修订是纯函数）；
+        - 修订后重新运行 ReportDraftAssembler 与 Quality Gate；
+        - 第二次仍失败 → 保持 rejected，并保留原稿、修订稿与质量报告；
+        - 无条件设置 revision_attempted；revision_succeeded 表示修订后通过。
+        """
+        report = state.quality_report
+        if report is None or report.all_passed:
+            return
+        if state.report_draft is None or state.revision_attempted:
+            return
+        registry = state.citation_registry
+        if registry is None:
+            return
+
+        from invest_research.application.deterministic_revision import (
+            REVISABLE_ISSUE_CODES,
+            deterministic_revise,
+        )
+
+        issue_codes: list[str] = []
+        q_issues = classify_state(state)
+        for issue in q_issues:
+            if issue.code in REVISABLE_ISSUE_CODES:
+                issue_codes.append(issue.code)
+        if not issue_codes:
+            return
+
+        # 记录原稿（修订审计）。
+        original_markdown = state.report_draft.markdown
+        state.revision_original_markdown = original_markdown
+        state.revision_attempted = True
+        count_revision_attempted: Callable[[], None] | None = None
+        count_revision_succeeded: Callable[[bool], None] | None = None
+        try:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_revision_attempted as _attempted,
+                count_revision_succeeded as _succeeded,
+            )
+
+            count_revision_attempted = _attempted
+            count_revision_succeeded = _succeeded
+        except Exception:  # noqa: BLE001 - 指标写入尽力而为
+            pass
+
+        if count_revision_attempted is not None:
+            count_revision_attempted()
+
+        revised = deterministic_revise(
+            markdown=original_markdown,
+            issue_codes=issue_codes,
+            registry=registry,
+        )
+        if revised is None or revised.strip() == original_markdown.strip():
+            # 无法修复：保持 rejected，保留原稿。
+            if count_revision_succeeded is not None:
+                count_revision_succeeded(False)
+            return
+
+        # 修订后重新组装为 ReportDraft（复用原 request/packs/registry）。
+        request = state.request
+        if request is None:
+            if count_revision_succeeded is not None:
+                count_revision_succeeded(False)
+            return
+        try:
+            new_draft = ReportDraftAssembler().assemble(
+                revised,
+                request,
+                state.research_pack,
+                state.analysis_pack,
+                registry=registry,
+            )
+        except ReportAssemblerError:
+            # 修订稿无法组装（如变空/过短）→ 保持原 rejected。
+            if count_revision_succeeded is not None:
+                count_revision_succeeded(False)
+            return
+        state.report_draft = new_draft
+        # 重新执行确定性质量门禁。
+        state.quality_report = run_quality_gate(state)
+        state.revision_succeeded = bool(
+            state.quality_report is not None and state.quality_report.all_passed
+        )
+        if count_revision_succeeded is not None:
+            count_revision_succeeded(state.revision_succeeded)
+        # 修订后仍失败：保留原稿 + 修订稿 + 质量报告（rejected 语义由调用方保持）。
 
     def _run_reflection(self, state: ResearchFlowState) -> dict[str, object]:
         """受控反思：按质量建议路由，修订/补证各有 ≤1 次上限。
