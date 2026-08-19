@@ -138,6 +138,53 @@ def _stable_agent_role(role_name: str | None) -> str | None:
     return None
 
 
+def _message_role(msg: Any) -> str | None:
+    """兼容 dict/TypedDict 与普通对象读取 LLM 消息的 ``role``。
+
+    P06-11G：CrewAI 1.6.1 的 ``agent.last_messages`` 是 ``list[LLMMessage]``，
+    而 ``LLMMessage`` 是 ``typing.TypedDict``（运行时为普通 dict）。此前用
+    ``getattr(msg, "role")`` 访问字典键会静默拿到 None，导致所有消息被跳过、
+    工具循环中的长正文无法回收。这里统一读取方式（dict 用 ``.get``，对象用
+    ``getattr``），供 ``_longest_writer_history`` / ``_dump_writer_tool_history``
+    复用，禁止两套解析逻辑。
+    """
+    if isinstance(msg, dict):
+        role = msg.get("role")
+        return role if isinstance(role, str) else None
+    role = getattr(msg, "role", None)
+    return role if isinstance(role, str) else None
+
+
+def _message_text(msg: Any) -> str:
+    """提取 LLM 消息的纯文本内容（支持 str 与 OpenAI-style 分段 list）。
+
+    - ``content`` 为 ``str``：直接返回；
+    - ``content`` 为 ``list``：只提取 ``{"text": ...}`` 文本块或纯字符串块，
+      按顺序拼接；忽略 ``tool_call`` / ``function_call`` / ``image`` 等非文本块；
+    - 其它类型（数字/bool/None）：返回空字符串；
+    - 禁止 ``str(dict)``——避免把工具参数/结构化对象误当成报告正文。
+
+    P06-11G：与 ``_message_role`` 配套，统一 dict 与对象的读取方式。
+    """
+    if isinstance(msg, dict):
+        content = msg.get("content")
+    else:
+        content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict):
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
 def _validation_role(exc: Exception) -> str | None:
     """从 Pydantic ValidationError 的模型标题推导当前 Pack 阶段。"""
     title = str(getattr(exc, "title", "") or "").strip()
@@ -532,10 +579,26 @@ class LiveResearchFlowRunner:
         profile = ResearchProfile.for_mode(
             "fast" if request.research_profile == "fast" else "deep"
         )
-        # fast 任务显式关闭思考模式（Qwen3.5 等默认思考极慢）；deep 保留构造时配置。
+        # P06-11G：fast 档不再强制全局关闭思考——只给 Research/Analysis
+        # 注入 enable_thinking=False 的角色覆盖；Writer 保留注册表/覆盖块中的
+        # per-role 配置（例如 Writer 可单独开深度思考，不拖慢 Research/Analysis）。
         effective_config = self._config
         if profile.mode == "fast":
-            effective_config = self._config.model_copy(update={"enable_thinking": False})
+            from invest_research.agents.llm_factory import LLMRole
+
+            role_overrides = dict(self._config.role_overrides)
+            for role in (LLMRole.RESEARCH, LLMRole.ANALYSIS):
+                existing = role_overrides.get(role.value)
+                if existing is not None:
+                    role_overrides[role.value] = existing.model_copy(
+                        update={"enable_thinking": False}
+                    )
+            effective_config = self._config.model_copy(
+                update={
+                    "enable_thinking": False,
+                    "role_overrides": role_overrides,
+                }
+            )
         # P06-11G：优先使用 component_factory 为当前 Job 创建全新组件
         # （budget/cache/recorder/stats/research_tools/prefetch 全部 job-local），
         # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入的共享引用。
@@ -545,7 +608,9 @@ class LiveResearchFlowRunner:
             job_recorder: PerformanceRecorder = components.recorder
             job_budget: ToolBudget | None = components.budget
             job_cache: ToolCallCache | None = components.cache
-            job_prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = components.prefetch
+            job_prefetch: (
+                Callable[[ResearchRequest], PrefetchResult | None] | None
+            ) = components.prefetch
             job_tools: list[Any] | None = components.research_tools
         else:
             job_stats = self._stats
@@ -792,6 +857,8 @@ class LiveResearchFlowRunner:
         """Research 阶段：Agent 工具循环 → Finalize → Validate → Assemble。"""
         from crewai import Process
 
+        from invest_research.agents.llm_factory import LLMRole
+
         task = build_research_task(
             ctx.effective_config,
             profile=ctx.profile,
@@ -806,7 +873,7 @@ class LiveResearchFlowRunner:
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
         if (
-            structured_output_mode(ctx.effective_config)
+            structured_output_mode(ctx.effective_config, LLMRole.RESEARCH)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             # Qwen：直接本地解析为 ResearchPack（Boundary 校验）
@@ -841,6 +908,8 @@ class LiveResearchFlowRunner:
         """Analysis 阶段：Agent 工具循环 → Finalize → Validate → Assemble。"""
         from crewai import Process
 
+        from invest_research.agents.llm_factory import LLMRole
+
         task = build_analysis_task(ctx.effective_config, profile=ctx.profile)
         crew = Crew(
             agents=[task.agent],
@@ -851,7 +920,7 @@ class LiveResearchFlowRunner:
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
         if (
-            structured_output_mode(ctx.effective_config)
+            structured_output_mode(ctx.effective_config, LLMRole.ANALYSIS)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             return _to_packed(raw, FinancialAnalysisPack)
@@ -882,6 +951,7 @@ class LiveResearchFlowRunner:
         """
         from crewai import Process
 
+        from invest_research.agents.llm_factory import LLMRole
         from invest_research.application.citation_registry import build_citation_registry
 
         registry = build_citation_registry(state.research_pack, state.analysis_pack)
@@ -906,7 +976,7 @@ class LiveResearchFlowRunner:
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
         if (
-            structured_output_mode(ctx.effective_config)
+            structured_output_mode(ctx.effective_config, LLMRole.WRITER)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             return _to_packed(raw, ReportDraft)
@@ -935,6 +1005,10 @@ class LiveResearchFlowRunner:
         ReportAssemblerError（REPORT_INVALID/REPORT_TRUNCATED）时，从
         ``state`` 关联的 writer agent 的 last_messages 中选取**最长** assistant
         文本重试一次。不新增事实、不重新执行 Research/Analysis/外部工具。
+
+        P06-11G 观测：失败时把 final answer 与 writer 工具循环历史落盘为
+        ``05_writer_tool_history.txt``，并打 DEBUG 日志（原始长度/回收长度/是否
+        命中），用于确认"114 字符 vs 工具循环 875 tokens 长文"的根因。
         """
         try:
             return ReportDraftAssembler().assemble(
@@ -946,7 +1020,15 @@ class LiveResearchFlowRunner:
             )
         except ReportAssemblerError:
             candidate = self._longest_writer_history()
-            if candidate is None or candidate.strip() == raw_text.strip():
+            self._dump_writer_tool_history(raw_text, candidate)
+            recovered = candidate is not None and candidate.strip() != raw_text.strip()
+            _LOGGER.info(
+                "writer reassemble: final_len=%d recovered_len=%s recovered=%s",
+                len(raw_text),
+                len(candidate) if candidate else None,
+                recovered,
+            )
+            if candidate is None or not recovered:
                 raise
             return ReportDraftAssembler().assemble(
                 candidate,
@@ -963,30 +1045,55 @@ class LiveResearchFlowRunner:
         ``agent.last_messages``（OpenAI-style chat message 列表），而 final answer
         常被压缩成 20~160 字符。这里回收模型已生成的最长 assistant content
         （不新增事实、不重新执行 Research/Analysis/外部工具）。
+
+        P06-11G 观测：未命中时也记录（供 DEBUG 日志说明回收为何失败）。
         """
         agent = getattr(self, "_writer_agent", None)
         if agent is None:
+            _LOGGER.info("writer history: no writer agent recorded")
             return None
         messages = getattr(agent, "last_messages", None) or []
         best: str | None = None
         for msg in messages:
-            role = getattr(msg, "role", None)
-            if role not in ("assistant", "ai"):
+            if _message_role(msg) not in ("assistant", "ai"):
                 continue
-            content = getattr(msg, "content", None)
-            if isinstance(content, str) and content.strip():
-                if best is None or len(content) > len(best):
-                    best = content
-            elif isinstance(content, list):
-                # OpenAI-style 分段 content（部分供应商/text blocks）
-                parts = [
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                ]
-                text = "".join(parts).strip()
-                if text and (best is None or len(text) > len(best)):
-                    best = text
+            text = _message_text(msg).strip()
+            if text and (best is None or len(text) > len(best)):
+                best = text
+        if best is None:
+            _LOGGER.info(
+                "writer history: no assistant text candidate (messages=%d)", len(messages)
+            )
         return best
+
+    def _dump_writer_tool_history(self, raw_text: str, recovered: str | None) -> None:
+        """P06-11G 观测：把 Writer 工具循环历史与 final answer 落盘为工件。
+
+        工件路径 ``<artifact_root>/<job_id>/05_writer_tool_history.txt``；
+        内容含每条 last_messages（role + 长度 + 文本）+ final answer + 回收候选，
+        用于对比"final 仅 23 tokens / 114 字符"与"工具循环 875 tokens 长文"。
+        落盘失败不影响任务（尽力而为）。
+        """
+        try:
+            if self.job_id is None:
+                return
+            root = self._artifact_root / str(self.job_id)
+            root.mkdir(parents=True, exist_ok=True)
+            agent = getattr(self, "_writer_agent", None)
+            lines: list[str] = []
+            messages = getattr(agent, "last_messages", None) or []
+            for i, msg in enumerate(messages):
+                role = _message_role(msg) or "?"
+                text = _message_text(msg)
+                lines.append(f"--- [{i}] role={role} len={len(text)} ---\n{text}")
+            lines.append(f"--- FINAL ANSWER len={len(raw_text)} ---\n{raw_text}")
+            if recovered is not None:
+                lines.append(f"--- RECOVERED CANDIDATE len={len(recovered)} ---\n{recovered}")
+            (root / "05_writer_tool_history.txt").write_text(
+                "\n".join(lines), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            _LOGGER.warning("writer tool history dump skipped")
 
     def _kickoff_single(self, crew: Any, inputs: dict[str, str]) -> Any:
         """执行单 Task Crew 并返回该 Task 输出（无事件订阅，分阶段路径内联记录）。"""
