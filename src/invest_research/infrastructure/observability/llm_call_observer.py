@@ -16,9 +16,19 @@
   ``flow_wiring`` 在 Crew 前后读取每个 Agent 自带的 TokenProcess 差值，
   因为 CrewAI 1.6.1 事件会在部分路径丢弃 usage。
 
+P06-11H：Writer 每轮原始响应捕获
+- ``LLMCallCompletedEvent.response`` 携带模型每轮真实输出（普通调用路径为
+  ``response_message.content``），可在调用完成边界捕获；
+- 只对角色=writer 的 completed 事件捕获**普通 content**；
+- 禁止读取 ``reasoning_content`` / ``tool_calls`` / ``function_call`` /
+  工具参数；禁止保存 messages/prompt/API Key；
+- 捕获必须绑定 Job 级 ``InMemoryWriterResponseBuffer``（经 ``response_capture``
+  注入），scoped_handlers 结束即清理，禁止跨 Job 泄漏。
+
 安全边界：
 - 不记录 prompt、response、API Key、base_url、公司名、job_id；
-- span 属性只放 provider/model/role/status（Span 可记录 token 数与 duration）；
+- span 属性只放 provider/model/role/status（Span 可记录 token 数与 duration；
+  ``writer.response_capture`` span 只记录 candidate_length）；
 - 指标写入失败绝不影响业务（尽力而为，脱敏日志）。
 
 模块边界：只依赖 ``crewai.events`` 类型（导入前检查存在性）与本地
@@ -140,6 +150,29 @@ def has_usage(usage: Any) -> bool:
     return tokens["input"] > 0 or tokens["output"] > 0
 
 
+def _event_response_text(response: Any) -> str:
+    """从 LLM 响应提取普通 content（P06-11H，只读取普通正文）。
+
+    - response 为 ``str``：直接返回；
+    - response 为 dict/object：只读取 ``content`` 字段（str）；
+    - 禁止读取 ``reasoning_content`` / ``tool_calls`` / ``function_call`` /
+      工具参数——绝不把思考或工具调用序列当成报告正文。
+    """
+    if isinstance(response, str):
+        return response
+    if response is None:
+        return ""
+    try:
+        content = (
+            response.get("content")
+            if isinstance(response, dict)
+            else getattr(response, "content", None)
+        )
+    except Exception:  # noqa: BLE001 - 事件响应不可信时返回空（不中断）
+        return ""
+    return content if isinstance(content, str) else ""
+
+
 class LlmCallObserver:
     """订阅 CrewAI LLM 事件，在每次真实模型调用边界写指标与 Jaeger span。
 
@@ -164,10 +197,14 @@ class LlmCallObserver:
         config: LLMConfig,
         *,
         agent_roles: Mapping[str, str] | None = None,
+        response_capture: Any | None = None,
     ) -> None:
         self._config = config
         # 生产路径优先使用 Crew 组装时建立的 agent_id→稳定角色映射；名称只作兼容回退。
         self._agent_roles = dict(agent_roles or {})
+        # P06-11H：可选 Writer 响应捕获器（Job 级 InMemoryWriterResponseBuffer）。
+        # 只对角色=writer 的 completed 事件捕获普通 content；None 时跳过捕获。
+        self._response_capture = response_capture
         # (role, model) -> 双时钟起点；monotonic 计算耗时，wall clock 构造真实 span 时间线。
         self._started_at: dict[tuple[str, str], _StartedCall] = {}
         # 事件模型类型（惰性解析一次；不可用时禁用观测）
@@ -242,9 +279,48 @@ class LlmCallObserver:
             count_llm_request(provider, model_lbl, role, "success")
             observe_llm_duration(provider, model_lbl, role, "success", duration)
             self._record_span(provider, model_lbl, role, "success", duration, usage)
+            if role == "writer":
+                self._capture_writer_response(event)
             self._started_at.pop((role, model), None)
         except Exception:  # noqa: BLE001 - 观测尽力而为
             _LOGGER.warning("llm_call_observer completed handling failed")
+
+    def _capture_writer_response(self, event: Any) -> None:
+        """捕获 Writer 每轮 LLM 响应的普通 content（P06-11H）。
+
+        - 只读取 ``event.response`` 的普通 content（str/dict.content/object.content）；
+        - 禁止读取 reasoning_content / tool_calls / function_call / 工具参数；
+        - 捕获失败绝不中断主业务（尽力而为，指标用 result 白名单记录）。
+        """
+        if self._response_capture is None:
+            return
+        try:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_writer_response_capture,
+                observe_writer_response_length,
+            )
+
+            content = _event_response_text(getattr(event, "response", None))
+            if not content:
+                count_writer_response_capture("empty")
+                return
+            result = self._response_capture.capture(content)
+            count_writer_response_capture(result)
+            if result == "accepted":
+                observe_writer_response_length(len(content))
+                self._record_capture_span(len(content))
+        except Exception:  # noqa: BLE001 - 捕获尽力而为
+            _LOGGER.warning("llm_call_observer writer response capture skipped")
+
+    def _record_capture_span(self, char_length: int) -> None:
+        """Jaeger ``writer.response_capture`` span（只记录长度，不记录正文）。"""
+        try:
+            tracer = get_tracer("writer")
+            span = tracer.start_span("writer.response_capture")
+            span.set_attribute("candidate_length", int(char_length))
+            span.end()
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            _LOGGER.warning("llm_call_observer capture span skipped")
 
     def _on_failed(self, source: Any, event: Any) -> None:
         try:

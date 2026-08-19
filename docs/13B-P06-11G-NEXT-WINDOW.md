@@ -72,7 +72,27 @@ C. 返回与 final 相同 → 说明最后一步已被覆盖，需在 kickoff �
   提示的"需在 kickoff 侧保留历史"。也可评估 `WriterContextReader` 返回的
   pack 是否过长导致模型在 context 溢出后只输出简短 final（需再观测）。
 
+## ✅ P06-11H 验收（2026-08-19，commit 57c8c98，job cb4aea8e）→ 中间响应全是工具调用，恢复无候选
+- **实现已生效**：Writer 每轮响应捕获（InMemoryWriterResponseBuffer，Job 级）+ 有界恢复
+  （按长度降序逐个经 ReportDraftAssembler + citation registry）+ Jaeger/Prometheus 观测；
+  单元测试 21 项 + 相关回归 105 passed，Ruff/mypy 全绿。
+- **真实验收失败**：MSFT fast（51.3s）仍 REPORT_INVALID / 05_writer / **103 字符**
+  （final 21 tokens）。
+- **关键证据（分支 C 实证 + 本任务的"所有中间响应都不是合法报告"分支）**：
+  - Writer 出现 **"Maximum iterations reached. Requesting final answer."**（max_iter 耗尽）；
+  - Writer 阶段 6 轮 deepseek 调用 completion 均为 **605 tokens**——经 `_event_response_text`
+    提取后**全部为空**（`05_writer_tool_history.txt` 中 last_messages 只有 system 一条），
+    说明这 6 轮响应**全是工具调用序列 / 非普通 content**，而非报告正文；
+  - 因此 buffer 候选池为 0（captured candidate_count = 0，走了 "none" 分支），
+    无任何可恢复候选 → 保留 REPORT_INVALID。
+- **结论：继续扩大历史回收补丁无效（候选中根本没有报告正文）**。
+  按用户预判，下一步应改为：
+  **"确定性加载两个 Pack → 无工具 Writer 专用 LLM 调用 → 本地组装"**——
+  即让 Writer 不再经 CrewAI 工具循环（max_iter 内不断调 WriterContextReader 消耗预算），
+  而是由确定性代码一次加载 research_pack + analysis_pack + citation_registry 后，
+  用一次**无工具**的 Writer LLM 调用直接输出 Markdown，再由 ReportDraftAssembler 本地组装。
+
 ## 未 push / 未改模型 / 未进基准
-未 push（commit c88c4b9 仅本地）、未测试阿里、未 10 家基准；.env 当前为 deepseek
+未 push（commit 57c8c98 仅本地）、未测试阿里、未 10 家基准；.env 当前为 deepseek
 全局 + per-role thinking 覆盖；compose.yml 已还原 worker command（无 concurrency 覆盖）。
-真实 MSFT fast 已跑 2 次（每次均失败，最后一次是修复后验收），不再重复付费调用。
+真实 MSFT fast 已跑 3 次（每次均失败，最后一次是 P06-11H 验收），不再重复付费调用。

@@ -71,6 +71,7 @@ from invest_research.application.research_assembler import (
     ResearchPackAssembler,
 )
 from invest_research.application.structured_finalizer import FinalizerError
+from invest_research.application.writer_response_capture import InMemoryWriterResponseBuffer
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
     AnalysisSelectionDraft,
@@ -331,6 +332,10 @@ class _RunContext:
     prefetch_result: PrefetchResult | None = None
     analysis_facts: list[FinancialFact] = field(default_factory=list)
     finalization_count: int = 0
+    # P06-11H：当前 Job 的 Writer 响应捕获缓冲区（禁止跨 Job 复用）。
+    writer_response_buffer: InMemoryWriterResponseBuffer = field(
+        default_factory=InMemoryWriterResponseBuffer
+    )
 
 
 _PackModel = TypeVar("_PackModel", bound=BaseModel)
@@ -652,6 +657,9 @@ class LiveResearchFlowRunner:
         self._effective_config = effective_config
         self._prefetch_result = None
         self._analysis_facts = []
+        # P06-11H：当前 Job 的 Writer 响应捕获缓冲区（与 _RunContext 同一实例，
+        # 供 LlmCallObserver 捕获、_assemble_writer_markdown 恢复读取）。
+        self._writer_response_buffer = ctx.writer_response_buffer
         self._active_ctx = ctx
         state = self._run_live(request, ctx)
         self.last_state = state
@@ -1009,6 +1017,16 @@ class LiveResearchFlowRunner:
         P06-11G 观测：失败时把 final answer 与 writer 工具循环历史落盘为
         ``05_writer_tool_history.txt``，并打 DEBUG 日志（原始长度/回收长度/是否
         命中），用于确认"114 字符 vs 工具循环 875 tokens 长文"的根因。
+
+        P06-11H 有限恢复：final answer 触发 REPORT_INVALID/REPORT_TRUNCATED 时，
+        从 Job 级 ``writer_response_buffer``（LlmCallObserver 捕获的每轮真实
+        content）取候选：
+        - 排除与 final answer 相同的候选；
+        - 按正文长度降序，最多尝试固定数量；
+        - 每个候选必须重新经过现有 ``ReportDraftAssembler``（复用同一 registry，
+          继续 citation key 校验）；
+        - 选择第一个完整通过的候选；禁止只因为候选最长就直接接受；
+        - 全部候选不合法时保留原 REPORT_INVALID，稳定失败。
         """
         try:
             return ReportDraftAssembler().assemble(
@@ -1019,24 +1037,130 @@ class LiveResearchFlowRunner:
                 registry=registry,
             )
         except ReportAssemblerError:
-            candidate = self._longest_writer_history()
-            self._dump_writer_tool_history(raw_text, candidate)
-            recovered = candidate is not None and candidate.strip() != raw_text.strip()
-            _LOGGER.info(
-                "writer reassemble: final_len=%d recovered_len=%s recovered=%s",
-                len(raw_text),
-                len(candidate) if candidate else None,
-                recovered,
+            recovered_draft = self._recover_writer_from_buffer(
+                raw_text, request, state, registry
             )
-            if candidate is None or not recovered:
+            if recovered_draft is None:
                 raise
-            return ReportDraftAssembler().assemble(
-                candidate,
-                request,
-                state.research_pack,
-                state.analysis_pack,
-                registry=registry,
+            return recovered_draft
+
+    def _recover_writer_from_buffer(
+        self,
+        raw_text: str,
+        request: ResearchRequest,
+        state: ResearchFlowState,
+        registry: Any,
+    ) -> ReportDraft | None:
+        """P06-11H：从 Job 响应缓冲区挑选候选并逐个经 ReportDraftAssembler 校验。
+
+        - 候选来自 ``self._writer_response_buffer``（LlmCallObserver 捕获的
+          Writer 每轮真实 content；仅普通正文，不含 reasoning/tool_call）；
+        - 排除与 final answer 完全相同的候选；
+        - 按 char_length 降序，最多尝试 5 个；
+        - 每个候选必须通过现有 ReportDraftAssembler（同一 registry → citation
+          key 校验继续生效）；选择第一个完整通过者；
+        - 全部失败返回 None（调用方保留原 REPORT_INVALID，稳定失败）。
+        """
+        buffer = getattr(self, "_writer_response_buffer", None)
+        candidates = buffer.candidates() if buffer is not None else []
+        # 排除与 final answer 相同 / 空白候选。
+        final_stripped = raw_text.strip()
+        pool = [
+            c
+            for c in candidates
+            if c.content.strip() and c.content.strip() != final_stripped
+        ]
+        pool.sort(key=lambda c: c.char_length, reverse=True)
+        pool = pool[:5]
+
+        rejection_count = 0
+        try:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_writer_recovery,
             )
+            from invest_research.infrastructure.observability.tracing import get_tracer
+
+            tracer = get_tracer("writer")
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            tracer = None
+
+        if not pool:
+            if tracer is not None:
+                span = tracer.start_span("writer.recovery")
+                span.set_attribute("candidate_count", 0)
+                span.set_attribute("final_length", int(len(raw_text)))
+                span.set_attribute("recovered", False)
+                span.set_attribute("rejection_count", 0)
+                span.set_attribute("error_code", "REPORT_INVALID")
+                span.end()
+            count_writer_recovery("none")
+            self._dump_writer_tool_history(raw_text, None)
+            return None
+
+        for candidate in pool:
+            try:
+                draft = ReportDraftAssembler().assemble(
+                    candidate.content,
+                    request,
+                    state.research_pack,
+                    state.analysis_pack,
+                    registry=registry,
+                )
+                self._dump_writer_tool_history(raw_text, candidate.content)
+                if tracer is not None:
+                    span = tracer.start_span("writer.recovery")
+                    span.set_attribute("candidate_count", len(pool))
+                    span.set_attribute("final_length", int(len(raw_text)))
+                    span.set_attribute("recovered_length", int(candidate.char_length))
+                    span.set_attribute("recovered", True)
+                    span.set_attribute("rejection_count", rejection_count)
+                    span.set_attribute("error_code", "NONE")
+                    span.end()
+                count_writer_recovery("recovered")
+                _LOGGER.info(
+                    "writer recover: final_len=%d recovered_len=%d recovered=True",
+                    len(raw_text),
+                    candidate.char_length,
+                )
+                return draft
+            except ReportAssemblerError:
+                rejection_count += 1
+                error_code = self._safe_report_error_code()
+                _LOGGER.info(
+                    "writer recovery rejected candidate=%s len=%d error_code=%s",
+                    candidate.sha256[:12],
+                    candidate.char_length,
+                    error_code,
+                )
+                continue
+
+        # 全部候选不合法：保留原 REPORT_INVALID，稳定失败。
+        self._dump_writer_tool_history(raw_text, None)
+        if tracer is not None:
+            span = tracer.start_span("writer.recovery")
+            span.set_attribute("candidate_count", len(pool))
+            span.set_attribute("final_length", int(len(raw_text)))
+            span.set_attribute("recovered", False)
+            span.set_attribute("rejection_count", rejection_count)
+            span.set_attribute("error_code", "REPORT_INVALID")
+            span.end()
+        count_writer_recovery("rejected")
+        return None
+
+    @staticmethod
+    def _safe_report_error_code() -> str:
+        """从当前活动异常安全取 REPORT 错误码（尽量不吞异常链信息）。"""
+        try:
+            import sys
+
+            exc = sys.exc_info()[1]
+            if exc is not None:
+                code = getattr(exc, "error_code", None)
+                if isinstance(code, str) and code:
+                    return code
+            return "REPORT_INVALID"
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            return "REPORT_INVALID"
 
     def _longest_writer_history(self) -> str | None:
         """从 Writer Agent 的工具循环对话记录（last_messages）中取最长 assistant 文本。
@@ -1288,6 +1412,7 @@ class LiveResearchFlowRunner:
             return LlmCallObserver(
                 self._effective_config,
                 agent_roles=agent_roles,
+                response_capture=getattr(self, "_writer_response_buffer", None),
             ).subscribe()
         except Exception:  # noqa: BLE001 - 观测尽力而为
             return None

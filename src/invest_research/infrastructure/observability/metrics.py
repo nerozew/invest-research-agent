@@ -65,6 +65,10 @@ __all__ = [
     # P06-11G
     "tool_budget_exhausted_total",
     "research_prefetch_total",
+    # P06-11H
+    "writer_response_capture_total",
+    "writer_recovery_total",
+    "writer_response_length_chars",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -331,6 +335,28 @@ research_prefetch_total = Counter(
 )
 
 # 六、LLM
+# P06-11H：Writer 每轮响应捕获结果（result=accepted/duplicate/too_long/empty；
+# 只记录低基数结果，不记录正文/公司/job_id）。
+writer_response_capture_total = Counter(
+    "writer_response_capture_total",
+    "Writer LLM 响应捕获结果（result 白名单）",
+    ["result"],
+)
+
+# P06-11H：Writer 有限恢复结果（result=recovered/rejected/none；
+# none=无候选或候选等于 final；rejected=候选全未通过 ReportDraftAssembler）。
+writer_recovery_total = Counter(
+    "writer_recovery_total",
+    "Writer 有限恢复结果（result 白名单）",
+    ["result"],
+)
+
+# P06-11H：Writer 捕获响应长度（字符，只记录长度，不记录正文）。
+writer_response_length_chars = Histogram(
+    "writer_response_length_chars",
+    "Writer 捕获响应正文长度（字符数，按 role）",
+    ["role"],
+)
 llm_requests_total = Counter(
     "llm_requests_total",
     "LLM 调用总数（脱敏 provider/model + 角色 + 状态）",

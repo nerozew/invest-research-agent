@@ -45,6 +45,9 @@ from invest_research.infrastructure.observability.metrics import (
     tool_retries_total,
     workflow_step_duration_seconds,
     workflow_steps_total,
+    writer_recovery_total,
+    writer_response_capture_total,
+    writer_response_length_chars,
 )
 
 __all__ = [
@@ -77,6 +80,10 @@ __all__ = [
     "count_llm_tokens",
     "count_llm_usage_missing",
     "label_provider_model",
+    # P06-11H
+    "count_writer_response_capture",
+    "count_writer_recovery",
+    "observe_writer_response_length",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -427,3 +434,27 @@ def count_llm_tokens(provider: str, model: str, role: str, token_type: str, amou
 def count_llm_usage_missing(provider: str, model: str, role: str) -> None:
     """LLM 响应不包含真实 usage 的次数（不得伪造 Token 为 0）。"""
     _safe_inc(llm_usage_missing_total, label_values=(provider, model, role))
+
+
+# ---- 七、P06-11H：Writer 响应捕获与有限恢复 ----
+
+
+def count_writer_response_capture(result: str) -> None:
+    """Writer 每轮响应捕获结果（result=accepted/duplicate/too_long/empty）。"""
+    if result not in ("accepted", "duplicate", "too_long", "empty"):
+        return
+    _safe_inc(writer_response_capture_total, label_values=(result,))
+
+
+def count_writer_recovery(result: str) -> None:
+    """Writer 有限恢复结果（result=recovered/rejected/none）。"""
+    if result not in ("recovered", "rejected", "none"):
+        return
+    _safe_inc(writer_recovery_total, label_values=(result,))
+
+
+def observe_writer_response_length(char_length: int) -> None:
+    """记录 Writer 捕获响应正文长度（字符，只记录长度不记录正文）。"""
+    if char_length is None or char_length < 0:
+        return
+    _safe_obs(writer_response_length_chars, ("writer",), float(char_length))
