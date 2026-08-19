@@ -19,6 +19,8 @@ import streamlit as st
 from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
+from invest_research.frontend.models import ArtifactInfo
+from invest_research.frontend.render import load_viewable_json_artifacts
 from invest_research.frontend.state import load_job_id
 
 st.set_page_config(page_title="报告与工件", page_icon="📄", layout="wide")
@@ -54,7 +56,9 @@ def _is_final_pdf(artifact_type: str, artifact_key: str) -> bool:
     return artifact_type == _FINAL_REPORT_PDF_TYPE or artifact_key in _FINAL_REPORT_PDF_KEYS
 
 
-def _render_final_report_section(client: ResearchApiClient, job_id: str, artifacts: list) -> None:
+def _render_final_report_section(
+    client: ResearchApiClient, job_id: str, artifacts: list[ArtifactInfo]
+) -> None:
     """渲染最终报告专属区域：Markdown 预览 + PDF 下载（P06-07 前置修复）。"""
     md_artifact = next(
         (a for a in artifacts if _is_final_md(a.artifact_type, a.artifact_key)), None
@@ -105,8 +109,17 @@ def _render_final_report_section(client: ResearchApiClient, job_id: str, artifac
             st.caption("PDF 报告可直接下载后用 PDF 阅读器打开；浏览器不支持页内 PDF 预览。")
 
 
-def _render_artifact_table(client: ResearchApiClient, job_id: str, artifacts: list) -> None:
-    """展示已登记工件清单（JSON 中间产物等，不作为最终用户报告强调）。"""
+def _render_artifact_table(
+    client: ResearchApiClient, job_id: str, artifacts: list[ArtifactInfo]
+) -> None:
+    """展示已登记工件清单；JSON 中间产物支持页面内只读查看原始代码。
+
+    - 00~07 中间工件（``artifact_key`` 以 ``.json`` 结尾）用 ``st.expander``
+      折叠展示原始 JSON（方案 B：零状态、零点击、天然可折叠）；
+    - ``08_report.md`` / ``09_report.pdf`` 与 ``st.txt`` 等非 JSON 工件
+      继续保持下载/文本展示逻辑，不进入 JSON 查看；
+    - 下载失败只显示 ``st.warning``，不中断整页（与最终报告区域一致）。
+    """
     st.subheader("已登记工件")
     # 只展示 key/type/size，不展示 storage_uri（服务器内部路径）
     st.table(
@@ -120,10 +133,20 @@ def _render_artifact_table(client: ResearchApiClient, job_id: str, artifacts: li
         ]
     )
 
-    # 兼容旧版：若存在旧报告相关 JSON 文本，仍然允许查看（不作为唯一入口）
+    # P06-11I-FRONTEND：JSON 中间产物页面内只读查看（点名称即展开原始 JSON）
+    views, errors = load_viewable_json_artifacts(client, job_id, artifacts)
+    for view in views:
+        with st.expander(f"查看 {view.artifact_key}（{view.byte_size} 字节）"):
+            st.code(view.text, language="json")
+    for artifact_key, error in errors:
+        st.warning(f"无法读取 {artifact_key}：{error}")
+
+    # 兼容旧版：旧报告相关的纯文本（st.txt 等）仍允许查看（不作为唯一入口）；
+    # 旧 .json 类型已由上方统一 JSON 查看区域覆盖，避免重复展示。
     for artifact in artifacts:
-        if artifact.artifact_type in _LEGACY_REPORT_KEYS and artifact.artifact_key.endswith(
-            (".json", ".txt")
+        if (
+            artifact.artifact_type in _LEGACY_REPORT_KEYS
+            and artifact.artifact_key.endswith(".txt")
         ):
             st.subheader(f"中间报告：{artifact.artifact_key}")
             try:
@@ -132,7 +155,7 @@ def _render_artifact_table(client: ResearchApiClient, job_id: str, artifacts: li
             except ApiClientError as exc:
                 st.warning(f"无法读取 {artifact.artifact_key}：{exc}")
                 continue
-            st.code(text, language="text" if artifact.artifact_key.endswith(".txt") else "json")
+            st.code(text, language="text")
 
 
 def _render_report_and_artifacts(client: ResearchApiClient, job_id: str) -> None:

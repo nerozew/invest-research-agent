@@ -10,23 +10,31 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from pydantic import BaseModel, ConfigDict
 
 from invest_research.domain.status import JobStatus, StepStatus
-from invest_research.frontend.models import JobListEntry, JobSnapshot
+from invest_research.frontend.errors import ApiClientError
+from invest_research.frontend.models import ArtifactInfo, JobListEntry, JobSnapshot
 
 __all__ = [
     "CURRENT_STAGE_LABELS",
     "ERROR_SUGGESTIONS",
     "STATUS_LABELS",
     "STEP_STATUS_ICONS",
+    "ArtifactDownloader",
+    "JsonArtifactView",
     "current_stage_label",
+    "decode_artifact_text",
     "error_suggestion",
     "format_cn_time",
     "is_terminal_status",
+    "is_viewable_json_artifact",
     "job_list_row",
+    "load_viewable_json_artifacts",
     "profile_badge",
     "render_job_snapshot",
     "status_label",
@@ -142,6 +150,75 @@ def current_stage_label(current_step: str | None) -> str | None:
     if not current_step:
         return None
     return CURRENT_STAGE_LABELS.get(current_step, current_step)
+
+
+def is_viewable_json_artifact(artifact_key: str) -> bool:
+    """判断工件是否可在页面内查看 JSON 原始代码。
+
+    - 只有以 ``.json`` 结尾的 00~07 中间工件开放页内只读查看；
+    - ``08_report.md`` / ``09_report.pdf`` 与 ``st.txt`` 等非 JSON
+      工件继续保持下载/文本展示逻辑，不进入 JSON 查看（只读、不上传）。
+    """
+    return artifact_key.endswith(".json")
+
+
+def decode_artifact_text(content: bytes) -> str:
+    """把工件字节解码为可展示文本（UTF-8，非法字节以替换符代替）。
+
+    与 ``_render_final_report_section`` 的容错方式一致：解码失败时
+    不做大小写/编码猜测，直接 ``errors="replace"`` 保证页面不中断。
+    """
+    return content.decode("utf-8", errors="replace")
+
+
+class ArtifactDownloader(Protocol):
+    """只读下载器端口：页面与测试只需提供 ``download_artifact``。"""
+
+    def download_artifact(self, job_id: str, artifact_key: str) -> bytes:
+        """下载已登记工件字节（后端路径穿越防护）。"""
+
+
+class JsonArtifactView(BaseModel):
+    """一个可在页面内只读查看的 JSON 中间工件（含原始正文）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    artifact_key: str
+    byte_size: int
+    text: str
+
+
+def load_viewable_json_artifacts(
+    client: ArtifactDownloader,
+    job_id: str,
+    artifacts: list[ArtifactInfo],
+) -> tuple[list[JsonArtifactView], list[tuple[str, str]]]:
+    """下载并解码所有可查看的 JSON 中间工件。
+
+    - 只处理 ``is_viewable_json_artifact`` 为真的 `.json` 工件；
+    - 单个工件下载失败（``ApiClientError``）收集为 ``(key, 错误消息)``，
+      不中断其他工件的加载（页面据此显示 ``st.warning``）；
+    - 非 JSON 工件（08_report.md / 09_report.pdf / st.txt 等）一律跳过，
+      保持下载/文本展示逻辑不变，不进入 JSON 查看。
+    """
+    views: list[JsonArtifactView] = []
+    errors: list[tuple[str, str]] = []
+    for artifact in artifacts:
+        if not is_viewable_json_artifact(artifact.artifact_key):
+            continue
+        try:
+            content = client.download_artifact(job_id, artifact.artifact_key)
+        except ApiClientError as exc:
+            errors.append((artifact.artifact_key, str(exc)))
+            continue
+        views.append(
+            JsonArtifactView(
+                artifact_key=artifact.artifact_key,
+                byte_size=artifact.byte_size,
+                text=decode_artifact_text(content),
+            )
+        )
+    return views, errors
 
 
 def _step_status_icon(step_status: StepStatus | str) -> str:

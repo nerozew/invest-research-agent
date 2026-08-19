@@ -36,9 +36,13 @@ def _build_client() -> ResearchApiClient:
 
 def _get_key_manager() -> IdempotencyKeyManager:
     """从 session_state 取/建 IdempotencyKeyManager（不存密钥，只存 key 管理器）。"""
-    if "idem_manager" not in st.session_state:
-        st.session_state["idem_manager"] = IdempotencyKeyManager()
-    return st.session_state["idem_manager"]
+    if "idem_manager" in st.session_state:
+        manager = st.session_state["idem_manager"]
+        if isinstance(manager, IdempotencyKeyManager):
+            return manager
+    manager = IdempotencyKeyManager()
+    st.session_state["idem_manager"] = manager
+    return manager
 
 
 def _render_profile_badge(research_profile: str) -> str:
