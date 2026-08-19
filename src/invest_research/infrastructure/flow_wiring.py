@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -749,7 +750,12 @@ class LiveResearchFlowRunner:
                     source_filings=self._cache_filings_if_available(request, ctx),
                 )
             )
-        except (FinalizerError, ResearchAssemblerError) as exc:
+        except ResearchAssemblerError:
+            # 选草稿成功但无可信来源（缓存未预热）→ 回退有界结构化收尾：
+            # 从缓存读取 SEC 申报记录构建 ResearchPack（不伪造来源），
+            # 收尾也失败时给出「缓存无来源，禁止伪造」的可诊断错误。
+            return self._finalize_research_pack(request, ctx, sys.exc_info()[1])  # type: ignore[arg-type]
+        except FinalizerError as exc:
             error_code = getattr(exc, "error_code", "SCHEMA_INVALID")
             raise LiveFlowExecutionError(
                 str(exc), error_code=error_code, failure_stage="02_research"
