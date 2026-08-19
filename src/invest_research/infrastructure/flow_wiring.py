@@ -552,9 +552,7 @@ class LiveResearchFlowRunner:
 
     def assemble_crew(self, fakes: dict[str, AnyLLM]) -> Crew:
         """用注入的 fake LLM 组装三 Agent 顺序 Crew（离线契约验证，不联网）。"""
-        return build_research_crew(
-            self._config, fakes, analysis_facts=self._analysis_facts
-        )
+        return build_research_crew(self._config, fakes, analysis_facts=self._analysis_facts)
 
     # ------------------------------------------------------------------
     # P06-06B：进度标记辅助（写入失败不中断任务）
@@ -591,9 +589,7 @@ class LiveResearchFlowRunner:
         """
         # P06-06A：按任务档位选择当前预算（合法值由 domain.ResearchProfileMode 校验）。
         # 不在构造/全局环境做固定档位；任务不同、档位不同。
-        profile = ResearchProfile.for_mode(
-            "fast" if request.research_profile == "fast" else "deep"
-        )
+        profile = ResearchProfile.for_mode("fast" if request.research_profile == "fast" else "deep")
         # P06-11G：fast 档不再强制全局关闭思考——只给 Research/Analysis
         # 注入 enable_thinking=False 的角色覆盖；Writer 保留注册表/覆盖块中的
         # per-role 配置（例如 Writer 可单独开深度思考，不拖慢 Research/Analysis）。
@@ -623,9 +619,9 @@ class LiveResearchFlowRunner:
             job_recorder: PerformanceRecorder = components.recorder
             job_budget: ToolBudget | None = components.budget
             job_cache: ToolCallCache | None = components.cache
-            job_prefetch: (
-                Callable[[ResearchRequest], PrefetchResult | None] | None
-            ) = components.prefetch
+            job_prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = (
+                components.prefetch
+            )
             job_tools: list[Any] | None = components.research_tools
         else:
             job_stats = self._stats
@@ -703,17 +699,21 @@ class LiveResearchFlowRunner:
         """
         started_at = time.time()
 
-        # P06-06B：01_company_resolve 开始（确定性本地解析/预取边界）
-        self._mark("01_company_resolve", "running")
+        from invest_research.infrastructure.observability.stage_tracing import stage_span
 
-        # 0. 公司身份确认后并行预取（best-effort，失败不影响 Agent 兜底）
-        prefetch_result: PrefetchResult | None = None
-        if self._prefetch is not None:
-            try:
-                prefetch_result = self._prefetch(request)
-            except Exception:
-                # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
-                prefetch_result = None
+        # P06-06B：01_company_resolve 开始（确定性本地解析/预取边界）
+        with stage_span("stage.company_resolve"):
+            self._mark("01_company_resolve", "running")
+
+            # 0. 公司身份确认后并行预取（best-effort，失败不影响 Agent 兜底）
+            with stage_span("stage.prefetch"):
+                prefetch_result: PrefetchResult | None = None
+                if self._prefetch is not None:
+                    try:
+                        prefetch_result = self._prefetch(request)
+                    except Exception:
+                        # 预取是纯优化：失败时 Research Agent 工具仍会自行拉取
+                        prefetch_result = None
         ctx.prefetch_result = prefetch_result
         self._prefetch_result = prefetch_result
         # P06-11C：把预取 financial_facts_summary（JSON 文本）还原为原始可信
@@ -735,14 +735,17 @@ class LiveResearchFlowRunner:
             state = self._run_staged(request, ctx)
             crew, result = None, None
 
-        # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界）
-        self._mark("06_quality_gate", "running")
-        state.quality_report = run_quality_gate(state)
-        self._mark("06_quality_gate", "succeeded")
+        from invest_research.infrastructure.observability.stage_tracing import stage_span
 
-        # 3.5 P06-11F：一次有界 Writer 修订（不重新执行 Research/Analysis/外部工具，
-        # 不增加事实；修订后重新组装 + 重新质量门禁；第二次仍失败保持 rejected）。
-        self._apply_bounded_revision(state)
+        # 3. 确定性质量门禁（P06-06B：06_quality_gate 边界；真实执行包裹）
+        with stage_span("quality_gate"):
+            self._mark("06_quality_gate", "running")
+            state.quality_report = run_quality_gate(state)
+            self._mark("06_quality_gate", "succeeded")
+
+        # 3.5 P06-11F：一次有界 Writer 修订
+        with stage_span("revision"):
+            self._apply_bounded_revision(state)
 
         # 4. 受控反思（有界：revision ≤1、supplement ≤1），由 ReflectionController 路由
         reflection = self._run_reflection(state)
@@ -853,25 +856,28 @@ class LiveResearchFlowRunner:
 
         任一阶段失败立即抛 ``LiveFlowExecutionError``（短路，不执行后续 Agent）。
         """
+        from invest_research.infrastructure.observability.stage_tracing import stage_span
+
         state = ResearchFlowState(request=request)
-        # 1+2. Research
-        self._mark("02_research", "running")
-        state.research_pack = self._exec_research_stage(request, ctx)
-        self._mark("02_research", "succeeded")
-        self._mark("03_documents", "succeeded")
-        # 3+4. Analysis（ResearchPack 成功后才执行）
-        self._mark("04_analysis", "running")
-        state.analysis_pack = self._exec_analysis_stage(request, ctx)
-        self._mark("04_analysis", "succeeded")
+        # 1+2. Research（真实执行边界，start_as_current_span；非补记）
+        with stage_span("stage.research", {"agent.role": "research"}):
+            self._mark("02_research", "running")
+            state.research_pack = self._exec_research_stage(request, ctx)
+            self._mark("02_research", "succeeded")
+            self._mark("03_documents", "succeeded")
+        # 3+4. Analysis（ResearchPack 成功后才执行；失败直接抛出不产生后续假 span）
+        with stage_span("stage.analysis", {"agent.role": "analysis"}):
+            self._mark("04_analysis", "running")
+            state.analysis_pack = self._exec_analysis_stage(request, ctx)
+            self._mark("04_analysis", "succeeded")
         # 5+6. Writer（FinancialAnalysisPack 成功后才执行）
-        self._mark("05_writer", "running")
-        state.report_draft = self._exec_writer_stage(request, ctx, state)
-        self._mark("05_writer", "succeeded")
+        with stage_span("stage.writer", {"agent.role": "writer"}):
+            self._mark("05_writer", "running")
+            state.report_draft = self._exec_writer_stage(request, ctx, state)
+            self._mark("05_writer", "succeeded")
         return state
 
-    def _exec_research_stage(
-        self, request: ResearchRequest, ctx: _RunContext
-    ) -> ResearchPack:
+    def _exec_research_stage(self, request: ResearchRequest, ctx: _RunContext) -> ResearchPack:
         """Research 阶段：Agent 工具循环 → Finalize → Validate → Assemble。"""
         from crewai import Process
 
@@ -1091,9 +1097,7 @@ class LiveResearchFlowRunner:
             retry_reason = "length"
         else:
             retry_reason = (
-                "too_short"
-                if len(first_result.markdown.strip()) < 200
-                else "missing_section"
+                "too_short" if len(first_result.markdown.strip()) < 200 else "missing_section"
             )
         retry_count = 1
         try:
@@ -1155,9 +1159,7 @@ class LiveResearchFlowRunner:
                     "status": "running",
                 },
             ):
-                raw_result = dispatch.dispatch(
-                    request, context, error_summary=error_summary
-                )
+                raw_result = dispatch.dispatch(request, context, error_summary=error_summary)
                 assert isinstance(raw_result, WriterDispatchResult)
                 result = raw_result
             status = self._direct_status(result)
@@ -1280,9 +1282,7 @@ class LiveResearchFlowRunner:
                 registry=registry,
             )
         except ReportAssemblerError:
-            recovered_draft = self._recover_writer_from_buffer(
-                raw_text, request, state, registry
-            )
+            recovered_draft = self._recover_writer_from_buffer(raw_text, request, state, registry)
             if recovered_draft is None:
                 raise
             return recovered_draft
@@ -1308,11 +1308,7 @@ class LiveResearchFlowRunner:
         candidates = buffer.candidates() if buffer is not None else []
         # 排除与 final answer 相同 / 空白候选。
         final_stripped = raw_text.strip()
-        pool = [
-            c
-            for c in candidates
-            if c.content.strip() and c.content.strip() != final_stripped
-        ]
+        pool = [c for c in candidates if c.content.strip() and c.content.strip() != final_stripped]
         pool.sort(key=lambda c: c.char_length, reverse=True)
         pool = pool[:5]
 
@@ -1428,9 +1424,7 @@ class LiveResearchFlowRunner:
             if text and (best is None or len(text) > len(best)):
                 best = text
         if best is None:
-            _LOGGER.info(
-                "writer history: no assistant text candidate (messages=%d)", len(messages)
-            )
+            _LOGGER.info("writer history: no assistant text candidate (messages=%d)", len(messages))
         return best
 
     def _dump_writer_tool_history(self, raw_text: str, recovered: str | None) -> None:
@@ -1456,9 +1450,7 @@ class LiveResearchFlowRunner:
             lines.append(f"--- FINAL ANSWER len={len(raw_text)} ---\n{raw_text}")
             if recovered is not None:
                 lines.append(f"--- RECOVERED CANDIDATE len={len(recovered)} ---\n{recovered}")
-            (root / "05_writer_tool_history.txt").write_text(
-                "\n".join(lines), encoding="utf-8"
-            )
+            (root / "05_writer_tool_history.txt").write_text("\n".join(lines), encoding="utf-8")
         except Exception:  # noqa: BLE001 - 观测尽力而为
             _LOGGER.warning("writer tool history dump skipped")
 
@@ -1554,9 +1546,7 @@ class LiveResearchFlowRunner:
         raw = getattr(obj, "raw", None)
         return raw if isinstance(raw, str) else ""
 
-    def _subscribe_task_progress(
-        self, crew: Crew
-    ) -> Any | None:
+    def _subscribe_task_progress(self, crew: Crew) -> Any | None:
         """用 CrewAI 事件总线标记 Task 开始/完成边界（P06-06B）。
 
         - TaskStartedEvent（task.py:521）在 Task 真正开始时 emit；
@@ -1629,33 +1619,55 @@ class LiveResearchFlowRunner:
             task.callback = _cb
 
     def _subscribe_llm_calls(self, crew: Crew) -> Any | None:
-        """用 CrewAI LLM 事件总线记录每次真实模型调用（P06-11A）。
+        """P06-11J：完整调用链观测器（LLM span 生命周期 + CrewAI 工具循环）。
 
-        - ``LLMCallStartedEvent`` / ``LLMCallCompletedEvent`` / ``LLMCallFailedEvent``
-          在每次真实模型请求边界 emit（crewai.llm.LLM 官方事件，非 monkey patch）；
-        - 每个模型请求只记录一次次数/耗时；Token 由 Agent TokenProcess
-          在 kickoff 前后取差，避免 CrewAI 事件丢 usage 与 Crew 汇总三倍复制；
-        - 返回 ``scoped_handlers()`` context manager；调用方必须在 kickoff 完成后
-          退出清理（防止 handler 泄漏到下一个 Job）。
+        - ``LlmFullObserver`` 在 LLMCallStarted 创建 span handle，Completed/Failed
+          结束同一个 span；用 per-role FIFO 队列解决同角色多次调用覆盖；
+        - 订阅 ToolUsage 事件生成 ``crewai.tool.<name>`` span；
+        - agent_id 映射修复：分阶段单 Agent Crew 直接用第一个 agent 的稳定角色，
+          不再用 zip 全局顺序（Zip 会把单 Agent 永远映射成 research）。
+        - 返回 ``scoped_handlers()`` context manager；调用方在 kickoff 完成后退出。
         """
         try:
-            from invest_research.infrastructure.observability.llm_call_observer import (
-                LlmCallObserver,
+            from invest_research.infrastructure.observability.llm_full_observer import (
+                LlmFullObserver,
             )
         except ImportError:
             return None
         try:
             agent_roles: dict[str, str] = {}
-            for stable_role, agent in zip(
-                _AGENT_ROLE_ORDER, getattr(crew, "agents", None) or []
-            ):
-                agent_id = str(getattr(agent, "id", "") or "").strip()
-                if agent_id:
-                    agent_roles[agent_id] = stable_role
-            return LlmCallObserver(
+            agents = list(getattr(crew, "agents", None) or [])
+            # 分阶段：单 Agent Crew 时直接用该 Agent 的真实角色（不再 zip）。
+            if len(agents) == 1:
+                real_role = _stable_agent_role(getattr(agents[0], "role", None))
+                if real_role is not None:
+                    raw_id = str(getattr(agents[0], "id", "") or "").strip()
+                    if raw_id:
+                        agent_roles[raw_id] = real_role
+            else:
+                for stable_role, agent in zip(_AGENT_ROLE_ORDER, agents):
+                    raw_id = str(getattr(agent, "id", "") or "").strip()
+                    if raw_id:
+                        agent_roles[raw_id] = stable_role
+            # Job-local timeline（写失败不影响业务）：job_id/artifact_root 可用时注入。
+            timeline = None
+            if getattr(self, "job_id", None) is not None:
+                try:
+                    from invest_research.infrastructure.observability.execution_timeline import (
+                        ExecutionTimelineSink,
+                    )
+
+                    timeline = ExecutionTimelineSink(
+                        artifact_root=self._artifact_root,
+                        job_id=str(self.job_id),
+                    )
+                    self._execution_timeline = timeline
+                except Exception:  # noqa: BLE001 - timeline 尽力而为
+                    timeline = None
+            return LlmFullObserver(
                 self._effective_config,
                 agent_roles=agent_roles,
-                response_capture=getattr(self, "_writer_response_buffer", None),
+                timeline=timeline,
             ).subscribe()
         except Exception:  # noqa: BLE001 - 观测尽力而为
             return None
@@ -1678,8 +1690,7 @@ class LiveResearchFlowRunner:
             try:
                 summary = summary_getter()
                 snapshots[role] = {
-                    field: max(0, int(getattr(summary, field, 0) or 0))
-                    for field in _TOKEN_FIELDS
+                    field: max(0, int(getattr(summary, field, 0) or 0)) for field in _TOKEN_FIELDS
                 }
             except Exception:  # noqa: BLE001 - 观测尽力而为
                 continue
@@ -1802,9 +1813,7 @@ class LiveResearchFlowRunner:
                     role_enum = LLMRole(role)
                 except ValueError:
                     role_enum = None
-                model = (
-                    self._config.model_for(role_enum) if role_enum is not None else str(role)
-                )
+                model = self._config.model_for(role_enum) if role_enum is not None else str(role)
                 provider, model_lbl = label_provider_model(
                     self._config.vendor, model, base_url=self._config.base_url
                 )
@@ -2091,11 +2100,7 @@ class LiveResearchFlowRunner:
 
         ``ctx`` 为本 Job 上下文；缺省时回退实例字段（兼容既有测试）。
         """
-        prefetch_result = (
-            ctx.prefetch_result
-            if ctx is not None
-            else self._prefetch_result
-        )
+        prefetch_result = ctx.prefetch_result if ctx is not None else self._prefetch_result
         if prefetch_result is not None and prefetch_result.company_identity is not None:
             return prefetch_result.company_identity
         from invest_research.tools.company_resolver import (

@@ -74,6 +74,14 @@ __all__ = [
     "writer_direct_duration_seconds",
     "writer_direct_output_chars",
     "writer_direct_retry_total",
+    # P06-11J
+    "llm_response_kind_total",
+    "crewai_tool_calls_total",
+    "agent_iteration_total",
+    "agent_max_iteration_total",
+    "writer_output_chars",
+    "report_invalid_total",
+    "stage_duration_seconds",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -422,4 +430,59 @@ writer_direct_retry_total = Counter(
     "writer_direct_retry_total",
     "Direct Writer 触发有限重试的原因（reason 白名单）",
     ["reason"],
+)
+
+# ---------------------------------------------------------------------------
+# 八、P06-11J：完整调用链低基数指标
+# ---------------------------------------------------------------------------
+
+# LLM 响应类型分布（kind=content/tool_call/empty；只记录低基数类型，不记录正文）。
+llm_response_kind_total = Counter(
+    "llm_response_kind_total",
+    "LLM 响应类型分布（content/tool_call/empty）",
+    ["role", "kind"],
+)
+
+# CrewAI 工具调用次数（role + 稳定工具名 + status；不记录 arguments/result 正文）。
+crewai_tool_calls_total = Counter(
+    "crewai_tool_calls_total",
+    "CrewAI 工具循环调用次数（按角色/工具/状态）",
+    ["role", "tool", "status"],
+)
+
+# Agent 迭代次数（role + result；不记录 job_id/company）。
+agent_iteration_total = Counter(
+    "agent_iteration_total",
+    "Agent 迭代次数（按角色与状态）",
+    ["role", "result"],
+)
+
+# Agent 最大迭代次数（role；低基数）。
+agent_max_iteration_total = Counter(
+    "agent_max_iteration_total",
+    "Agent 达到 max_iter 次数（按角色）",
+    ["role"],
+)
+
+# Writer 输出长度（字符；只记录长度，不记录正文）。
+writer_output_chars = Histogram(
+    "writer_output_chars",
+    "Writer 最终报告输出长度（字符数）",
+    ["status"],
+)
+
+# REPORT_INVALID 分类（reason=missing_citation/invalid_citation/forbidden_advice/
+# too_short/missing_section/other）。
+report_invalid_total = Counter(
+    "report_invalid_total",
+    "REPORT_INVALID 触发原因分类",
+    ["reason"],
+)
+
+# 阶段真实耗时（秒；stage/status；不记录 job_id/company）。
+stage_duration_seconds = Histogram(
+    "stage_duration_seconds",
+    "真实阶段 Span 耗时（秒）",
+    ["stage", "status"],
+    buckets=_AGENT_DURATION_BUCKETS,
 )

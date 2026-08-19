@@ -18,24 +18,30 @@ from typing import Any
 from invest_research.infrastructure.observability.metrics import (
     agent_duration_seconds,
     agent_iteration_limit_total,
+    agent_iteration_total,
+    agent_max_iteration_total,
     agent_runs_total,
     analysis_completeness_total,
+    crewai_tool_calls_total,
     failure_total,
     http_request_duration_seconds,
     http_requests_in_progress,
     http_requests_total,
     llm_request_duration_seconds,
     llm_requests_total,
+    llm_response_kind_total,
     llm_tokens_total,
     llm_usage_missing_total,
     pack_validation_total,
     quality_gate_failures_total,
+    report_invalid_total,
     research_job_duration_seconds,
     research_jobs_in_progress,
     research_jobs_total,
     research_prefetch_total,
     revision_total,
     schema_repair_total,
+    stage_duration_seconds,
     stale_recovery_total,
     stale_running_steps,
     tool_budget_exhausted_total,
@@ -49,6 +55,7 @@ from invest_research.infrastructure.observability.metrics import (
     writer_direct_output_chars,
     writer_direct_requests_total,
     writer_direct_retry_total,
+    writer_output_chars,
     writer_recovery_total,
     writer_response_capture_total,
     writer_response_length_chars,
@@ -93,6 +100,13 @@ __all__ = [
     "observe_writer_direct_duration",
     "observe_writer_direct_output_chars",
     "count_writer_direct_retry",
+    "observe_stage_duration",
+    "count_report_invalid",
+    "observe_writer_output_chars",
+    "count_agent_max_iteration",
+    "count_agent_iteration",
+    "count_crewai_tool_call",
+    "count_llm_response_kind",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -178,9 +192,7 @@ def set_stale_running_steps(value: int) -> None:
 # Agent role 白名单（任务要求只允许 research/analysis/writer/revision）。
 _AGENT_ROLES: frozenset[str] = frozenset({"research", "analysis", "writer", "revision"})
 # pack 校验结果白名单（成功/失败/修复成功/拒绝/跳过）。
-_PACK_RESULTS: frozenset[str] = frozenset(
-    {"success", "failed", "repaired", "rejected", "skipped"}
-)
+_PACK_RESULTS: frozenset[str] = frozenset({"success", "failed", "repaired", "rejected", "skipped"})
 # LLM token type 白名单。
 _LLM_TOKEN_TYPES: frozenset[str] = frozenset({"input", "output", "cached_input"})
 
@@ -229,9 +241,7 @@ def _status_class(status_code: int) -> str:
 
 def count_http_requests(method: str, route: str, status_code: int) -> None:
     """记录一次 HTTP 请求（method + 路由模板 + 状态分类）。"""
-    _safe_inc(
-        http_requests_total, label_values=(method, route, _status_class(status_code))
-    )
+    _safe_inc(http_requests_total, label_values=(method, route, _status_class(status_code)))
 
 
 def observe_http_request(method: str, route: str, duration_seconds: float) -> None:
@@ -290,17 +300,13 @@ def count_failure(stage: str, error_code: str) -> None:
 # ---- 三、Agent 维度 ----
 
 
-def count_agent_run(
-    role: str, profile: str, provider: str, model: str, status: str
-) -> None:
+def count_agent_run(role: str, profile: str, provider: str, model: str, status: str) -> None:
     """Agent 执行完成（role 白名单过滤；provider/model 为脱敏标签）。"""
     if role not in _AGENT_ROLES:
         return
     if status not in ("success", "failure"):
         return
-    _safe_inc(
-        agent_runs_total, label_values=(role, profile, provider, model, status)
-    )
+    _safe_inc(agent_runs_total, label_values=(role, profile, provider, model, status))
 
 
 def observe_agent_duration(
@@ -344,9 +350,7 @@ def count_revision_succeeded(succeeded: bool) -> None:
 # ---- 四、PackBoundary 维度 ----
 
 
-def count_pack_validation(
-    stage: str, pack_type: str, result: str, error_code: str
-) -> None:
+def count_pack_validation(stage: str, pack_type: str, result: str, error_code: str) -> None:
     """PackBoundary 校验结果（result 白名单过滤；error_code 稳定短码）。"""
     if result not in _PACK_RESULTS:
         return
@@ -433,9 +437,9 @@ def count_llm_tokens(provider: str, model: str, role: str, token_type: str, amou
     if amount is None or amount < 0:
         return
     try:
-        llm_tokens_total.labels(
-            provider=provider, model=model, role=role, type=token_type
-        ).inc(amount)
+        llm_tokens_total.labels(provider=provider, model=model, role=role, type=token_type).inc(
+            amount
+        )
     except Exception:  # noqa: BLE001 - 监控写入尽力而为
         _LOGGER.warning("metrics_inc_failed metric=llm_tokens_total")
 
@@ -509,3 +513,43 @@ def count_writer_direct_retry(reason: str) -> None:
     if reason not in _WRITER_DIRECT_RETRY_REASONS:
         return
     _safe_inc(writer_direct_retry_total, label_values=(reason,))
+
+
+# ---------------------------------------------------------------------------
+# 八、P06-11J：完整调用链低基数指标辅助（尽力而为，label 白名单）
+# ---------------------------------------------------------------------------
+
+
+def count_llm_response_kind(role: str, kind: str) -> None:
+    """LLM 响应类型分布（kind=content/tool_call/empty）。"""
+    _safe_inc(llm_response_kind_total, label_values=(role, kind))
+
+
+def count_crewai_tool_call(role: str, tool: str, status: str) -> None:
+    """CrewAI 工具循环调用次数（role + 稳定工具名 + status）。"""
+    _safe_inc(crewai_tool_calls_total, label_values=(role, tool, status))
+
+
+def count_agent_iteration(role: str, result: str) -> None:
+    """Agent 迭代次数（result=success/failure）。"""
+    _safe_inc(agent_iteration_total, label_values=(role, result))
+
+
+def count_agent_max_iteration(role: str) -> None:
+    """Agent 达到 max_iter 次数（按角色）。"""
+    _safe_inc(agent_max_iteration_total, label_values=(role,))
+
+
+def observe_writer_output_chars(status: str, char_length: int) -> None:
+    """Writer 最终输出长度（只记录长度，不记录正文）。"""
+    _safe_obs(writer_output_chars, (status,), float(char_length))
+
+
+def count_report_invalid(reason: str) -> None:
+    """REPORT_INVALID 触发原因分类（低基数 reason 白名单）。"""
+    _safe_inc(report_invalid_total, label_values=(reason,))
+
+
+def observe_stage_duration(stage: str, status: str, duration_s: float) -> None:
+    """真实阶段 Span 耗时（秒；stage/status，不记录 job_id/company）。"""
+    _safe_obs(stage_duration_seconds, (stage, status), duration_s)

@@ -66,8 +66,10 @@ def start_worker_metrics_server(
     - ``registry_factory``：测试可注入 fake 聚合 registry；
     - ``cleaner``：可选启动前清理（默认清空 MULTIPROC 目录中孤儿 .db）。
     """
-    resolved_port = port if port is not None else int(
-        os.environ.get("PROMETHEUS_METRICS_PORT", str(DEFAULT_METRICS_PORT))
+    resolved_port = (
+        port
+        if port is not None
+        else int(os.environ.get("PROMETHEUS_METRICS_PORT", str(DEFAULT_METRICS_PORT)))
     )
     # 启动前清理孤儿 .db（Worker 重启后旧 pid 文件必须移除，否则指标永久残留）。
     if cleaner is not None:
@@ -110,6 +112,41 @@ def cleanup_multiproc_dir() -> None:
         _LOGGER.warning("cleanup_multiproc_dir_failed path=%s", path, exc_info=True)
 
 
+def _setup_child_tracing() -> None:
+    """P06-11J：Prefork 子进程内重新初始化 TracerProvider。
+
+    父进程在 fork 前 setup_tracing 的 BatchSpanProcessor 导出线程不会被复制
+    到子进程；每个子进程必须在 worker_process_init 内重建 provider 才有活跃
+    导出线程（否则 span 永远留在内存队列不上传）。
+    """
+    try:
+        import os
+
+        from invest_research.infrastructure.observability.tracing import setup_tracing
+
+        setup_tracing(
+            service_name=os.environ.get("OTEL_SERVICE_NAME", "invest-research"),
+            endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        )
+    except Exception:  # noqa: BLE001 - 观测初始化失败不影响 worker 启动
+        _LOGGER.warning("child_tracing_setup_failed")
+
+
+def _flush_traces() -> None:
+    """P06-11J：Worker 子进程退出前 force_flush 所有 span（尽力而为）。"""
+    try:
+        from opentelemetry import trace
+
+        provider = trace.get_tracer_provider()
+        if provider is None:
+            return
+        force_flush = getattr(provider, "force_flush", None)
+        if callable(force_flush):
+            force_flush(timeout_millis=5000)
+    except Exception:  # noqa: BLE001 - flush 失败不影响 worker 退出
+        _LOGGER.warning("trace_force_flush_failed")
+
+
 def install_worker_signals(app: Any) -> None:
     """把 worker_init / worker_process_shutdown 信号接到本模块（Celery 父进程）。"""
     from celery import signals  # type: ignore[import-untyped]
@@ -117,8 +154,16 @@ def install_worker_signals(app: Any) -> None:
     def _on_worker_init(**_: object) -> None:
         start_worker_metrics_server(cleaner=cleanup_multiproc_dir)
 
+    def _on_worker_process_init(**_: object) -> None:
+        _setup_child_tracing()
+
     def _on_process_shutdown(pid: int, **_: object) -> None:
         mark_worker_process_dead(pid)
 
+    def _on_worker_shutdown(**_: object) -> None:
+        _flush_traces()
+
     signals.worker_init.connect(_on_worker_init, weak=False)
+    signals.worker_process_init.connect(_on_worker_process_init, weak=False)
     signals.worker_process_shutdown.connect(_on_process_shutdown, weak=False)
+    signals.worker_shutdown.connect(_on_worker_shutdown, weak=False)
