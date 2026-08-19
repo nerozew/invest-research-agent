@@ -443,6 +443,9 @@ class LiveResearchFlowRunner:
         self._prefetch_result: PrefetchResult | None = None
         # P06-11C：本次预取的原始可信 FinancialFact 集合（供选择草稿现场组装）。
         self._analysis_facts: list[FinancialFact] = []
+        # P06-11F-live：当前 Job 的 Writer agent（final answer 过短时回收其
+        # last_messages 中最长正文；单 worker 串行 + 每 Job 独立 runner 安全）。
+        self._writer_agent: Any | None = None
         # 结构化收尾只允许一次
         self._finalize_used = False
         # P06-11E：是否注入 fake crew_factory（测试路径）；None 时生产走分阶段执行。
@@ -830,6 +833,10 @@ class LiveResearchFlowRunner:
             process=Process.sequential,
             verbose=False,
         )
+        # P06-11F-live：把 writer agent 保存到 runner 实例字段（Pydantic state 的
+        # setattr 动态属性不生效——ResearchFlowState extra=ignore），供 final answer
+        # 过短时从 agent.last_messages 回收工具循环中已生成的最长正文。
+        self._writer_agent = task.agent
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
         if (
@@ -837,8 +844,32 @@ class LiveResearchFlowRunner:
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             return _to_packed(raw, ReportDraft)
-        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler（复用同一 registry）
+        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler（复用同一 registry）。
+        # P06-11F-live：真实 DeepSeek Writer 常把数千字正文生成在工具循环中间步骤
+        # （thought/observations），最终 final answer 只有 20~160 字符 → REPORT_INVALID。
+        # 修复：final answer 过短时，从 agent.last_messages 回收工具循环中已生成的
+        # 最长 assistant 正文（模型已生成的内容，不新增事实、不重新调用外部工具）。
         raw_text = self._extract_markdown(raw)
+        assembler_out = self._assemble_writer_markdown(
+            raw_text, request, state, registry
+        )
+        return assembler_out
+
+    def _assemble_writer_markdown(
+        self,
+        raw_text: str,
+        request: ResearchRequest,
+        state: ResearchFlowState,
+        registry: Any,
+    ) -> ReportDraft:
+        """组装 Writer Markdown；final answer 过短时回收工具循环中的长文本。
+
+        P06-11F-live：DeepSeek Writer 的真实长正文常出现在工具循环中间步骤
+        （agent.last_messages），final answer 仅 20~160 字符。这里在
+        ReportAssemblerError（REPORT_INVALID/REPORT_TRUNCATED）时，从
+        ``state`` 关联的 writer agent 的 last_messages 中选取**最长** assistant
+        文本重试一次。不新增事实、不重新执行 Research/Analysis/外部工具。
+        """
         try:
             return ReportDraftAssembler().assemble(
                 raw_text,
@@ -847,12 +878,49 @@ class LiveResearchFlowRunner:
                 state.analysis_pack,
                 registry=registry,
             )
-        except ReportAssemblerError as exc:
-            raise LiveFlowExecutionError(
-                str(exc),
-                error_code=exc.error_code,
-                failure_stage=exc.failure_stage,
-            ) from exc
+        except ReportAssemblerError:
+            candidate = self._longest_writer_history()
+            if candidate is None or candidate.strip() == raw_text.strip():
+                raise
+            return ReportDraftAssembler().assemble(
+                candidate,
+                request,
+                state.research_pack,
+                state.analysis_pack,
+                registry=registry,
+            )
+
+    def _longest_writer_history(self) -> str | None:
+        """从 Writer Agent 的工具循环对话记录（last_messages）中取最长 assistant 文本。
+
+        CrewAI 1.6.1：Agent 在工具循环中间生成的数千字正文会保存在
+        ``agent.last_messages``（OpenAI-style chat message 列表），而 final answer
+        常被压缩成 20~160 字符。这里回收模型已生成的最长 assistant content
+        （不新增事实、不重新执行 Research/Analysis/外部工具）。
+        """
+        agent = getattr(self, "_writer_agent", None)
+        if agent is None:
+            return None
+        messages = getattr(agent, "last_messages", None) or []
+        best: str | None = None
+        for msg in messages:
+            role = getattr(msg, "role", None)
+            if role not in ("assistant", "ai"):
+                continue
+            content = getattr(msg, "content", None)
+            if isinstance(content, str) and content.strip():
+                if best is None or len(content) > len(best):
+                    best = content
+            elif isinstance(content, list):
+                # OpenAI-style 分段 content（部分供应商/text blocks）
+                parts = [
+                    c.get("text", "") if isinstance(c, dict) else str(c)
+                    for c in content
+                ]
+                text = "".join(parts).strip()
+                if text and (best is None or len(text) > len(best)):
+                    best = text
+        return best
 
     def _kickoff_single(self, crew: Any, inputs: dict[str, str]) -> Any:
         """执行单 Task Crew 并返回该 Task 输出（无事件订阅，分阶段路径内联记录）。"""

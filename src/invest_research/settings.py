@@ -58,18 +58,20 @@ class ResearchProfile(BaseModel):
                 mode="fast",
                 research_max_iter=8,
                 analysis_max_iter=6,
-                # P06-11B：Writer 只需一次 WriterContextReader + 最终输出；5 保留为
-                # 有界安全余量，不能再通过无限提高 max_iter 掩盖工具编排问题。
-                writer_max_iter=5,
+                # P06-11F-live：真实 DeepSeek Writer 常把长正文生成在工具循环中间步骤，
+                # 最终 answer 被迫只有 20~30 token（<200 字符被 REPORT_INVALID 拒绝）。
+                # 提高迭代预算让模型有足够轮次在 final answer 输出完整正文（P06-11E
+                # live smoke 实测复现；不是无限提高掩盖编排问题，5→8 给足重写余量）。
+                writer_max_iter=8,
                 max_retry_limit=1,
-                max_execution_time=180,
+                max_execution_time=240,
                 max_rpm=60,
             )
         return cls(
             mode="deep",
             research_max_iter=15,
             analysis_max_iter=10,
-            writer_max_iter=5,
+            writer_max_iter=8,
             max_retry_limit=2,
             max_execution_time=600,
             max_rpm=None,
