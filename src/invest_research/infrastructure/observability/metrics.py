@@ -62,6 +62,9 @@ __all__ = [
     "llm_usage_missing_total",
     # P06-11F
     "revision_total",
+    # P06-11G
+    "tool_budget_exhausted_total",
+    "research_prefetch_total",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -311,6 +314,20 @@ tool_cache_total = Counter(
     "tool_cache_total",
     "工具缓存结果（hit/miss/stored/skipped）",
     ["tool", "result"],
+)
+
+# P06-11G：本地工具调用硬预算耗尽（按工具；不记录 job_id/company/cik）
+tool_budget_exhausted_total = Counter(
+    "tool_budget_exhausted_total",
+    "工具调用预算耗尽次数（按工具）",
+    ["tool"],
+)
+
+# P06-11G：研究预取结果（ok/partial/failed/skipped；不记录 job_id/company）
+research_prefetch_total = Counter(
+    "research_prefetch_total",
+    "研究预取执行结果（status 白名单）",
+    ["status"],
 )
 
 # 六、LLM

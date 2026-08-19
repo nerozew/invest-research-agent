@@ -45,6 +45,14 @@ class ErrorCode(StrEnum):
     # P06-11D：Writer 输出明显截断（finish_reason=length 或正文末尾呈现截断痕迹），
     # 稳定失败（重试同样可能截断，等待配置/提示词修复）。
     REPORT_TRUNCATED = "REPORT_TRUNCATED"
+    # P06-11G：本地工具调用硬预算耗尽（每 Job 上限，非外部网络错误，
+    # 不能误报为 SCHEMA_INVALID；重试同样会立即失败）。
+    TOOL_BUDGET_EXHAUSTED = "TOOL_BUDGET_EXHAUSTED"
+    # P06-11G：公司解析失败（输入公司无法确定为唯一 SEC 公司，归类 01_company_resolve）。
+    COMPANY_NOT_FOUND = "COMPANY_NOT_FOUND"
+    # P06-11G：确定没有可信 SEC 申报来源/事实可作研究收尾（此时不得继续
+    # 无意义的付费 LLM 调用，归类 02_research）。
+    SEC_PREFETCH_UNAVAILABLE = "SEC_PREFETCH_UNAVAILABLE"
     INTERNAL_BUG = "INTERNAL_BUG"
 
 
@@ -87,6 +95,10 @@ _NON_RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
         # P06-11D：Writer 正文不合法/截断是确定性本地问题，重试同样失败。
         ErrorCode.REPORT_INVALID,
         ErrorCode.REPORT_TRUNCATED,
+        # P06-11G：本地预算耗尽/公司不存在/无可信 SEC 来源均为确定性失败，重试同样失败。
+        ErrorCode.TOOL_BUDGET_EXHAUSTED,
+        ErrorCode.COMPANY_NOT_FOUND,
+        ErrorCode.SEC_PREFETCH_UNAVAILABLE,
         ErrorCode.INTERNAL_BUG,
     }
 )

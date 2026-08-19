@@ -33,10 +33,12 @@ from invest_research.infrastructure.observability.metrics import (
     research_job_duration_seconds,
     research_jobs_in_progress,
     research_jobs_total,
+    research_prefetch_total,
     revision_total,
     schema_repair_total,
     stale_recovery_total,
     stale_running_steps,
+    tool_budget_exhausted_total,
     tool_cache_total,
     tool_calls_total,
     tool_duration_seconds,
@@ -68,6 +70,8 @@ __all__ = [
     "count_analysis_completeness",
     "observe_tool_duration",
     "count_tool_cache",
+    "count_tool_budget_exhausted",
+    "count_research_prefetch",
     "count_llm_request",
     "observe_llm_duration",
     "count_llm_tokens",
@@ -365,6 +369,18 @@ def count_tool_cache(tool: str, result: str) -> None:
     if result not in ("hit", "miss", "stored", "skipped"):
         return
     _safe_inc(tool_cache_total, label_values=(tool, result))
+
+
+def count_tool_budget_exhausted(tool: str) -> None:
+    """工具调用本地硬预算耗尽（P06-11G，按稳定工具名，不含 job_id/company/cik）。"""
+    _safe_inc(tool_budget_exhausted_total, label_values=(tool,))
+
+
+def count_research_prefetch(status: str) -> None:
+    """研究预取执行结果（P06-11G：ok/partial/failed/skipped 白名单过滤）。"""
+    if status not in ("ok", "partial", "failed", "skipped"):
+        return
+    _safe_inc(research_prefetch_total, label_values=(status,))
 
 
 # ---- 六、LLM ----

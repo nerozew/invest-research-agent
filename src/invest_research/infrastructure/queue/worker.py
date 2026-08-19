@@ -40,6 +40,7 @@ from invest_research.domain.status import JobStatus
 from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
 from invest_research.infrastructure.db.progress import SqlProgressSink
 from invest_research.infrastructure.db.repositories import JobRepository
+from invest_research.infrastructure.flow_wiring import JobResearchComponents
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.queue.celery_app import create_celery_app
 from invest_research.infrastructure.queue.execution_recorder import ExecutionRecorder
@@ -144,33 +145,96 @@ def _build_live_components(
     )
 
 
+def _build_live_component_factory(settings: Any) -> Callable[[], JobResearchComponents]:
+    """P06-11G：返回每 Job 组件工厂，每次调用都新建整套 job-local 组件。
+
+    - 每次调用创建全新的 ToolBudget / ToolCallCache / PerformanceRecorder /
+      stats / research_tools / prefetch，工具闭包只捕获当前 Job 的对象；
+    - ``_build_live_components`` 保持签名不变（兼容 test_live_e2e 直接调用）。
+    """
+    from invest_research.infrastructure.real_tools import (
+        build_research_prefetcher,
+        build_research_toolkit,
+        build_research_tools,
+    )
+
+    def factory() -> JobResearchComponents:
+        from invest_research.infrastructure.live_resources import build_live_client_and_serper
+
+        client, serper = build_live_client_and_serper(settings)
+        toolkit = build_research_toolkit(client=client, serper=serper)
+        stats: dict[str, int] = {}
+        cache = ToolCallCache()
+        recorder = PerformanceRecorder()
+        budget = ToolBudget()
+        research_tools = build_research_tools(
+            toolkit=toolkit, stats=stats, recorder=recorder, cache=cache, budget=budget
+        )
+        prefetch = build_research_prefetcher(
+            toolkit=toolkit, cache=cache, recorder=recorder, budget=budget, stats=stats
+        )
+        return JobResearchComponents(
+            research_tools=research_tools,
+            cache=cache,
+            recorder=recorder,
+            budget=budget,
+            prefetch=prefetch,
+            stats=stats,
+        )
+
+    return factory
+
+
+class _PerJobFlowRunner:
+    """P06-11G：Worker 侧「每 Job」FlowRunner 外壳。
+
+    每次 ``run(request)`` 都通过 component_factory 新建一套 job-local 组件
+    （ToolBudget/ToolCallCache/PerformanceRecorder/stats/research_tools/prefetch），
+    再交给全新的 ``LiveResearchFlowRunner`` 执行——不在 Worker 启动时永久持有
+    捕获旧预算/旧缓存的工具闭包，杜绝跨 Job 资源泄漏（真实故障根因）。
+    """
+
+    def __init__(
+        self,
+        settings: Any,
+        component_factory: Callable[[], JobResearchComponents],
+    ) -> None:
+        self._settings = settings
+        self._component_factory = component_factory
+        # P06-06B：Worker 在 run 前注入的进度端口与 job_id（透传给当前 Job runner）
+        self.progress: Any | None = None
+        self.job_id: uuid.UUID | None = None
+        self.last_state: Any | None = None
+
+    def run(self, request: ResearchRequest) -> Any:
+        from invest_research.infrastructure.flow_wiring import build_flow_runner
+
+        runner = build_flow_runner(
+            self._settings,
+            component_factory=self._component_factory,
+        )
+        runner.progress = self.progress
+        runner.job_id = self.job_id
+        state = runner.run(request)
+        self.last_state = state
+        return state
+
+
 def _default_flow_runner() -> ResearchFlowRunner:
     """按 FLOW_MODE 环境变量构建 FlowRunner（默认 fake，不读 Settings/不依赖 key）。
 
     - ``FLOW_MODE=fake``（默认）：返回 ``ResearchFlowRunner``（P03 纯 fake 00-07 全链，
       不联网、不产生模型费用），保持 worker 模块导入零 Settings 依赖；
-    - ``FLOW_MODE=live``：委托 ``flow_wiring.build_flow_runner(get_settings())``，
-      LLM API Key / Serper Key 缺失或为空时 fail-fast（可读错误），
-      不允许缺配置启动真实模型运行。
+    - ``FLOW_MODE=live``：返回 ``_PerJobFlowRunner``——每次 run 用
+      ``_build_live_component_factory`` 重建整套 job-local 组件并新建
+      ``LiveResearchFlowRunner``（LLM/Serper Key 缺失或为空时 build 阶段 fail-fast）。
     """
     if os.environ.get("FLOW_MODE", "fake") == "fake":
         return ResearchFlowRunner()
-    from invest_research.infrastructure.flow_wiring import build_flow_runner
     from invest_research.settings import get_settings
 
     settings = get_settings()
-    stats: dict[str, int] = {}
-    components = _build_live_components(settings, stats=stats)
-    runner = build_flow_runner(
-        settings,
-        research_tools=components.research_tools,
-        stats=stats,
-        recorder=components.recorder,
-        cache=components.cache,
-        prefetch=components.prefetch,
-        budget=components.budget,
-    )
-    return runner  # type: ignore[return-value]
+    return _PerJobFlowRunner(settings, _build_live_component_factory(settings))  # type: ignore[return-value]
 
 
 def _progress_logger() -> logging.Logger:

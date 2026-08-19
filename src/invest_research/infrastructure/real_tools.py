@@ -197,27 +197,104 @@ def _count(stats: dict[str, int] | None, key: str) -> None:
 
 
 @contextmanager
+def _tool_span(
+    tool_name: str,
+    *,
+    cache_hit: bool | None = None,
+    attempt_count: int | None = None,
+    budget: ToolBudget | None = None,
+) -> Iterator[Any]:
+    """P06-11G：真实工具包装层的脱敏 OTel span。
+
+    - span 名：``tool.<tool_name>``；属性只记录任务白名单内的低基数元数据，
+      绝不记录参数、结果正文、API Key、URL、公司名/job_id；
+    - ``cache_hit`` / ``attempt_count`` / ``budget_used`` / ``budget_cap`` 在
+      进入时已知则直接写入；``duration_ms`` / ``tool.status`` /
+      ``result_count`` / ``error_code`` / ``retryable`` 由调用方在执行完成后
+      通过 ``current.set_attribute(...)`` 补充（未提供则不写）。
+    - 未调用 setup_tracing 时 OTel 是 no-op provider，零开销。
+    """
+    import time as _time_mod
+
+    from invest_research.infrastructure.observability.tracing import span as _otel_span
+
+    attributes: dict[str, Any] = {"tool.name": tool_name}
+    if cache_hit is not None:
+        attributes["cache_hit"] = bool(cache_hit)
+    if attempt_count is not None:
+        attributes["attempt_count"] = int(attempt_count)
+    if budget is not None:
+        attributes["budget_used"] = budget.used(tool_name)
+        cap = budget.cap(tool_name)
+        attributes["budget_cap"] = int(cap) if cap is not None else -1
+    started = _time_mod.perf_counter()
+    with _otel_span(f"tool.{tool_name}", attributes) as current:
+        try:
+            yield current
+        finally:
+            elapsed_ms = round((_time_mod.perf_counter() - started) * 1000.0, 3)
+            current.set_attribute("duration_ms", elapsed_ms)
+
+
+def _set_span_result_attrs(
+    current: Any | None,
+    *,
+    tool_name: str,
+    result: Any | None = None,
+    error_code: str | None = None,
+    retryable: bool | None = None,
+    result_count: int | None = None,
+) -> None:
+    """执行完成后补充 span 脱敏属性（尽力而为；失败不中断业务）。"""
+    if current is None:
+        return
+    try:
+        status = "success" if error_code is None else "failure"
+        current.set_attribute("tool.status", status)
+        if error_code is not None:
+            current.set_attribute("error_code", error_code)
+        if retryable is not None:
+            current.set_attribute("retryable", bool(retryable))
+        if result_count is None and result is not None:
+            value = getattr(result, "value", None)
+            if value is not None:
+                items = getattr(value, "items", None)
+                filings = getattr(value, "filings", None)
+                facts = getattr(value, "facts", None)
+                if items is not None:
+                    result_count = len(items)
+                elif filings is not None:
+                    result_count = len(filings)
+                elif facts is not None:
+                    result_count = len(facts)
+        if result_count is not None:
+            current.set_attribute("result_count", int(result_count))
+    except Exception:  # noqa: BLE001 - span 属性尽力而为
+        pass
+
+
+@contextmanager
 def _timed(recorder: PerformanceRecorder | None, tool_name: str) -> Iterator[None]:
-    """工具执行上下文：性能计时（可选）+ OTel span（P06-05）+ 工具耗时指标（P06-09C）。
+    """工具执行上下文：性能计时（可选）+ OTel span + 工具耗时指标（P06-09C）。
 
     - recorder 为 None 时跳过计时（零额外开销）；
     - OTel span 始终开启（未 setup_tracing 时是 no-op provider，零开销）；
     - P06-09C：工具完成后按成功/失败写 tool_duration_seconds（尽力而为）；
-    - span 属性只放工具名（低基数），不放参数/结果/密钥。
+    - P06-11G：span 只记录白名单脱敏属性（tool.name/duration_ms/tool.status），
+      不放参数、结果正文或密钥。
     """
     import time as _time_mod
 
     from invest_research.infrastructure.observability.metrics_events import (
         observe_tool_duration,
     )
-    from invest_research.infrastructure.observability.tracing import span as _otel_span
 
     started = _time_mod.perf_counter()
     outcome: str = "success"
     with ExitStack() as stack:
         if recorder is not None:
             stack.enter_context(recorder.timed_tool(tool_name))
-        stack.enter_context(_otel_span(f"tool.{tool_name}", {"tool.name": tool_name}))
+        stack.enter_context(_tool_span(tool_name))
         try:
             yield
         except Exception:
@@ -228,14 +305,24 @@ def _timed(recorder: PerformanceRecorder | None, tool_name: str) -> Iterator[Non
 
 
 def _budget_exhausted(budget: ToolBudget | None, tool_name: str) -> str | None:
-    """尝试占用一次工具执行额度；超限返回 BUDGET_EXHAUSTED 失败 JSON（typed）。"""
+    """尝试占用一次工具执行额度；超限返回 TOOL_BUDGET_EXHAUSTED 失败 JSON（typed）。
+
+    P06-11G：本地预算耗尽使用稳定 ErrorCode.TOOL_BUDGET_EXHAUSTED
+    （不可重试、不归 SCHEMA_INVALID），并按工具计数 tool_budget_exhausted_total。
+    """
     if budget is None:
         return None
     if budget.try_acquire(tool_name):
         return None
     cap = budget.cap(tool_name)
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_tool_budget_exhausted,
+    )
+
+    count_tool_budget_exhausted(tool_name)
     return _tool_failure_json(
-        "BUDGET_EXHAUSTED", f"{tool_name} 调用预算已耗尽（每 Job 上限 {cap} 次）"
+        ErrorCode.TOOL_BUDGET_EXHAUSTED.value,
+        f"{tool_name} 调用预算已耗尽（每 Job 上限 {cap} 次）",
     )
 
 
@@ -273,19 +360,74 @@ def _cached_execute(
     execute_fn: Callable[[], Any],
     budget: ToolBudget | None = None,
 ) -> str:
-    """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 BUDGET_EXHAUSTED。
+    """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 TOOL_BUDGET_EXHAUSTED。
 
+    P06-11G：每次工具调用（命中/预算耗尽/真实执行）都产生一个 ``tool.<name>``
+    脱敏 span，属性只含白名单元数据（cache_hit/attempt_count/budget_used/
+    budget_cap/duration_ms/tool.status/result_count/error_code/retryable），
+    不记录参数/结果正文/API Key/URL。
     P06-06C：真实执行完成后按成功/失败计数 tool_calls_total；
     失败且错误可重试时按 tool/error_code 计数 tool_retries_total。
     """
+    import time as _time_mod
+
+    from invest_research.infrastructure.observability.metrics_events import (
+        observe_tool_duration,
+    )
+
     cached, key = _cached_lookup(cache, recorder, tool_name, params)
     if cached is not None:
+        # 缓存命中：仍然产生脱敏 span（cache_hit=true，无网络耗时）。
+        with _tool_span(tool_name, cache_hit=True, attempt_count=1) as current:
+            _set_span_result_attrs(current, tool_name=tool_name)
         return cached
     exhausted = _budget_exhausted(budget, tool_name)
     if exhausted is not None:
+        # 预算耗尽：span 记录稳定错误码（TOOL_BUDGET_EXHAUSTED，不可重试）。
+        with _tool_span(tool_name, cache_hit=False, attempt_count=1, budget=budget) as current:
+            _set_span_result_attrs(
+                current,
+                tool_name=tool_name,
+                error_code=ErrorCode.TOOL_BUDGET_EXHAUSTED.value,
+                retryable=False,
+            )
         return exhausted
-    with _timed(recorder, tool_name):
-        result = execute_fn()
+
+    started = _time_mod.perf_counter()
+    error_code: str | None = None
+    retryable: bool | None = None
+    result: Any | None = None
+    with _tool_span(tool_name, cache_hit=False, attempt_count=1, budget=budget) as current:
+        with ExitStack() as stack:
+            if recorder is not None:
+                stack.enter_context(recorder.timed_tool(tool_name))
+            try:
+                result = execute_fn()
+            except Exception:
+                error_code = ErrorCode.INTERNAL_BUG.value
+                retryable = False
+                raise
+            finally:
+                duration_s = _time_mod.perf_counter() - started
+                observe_tool_duration(
+                    tool_name,
+                    "success" if error_code is None else "failure",
+                    duration_s,
+                )
+                current.set_attribute("duration_ms", round(duration_s * 1000.0, 3))
+        err = getattr(result, "error", None)
+        kind = getattr(result, "kind", None)
+        if kind == "failure":
+            code = getattr(err, "error_code", None)
+            error_code = code.value if code is not None and hasattr(code, "value") else str(code)
+            retryable = bool(getattr(err, "is_retryable", False))
+        _set_span_result_attrs(
+            current,
+            tool_name=tool_name,
+            result=result,
+            error_code=error_code,
+            retryable=retryable,
+        )
     text = serialize_fn(result)
     if cache is not None and key is not None and getattr(result, "kind", None) == "success":
         cache.put(key, text)
@@ -631,10 +773,15 @@ def resolve_and_prefetch(
     - 摘要随 PrefetchResult 返回，供 runner 注入 Research Task（不只预热缓存）；
     - 仅并行独立 I/O；Analysis 仍依赖 Research、Writer 仍依赖 Research+Analysis。
     """
+    from invest_research.infrastructure.observability.metrics_events import (
+        count_research_prefetch,
+    )
+
     resolve_result = toolkit.resolver.execute(
         ResolveCompanyRequest(input_company=request.input_company)
     )
     if resolve_result.kind == "failure" or not resolve_result.value.resolved:
+        count_research_prefetch("failed")
         return PrefetchResult(
             company_identity=None,
             submissions_summary=None,
@@ -759,6 +906,7 @@ def resolve_and_prefetch(
         )
         else "partial"
     )
+    count_research_prefetch(status)
     return PrefetchResult(
         company_identity=identity,
         submissions_summary=submissions_summary,

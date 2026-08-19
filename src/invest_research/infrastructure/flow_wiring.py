@@ -242,6 +242,24 @@ class LiveFlowExecutionError(RuntimeError):
 
 
 @dataclass
+class JobResearchComponents:
+    """P06-11G：单个 Job 专属的可变研究组件（禁止跨 Job 复用）。
+
+    - ``research_tools``：闭包捕获本 Job 的 cache/budget/recorder/stats；
+    - ``cache`` / ``budget`` / ``recorder``：本 Job 独立实例；
+    - ``prefetch``：捕获本 Job 组件的预取 callable；
+    - ``stats``：本 Job 调用计数（写入当前 Job manifest 的证据）。
+    """
+
+    research_tools: list[Any]
+    cache: ToolCallCache
+    recorder: PerformanceRecorder
+    budget: ToolBudget
+    prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None
+    stats: dict[str, int]
+
+
+@dataclass
 class _RunContext:
     """P06-11E：每次 run(request) 独立的工作上下文（跨 Job 状态隔离）。
 
@@ -249,16 +267,20 @@ class _RunContext:
     - ``prefetch_result`` / ``analysis_facts``：本 Job 的预取结果与还原原始事实；
     - ``profile`` / ``effective_config``：本 Job 档位与有效 LLM 配置
       （fast 关闭思考模式等 Job 级覆盖不写回 runner 实例）；
-    - ``stats`` / ``recorder`` / ``budget``：构造注入的共享基础设施引用
-      （同一 runner 多次 run 复用合理；Job 特有计数不在此共享）。
+    - ``components``（P06-11G）：本 Job 专属的工具/cache/budget/recorder/stats；
+      构造注入的共享引用只在未提供 component_factory 时作为回退。
     """
 
     request: ResearchRequest
     profile: ResearchProfile
     effective_config: LLMConfig
+    components: JobResearchComponents
     stats: dict[str, int]
     recorder: PerformanceRecorder
     budget: ToolBudget | None
+    cache: ToolCallCache | None
+    prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None
+    research_tools: list[Any] | None
     prefetch_result: PrefetchResult | None = None
     analysis_facts: list[FinancialFact] = field(default_factory=list)
     finalization_count: int = 0
@@ -403,10 +425,16 @@ class LiveResearchFlowRunner:
         cache: ToolCallCache | None = None,
         prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
         budget: ToolBudget | None = None,
+        component_factory: Callable[[], JobResearchComponents] | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
         self._artifact_root = Path(artifact_root)
+        # P06-11G：每 Job 组件工厂。提供时每次 run() 都新建一套
+        # job-local 组件（budget/cache/recorder/stats/research_tools/prefetch），
+        # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入
+        # 的共享引用（兼容既有测试与旧 wiring）。
+        self._component_factory = component_factory
         self.last_state: ResearchFlowState | None = None
         self.run_manifest: dict[str, object] = {}
         self._reflection = ReflectionController()
@@ -508,14 +536,52 @@ class LiveResearchFlowRunner:
         effective_config = self._config
         if profile.mode == "fast":
             effective_config = self._config.model_copy(update={"enable_thinking": False})
+        # P06-11G：优先使用 component_factory 为当前 Job 创建全新组件
+        # （budget/cache/recorder/stats/research_tools/prefetch 全部 job-local），
+        # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入的共享引用。
+        if self._component_factory is not None:
+            components = self._component_factory()
+            job_stats: dict[str, int] = components.stats
+            job_recorder: PerformanceRecorder = components.recorder
+            job_budget: ToolBudget | None = components.budget
+            job_cache: ToolCallCache | None = components.cache
+            job_prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = components.prefetch
+            job_tools: list[Any] | None = components.research_tools
+        else:
+            job_stats = self._stats
+            job_recorder = self._recorder
+            job_budget = self._budget
+            job_cache = self._cache
+            job_prefetch = self._prefetch
+            job_tools = self._research_tools
+            components = JobResearchComponents(
+                research_tools=job_tools if job_tools is not None else [],
+                cache=job_cache if job_cache is not None else ToolCallCache(),
+                recorder=job_recorder,
+                budget=job_budget if job_budget is not None else ToolBudget(),
+                prefetch=job_prefetch,
+                stats=job_stats,
+            )
         ctx = _RunContext(
             request=request,
             profile=profile,
             effective_config=effective_config,
-            stats=self._stats,
-            recorder=self._recorder,
-            budget=self._budget,
+            components=components,
+            stats=job_stats,
+            recorder=job_recorder,
+            budget=job_budget,
+            cache=job_cache,
+            prefetch=job_prefetch,
+            research_tools=job_tools,
         )
+        # P06-11G：让本 Job 的执行阶段都使用 ctx 内的 job-local 组件，
+        # 不再读取 runner 构造期捕获的共享引用（避免闭包仍绑定旧预算/缓存）。
+        self._research_tools = job_tools
+        self._cache = job_cache
+        self._prefetch = job_prefetch
+        self._recorder = job_recorder
+        self._stats = job_stats
+        self._budget = job_budget
         # 兼容既有测试/观测辅助读取的实例字段：每次 run 重置（防跨 Job 泄漏）。
         self._current_profile = profile
         self._effective_config = effective_config
@@ -966,13 +1032,17 @@ class LiveResearchFlowRunner:
     def _resolved_identity_or_fail(
         self, request: ResearchRequest, ctx: _RunContext
     ) -> CompanyIdentity:
-        """取预取/解析公司身份；失败抛可读错误（不生成伪造 pack）。"""
+        """取预取/解析公司身份；失败抛可读错误（不生成伪造 pack）。
+
+        P06-11G：公司解析失败归类稳定 error_code=COMPANY_NOT_FOUND
+        （failure_stage=01_company_resolve），不再误报为 SCHEMA_INVALID。
+        """
         identity = self._resolved_identity(request, ctx)
         if identity is None:
             raise LiveFlowExecutionError(
                 "无法确定公司身份，禁止生成伪造 ResearchPack",
-                error_code="SCHEMA_INVALID",
-                failure_stage="02_research",
+                error_code=ErrorCode.COMPANY_NOT_FOUND.value,
+                failure_stage="01_company_resolve",
             )
         return identity
 
@@ -1462,15 +1532,21 @@ class LiveResearchFlowRunner:
         identity = self._resolved_identity(request, ctx)
         if identity is None:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无法确定公司身份，无法结构化收尾；禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无法确定公司身份，无法结构化收尾；"
+                "禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.COMPANY_NOT_FOUND.value,
+                failure_stage="01_company_resolve",
             ) from cause
-        if self._cache is None:
+        cache = self._cache
+        if cache is None:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无工具缓存，无法结构化收尾；禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无工具缓存，无法结构化收尾；禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.SEC_PREFETCH_UNAVAILABLE.value,
+                failure_stage="02_research",
             ) from cause
 
         forms = ",".join(request.requested_forms) if request.requested_forms else "10-K,10-Q"
-        key = self._cache.key(
+        key = cache.key(
             "sec_submissions",
             {
                 "cik": identity.cik,
@@ -1478,18 +1554,22 @@ class LiveResearchFlowRunner:
                 "requested_forms": forms,
             },
         )
-        cached = self._cache.get(key)
+        cached = cache.get(key)
         if cached is None:
             raise LiveFlowExecutionError(
                 "Research 输出不可解析且缓存无 SEC 申报结果，无法结构化收尾；"
-                "禁止生成伪造 ResearchPack"
+                "禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.SEC_PREFETCH_UNAVAILABLE.value,
+                failure_stage="02_research",
             ) from cause
         try:
             payload = json.loads(cached)
         except (TypeError, ValueError) as parse_exc:
             raise LiveFlowExecutionError(
                 "Research 输出不可解析且缓存 SEC 结果损坏，无法结构化收尾；"
-                "禁止生成伪造 ResearchPack"
+                "禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.SEC_PREFETCH_UNAVAILABLE.value,
+                failure_stage="02_research",
             ) from parse_exc
         raw_filings = payload.get("filings", []) if payload.get("ok") else []
         sources: list[Source] = []
@@ -1514,7 +1594,9 @@ class LiveResearchFlowRunner:
             )
         if not sources:
             raise LiveFlowExecutionError(
-                "Research 输出不可解析且无有效 SEC 来源，无法结构化收尾；禁止生成伪造 ResearchPack"
+                "Research 输出不可解析且无有效 SEC 来源，无法结构化收尾；禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.SEC_PREFETCH_UNAVAILABLE.value,
+                failure_stage="02_research",
             ) from cause
         return ResearchPack(
             version="research_pack_v1",
@@ -1597,6 +1679,8 @@ class LiveResearchFlowRunner:
         try:
             from invest_research.infrastructure.observability.metrics_events import (
                 count_revision_attempted as _attempted,
+            )
+            from invest_research.infrastructure.observability.metrics_events import (
                 count_revision_succeeded as _succeeded,
             )
 
@@ -1738,12 +1822,16 @@ def build_flow_runner(
     cache: ToolCallCache | None = None,
     prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
     budget: ToolBudget | None = None,
+    component_factory: Callable[[], JobResearchComponents] | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
     - fake：返回 ``ResearchFlowRunner``（默认，离线确定性，普通测试/CI 用）；
     - live：校验 API Key 后返回 ``LiveResearchFlowRunner``（真实 Crew + 门禁 + 反思，
-      可注入 ``research_tools`` 生产工具白名单与 ``stats`` 调用统计）。
+      可注入 ``research_tools`` 生产工具白名单与 ``stats`` 调用统计）；
+    - ``component_factory``（P06-11G）：提供时每次 ``run()`` 为当前 Job 重建
+      job-local 组件（budget/cache/recorder/stats/research_tools/prefetch），
+      禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包。
     """
     if settings.flow_mode == "fake":
         return ResearchFlowRunner()
@@ -1765,4 +1853,5 @@ def build_flow_runner(
         cache=cache,
         prefetch=prefetch,
         budget=budget,
+        component_factory=component_factory,
     )
