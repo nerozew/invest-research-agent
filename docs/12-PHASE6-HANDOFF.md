@@ -445,3 +445,31 @@ Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E�
 **限制**：修订器只修复三类可修复 issue；missing_section 不自动补造章节；未修改 P06-11E Finalizer 与 staged flow。
 
 **下一候选任务**：受控 live fast smoke（`LLM_VENDOR=deepseek` 一次真实任务验证注册表交付 + 引用非空 + 禁止项不误判）；随后 `P06-11`（10 家公司效率对照实验）。
+
+## P06-11I：重构 Writer 为无工具单轮写作流程（✅ 已完成 2026-08-19，本地 commit，未 push）
+
+**任务目标**：根治 DeepSeek Writer 在 CrewAI 工具循环中反复调用 WriterContextReader、final 过短的历史问题——改为 Python 确定性加载两个 Pack → 构建紧凑上下文 → 一次无工具 LLM 调用 → ReportDraftAssembler 本地组装 → 现有质量门禁。
+
+**新增文件**：
+- `application/writer_context_builder.py`：`WriterContextBuilder/WriterContextLimits/BuiltWriterContext`——把 ResearchPack + FinancialAnalysisPack + CitationRegistry 压缩为单段写作消息；公司身份、写作规则与**全部合法 citation keys 永远保留**，facts/limitations/sources 超限时按条数与预算确定性裁剪（记录 dropped_sections）；输出低基数统计（context_chars/estimated_tokens/fact_count/source_count/citation_count/truncated）。
+- `application/writer_direct_dispatch.py`：`WriterDirectDispatch` 端口 + `WriterDispatchResult/WriterDispatchError`——不传 tools/tool_choice/available_functions、不触发 beta.parse、重试复用同一份上下文。
+- `infrastructure/direct_writer_dispatch.py`：`DirectLlmWriterDispatch`——普通 openai-compatible `chat.completions.create`，只读 `response.choices[0].message.content`（DeepSeek 普通正文）；可注入 mock client；`requests` 审计只记录模型/消息长度/has_error_summary，不含正文与密钥。
+- `tests/test_p06_11i_writer_direct.py`：19 用例，覆盖 17 项验收重点。
+
+**修改**：
+- `infrastructure/flow_wiring.py`：`_exec_writer_stage` 对 DeepSeek/generic **不再创建 Writer Agent/Crew/执行 _kickoff_single**，直接走新的 `_exec_writer_stage_direct`；Qwen NATIVE_PYDANTIC 保留原 Crew 路径。direct 路径含至多一次 Writer-only 重试（空 content / finish_reason=length / 过短 / 缺章节），第二次失败稳定 LiveFlowExecutionError（REPORT_INVALID/REPORT_TRUNCATED）；新增 `direct_writer_factory` 注入点（测试零真实网络）；Jaeger span 增加 writer.context_build / writer.direct_llm / writer.assemble（只记 context_chars/estimated_tokens/fact_count/source_count/citation_count/output_chars/finish_reason/retry_count/status/error_code）。
+- `infrastructure/observability/metrics.py` + `metrics_events.py`：新增低基数指标 writer_direct_requests_total{status}/writer_direct_duration_seconds{status}/writer_direct_output_chars{status}/writer_direct_retry_total{reason}。
+- `tests/test_p06_11b_deepseek_structured_output.py` / `tests/test_p06_11e_deepseek_json_finalizer.py`：适配 `structured_output_mode(config, role)` 签名（P06-11G 变更遗留，补 role 参数不改测试目的）。
+
+**验证**：`uv run python -m pytest` 新测试 19 passed + 相关回归 207 passed（flow_wiring/metrics/p06-11b~h/observability）；`uv run ruff check src` 全绿；`uv run python -m mypy src` 130 源文件全绿。
+
+**关键决策**：
+1. Writer 不再走 Agent/Crew 工具循环（根因：DeepSeek 在 max_iter 内反复调用 WriterContextReader，token 全耗在 tool_calls 参数上，final 仅 103~114 字符）；
+2. 重新加载两个 Pack 是确定性 Python（`build_citation_registry` 唯一生成 source key），LLM 只输出 Markdown；
+3. CitationRegistry 全部合法 key 永远完整保留（禁止静默截掉全部 registry），公司身份优先级最高；
+4. 有限重试最多一次且只重试 Writer（复用同一份上下文 + 结构化错误摘要），不重新执行 Research/Analysis/外部工具、不切换模型、不伪造报告；
+5. Jaeger span 与 Prometheus 只记录长度/数量/状态，绝不记录 prompt、正文、API Key。
+
+**限制**：未执行真实 DeepSeek live 测试（遵守限制，等待授权）；Qwen NATIVE_PYDANTIC 原路径保留但未在真实 Qwen 下回归；Writer 上下文预算（max_chars=6000 等）为代码常量，可按需调参；本任务未同时重写 Research/Analysis。
+
+**下一候选任务**：受控 MSFT fast live 验收（DeepSeek）：Docker 重建 api/worker 镜像 → 创建 fast 任务 → 确认 05_writer 生成完整报告、正文含合法 citation keys、writer_direct_* 指标出现、Jaeger writer.context_build/direct_llm/assemble span 出现且不含 prompt/正文；随后 P06-11（10 家公司效率对照实验）。

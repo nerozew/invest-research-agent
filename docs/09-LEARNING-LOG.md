@@ -2624,3 +2624,24 @@ DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_forma
 - 本任务未修改 P06-11E Finalizer 与 staged flow 结构；DeepSeek/Qwen 供应商路径保持不变。
 - 修订器目前只修复三类可修复 issue（missing_citation_keys / invalid_citation_key / forbidden_advice）；missing_section 不自动补造章节。
 - 下一候选：受控 live fast smoke（`LLM_VENDOR=deepseek` 一次真实任务验证注册表交付 + 引用非空 + 禁止项不误判）；随后 P06-11（10 家公司效率对照实验）。
+---
+
+## P06-11I：重构 Writer 为无工具单轮写作流程 ✅
+
+**产物**：WriterContextBuilder / WriterDirectDispatch 端口 / DirectLlmWriterDispatch / flow_wiring _exec_writer_stage_direct + writer_direct_* 指标
+
+### 3 个知识点
+
+1. **"Agent 工具循环"不是免费的**：CrewAI 里 Agent 每轮"想→调工具→观察"都会消耗一次完整 LLM 调用。DeepSeek 在 Writer 工具循环中把 token 全部花在 `tool_calls[].function.arguments`（605 tokens/轮），却始终不产出最终内容——max_iter 耗尽后被逼出 103~114 字符的 final answer。当"读取上下文"这类确定性工作可以交给 Python 时，就不应让 LLM 通过工具循环去做（LLM 只做它擅长的"生成正文"）。
+
+2. **确定性上下文的"硬保留 + 预算软裁剪"**：WriterContextBuilder 把公司身份、写作规则、CitationRegistry 全部合法 key 作为**必须保留**的 hard sections（超限即抛 WRITER_CONTEXT_OVERFLOW，禁止静默丢弃全部 key）；facts/limitations/sources 则按 max_chars/max_tokens/max_facts/max_sources 预算确定性裁剪并记录 dropped_sections。这保证了"无论模型多啰嗦，报告都至少知道公司是谁、能引哪些来源"。
+
+3. **无工具调用与有限重试的边界**：DirectLlmWriterDispatch 用普通 `chat.completions.create`（不传 tools/tool_choice、不触发 beta.parse、只读 response.content），把"判断失败"与"重试"完全交给本地：ReportDraftAssembler 判定空/过短/缺章节 → 复用同一份上下文 + 结构化错误摘要再调一次 → 第二次仍失败稳定抛 REPORT_INVALID/REPORT_TRUNCATED。重试对象只有 Writer 一次，绝不重新执行 Research/Analysis/外部工具，也不切换模型。
+
+### 检查问题（请用自己的话回答）
+为什么旧的"Writer 用工具循环读上下文"在 DeepSeek 上必然走向 max_iter 耗尽，而新的"Python 确定加载 + 一次无工具调用"能把完整报告生成出来？两者在"谁的 token 花在哪"上有什么本质区别？
+
+### 已知限制与下一任务建议
+
+- 未执行真实 DeepSeek live 测试（遵守限制，等待授权）；Qwen NATIVE_PYDANTIC 原路径保留但未在真实 Qwen 下回归；Writer 上下文预算（max_chars=6000 等）为代码常量，可按需调参。
+- 下一候选：受控 MSFT fast live 验收（DeepSeek）：Docker 重建 api/worker 镜像 → 创建 fast 任务 → 确认 05_writer 生成完整报告、正文含合法 citation keys、writer_direct_* 指标出现、Jaeger writer.context_build/direct_llm/assemble span 出现且不含 prompt/正文；随后 P06-11（10 家公司效率对照实验）。

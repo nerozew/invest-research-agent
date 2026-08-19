@@ -122,7 +122,10 @@ def test_qwen_writer_task_keeps_native_output_pydantic() -> None:
 def test_generic_falls_back_to_local_json_validation() -> None:
     """generic 默认采用 JSON 文本 + 本地校验。"""
     config = _config("generic")
-    assert structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    assert (
+        structured_output_mode(config, LLMRole.WRITER)
+        == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    )
     task = build_analysis_task(config, fake=_fake(config, LLMRole.ANALYSIS))
     assert task.output_pydantic is None
     assert task.output_json is None
@@ -134,8 +137,14 @@ def test_structured_output_mode_uses_vendor_not_base_url() -> None:
     deepseek = _config("deepseek")
     qwen2 = qwen.model_copy(update={"base_url": "https://deepseek.example.com/v1"})
     deepseek2 = deepseek.model_copy(update={"base_url": "https://dashscope.aliyuncs.com/v1"})
-    assert structured_output_mode(qwen2) == StructuredOutputMode.NATIVE_PYDANTIC
-    assert structured_output_mode(deepseek2) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    assert (
+        structured_output_mode(qwen2, LLMRole.WRITER)
+        == StructuredOutputMode.NATIVE_PYDANTIC
+    )
+    assert (
+        structured_output_mode(deepseek2, LLMRole.WRITER)
+        == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -368,4 +377,4 @@ def test_structured_output_mode_mapping(vendor: str) -> None:
         if vendor == "qwen"
         else StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
     )
-    assert structured_output_mode(config) == expected
+    assert structured_output_mode(config, LLMRole.WRITER) == expected

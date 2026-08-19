@@ -45,6 +45,10 @@ from invest_research.infrastructure.observability.metrics import (
     tool_retries_total,
     workflow_step_duration_seconds,
     workflow_steps_total,
+    writer_direct_duration_seconds,
+    writer_direct_output_chars,
+    writer_direct_requests_total,
+    writer_direct_retry_total,
     writer_recovery_total,
     writer_response_capture_total,
     writer_response_length_chars,
@@ -84,6 +88,11 @@ __all__ = [
     "count_writer_response_capture",
     "count_writer_recovery",
     "observe_writer_response_length",
+    # P06-11I
+    "count_writer_direct_request",
+    "observe_writer_direct_duration",
+    "observe_writer_direct_output_chars",
+    "count_writer_direct_retry",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -458,3 +467,45 @@ def observe_writer_response_length(char_length: int) -> None:
     if char_length is None or char_length < 0:
         return
     _safe_obs(writer_response_length_chars, ("writer",), float(char_length))
+
+
+# ---- 八、P06-11I：Direct Writer（无工具单轮调用）----
+
+# Direct Writer 调用结果白名单（status 只允许稳定低基数值）。
+_WRITER_DIRECT_STATUSES: frozenset[str] = frozenset(
+    {"success", "empty", "length", "invalid", "error"}
+)
+# Direct Writer 有限重试原因白名单（reason 只允许稳定低基数值）。
+_WRITER_DIRECT_RETRY_REASONS: frozenset[str] = frozenset(
+    {"empty", "length", "too_short", "missing_section"}
+)
+
+
+def count_writer_direct_request(status: str) -> None:
+    """Direct Writer 无工具调用结果计数（status 白名单过滤）。"""
+    if status not in _WRITER_DIRECT_STATUSES:
+        return
+    _safe_inc(writer_direct_requests_total, label_values=(status,))
+
+
+def observe_writer_direct_duration(status: str, duration_s: float) -> None:
+    """Direct Writer 单个无工具调用耗时（秒，非负且 status 白名单才写）。"""
+    if status not in _WRITER_DIRECT_STATUSES:
+        return
+    _safe_obs(writer_direct_duration_seconds, (status,), duration_s)
+
+
+def observe_writer_direct_output_chars(status: str, char_length: int) -> None:
+    """Direct Writer 输出 Markdown 长度（字符，只记录长度不记录正文）。"""
+    if status not in _WRITER_DIRECT_STATUSES:
+        return
+    if char_length is None or char_length < 0:
+        return
+    _safe_obs(writer_direct_output_chars, (status,), float(char_length))
+
+
+def count_writer_direct_retry(reason: str) -> None:
+    """Direct Writer 触发有限重试的原因计数（reason 白名单过滤）。"""
+    if reason not in _WRITER_DIRECT_RETRY_REASONS:
+        return
+    _safe_inc(writer_direct_retry_total, label_values=(reason,))

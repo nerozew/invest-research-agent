@@ -69,6 +69,11 @@ __all__ = [
     "writer_response_capture_total",
     "writer_recovery_total",
     "writer_response_length_chars",
+    # P06-11I
+    "writer_direct_requests_total",
+    "writer_direct_duration_seconds",
+    "writer_direct_output_chars",
+    "writer_direct_retry_total",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -382,4 +387,39 @@ llm_usage_missing_total = Counter(
     "CrewAI LLM completed 事件不包含可消费 usage 的次数（TokenProcess "
     "仍可在角色级收口，不得伪造为 0）",
     ["provider", "model", "role"],
+)
+
+# ---------------------------------------------------------------------------
+# 七、P06-11I：Direct Writer（无工具单轮调用）
+# ---------------------------------------------------------------------------
+
+# Direct Writer 调用结果（status=success/empty/length/invalid/error；
+# 只记录低基数状态，不记录正文/公司/job_id）。
+writer_direct_requests_total = Counter(
+    "writer_direct_requests_total",
+    "Direct Writer 无工具调用总数（status 白名单）",
+    ["status"],
+)
+
+# Direct Writer 调用耗时（秒；单次 LLM 调用实测）。
+writer_direct_duration_seconds = Histogram(
+    "writer_direct_duration_seconds",
+    "Direct Writer 无工具调用真实持续秒数",
+    ["status"],
+    buckets=_LLM_DURATION_BUCKETS,
+)
+
+# Direct Writer 输出正文长度（字符；只记录长度，不记录正文）。
+writer_direct_output_chars = Histogram(
+    "writer_direct_output_chars",
+    "Direct Writer 输出 Markdown 长度（字符数）",
+    ["status"],
+)
+
+# Direct Writer 有限重试触发原因（reason=empty/length/too_short/missing_section；
+# 只记录低基数原因，不记录正文）。
+writer_direct_retry_total = Counter(
+    "writer_direct_retry_total",
+    "Direct Writer 触发有限重试的原因（reason 白名单）",
+    ["reason"],
 )

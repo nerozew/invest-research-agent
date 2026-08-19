@@ -71,6 +71,11 @@ from invest_research.application.research_assembler import (
     ResearchPackAssembler,
 )
 from invest_research.application.structured_finalizer import FinalizerError
+from invest_research.application.writer_context_builder import WriterContextBuilder
+from invest_research.application.writer_direct_dispatch import (
+    WriterDispatchError,
+    WriterDispatchResult,
+)
 from invest_research.application.writer_response_capture import InMemoryWriterResponseBuffer
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
@@ -91,6 +96,7 @@ from invest_research.flows.quality import run_quality_gate
 from invest_research.flows.quality_classifier import classify_state
 from invest_research.flows.reflection import ReflectionController
 from invest_research.flows.state import ResearchFlowState
+from invest_research.infrastructure.direct_writer_dispatch import DirectLlmWriterDispatch
 from invest_research.infrastructure.finalizers.deepseek_json_object_finalizer import (
     DeepSeekJsonObjectFinalizer,
 )
@@ -478,6 +484,7 @@ class LiveResearchFlowRunner:
         prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
         budget: ToolBudget | None = None,
         component_factory: Callable[[], JobResearchComponents] | None = None,
+        direct_writer_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
@@ -487,6 +494,9 @@ class LiveResearchFlowRunner:
         # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入
         # 的共享引用（兼容既有测试与旧 wiring）。
         self._component_factory = component_factory
+        # P06-11I：Direct Writer dispatch 工厂（测试注入 mock client 的 dispatch，
+        # 零真实网络；None 时生产用 DirectLlmWriterDispatch）。
+        self._direct_writer_factory = direct_writer_factory
         self.last_state: ResearchFlowState | None = None
         self.run_manifest: dict[str, object] = {}
         self._reflection = ReflectionController()
@@ -964,6 +974,18 @@ class LiveResearchFlowRunner:
 
         registry = build_citation_registry(state.research_pack, state.analysis_pack)
         state.citation_registry = registry
+
+        # P06-11I：DeepSeek/generic Writer **不再创建**带 WriterContextReader 的
+        # Agent/Crew 工具循环（max_iter 内反复调用消耗 token、final 过短的历史根因）。
+        if (
+            structured_output_mode(ctx.effective_config, LLMRole.WRITER)
+            != StructuredOutputMode.NATIVE_PYDANTIC
+        ):
+            # 改为 Python 确定性加载两个 Pack → 构建紧凑上下文 → 一次无工具 LLM 调用
+            # → ReportDraftAssembler 本地组装 → 现有质量门禁。绝不执行 _kickoff_single。
+            return self._exec_writer_stage_direct(request, ctx, state, registry)
+
+        # Qwen NATIVE_PYDANTIC：保留原 Crew 路径（不受本任务影响）。
         loader: ArtifactLoader = _staged_artifact_loader(state)
         task = build_writer_task(
             ctx.effective_config,
@@ -977,27 +999,248 @@ class LiveResearchFlowRunner:
             process=Process.sequential,
             verbose=False,
         )
-        # P06-11F-live：把 writer agent 保存到 runner 实例字段（Pydantic state 的
-        # setattr 动态属性不生效——ResearchFlowState extra=ignore），供 final answer
-        # 过短时从 agent.last_messages 回收工具循环中已生成的最长正文。
         self._writer_agent = task.agent
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
-        if (
-            structured_output_mode(ctx.effective_config, LLMRole.WRITER)
-            == StructuredOutputMode.NATIVE_PYDANTIC
-        ):
-            return _to_packed(raw, ReportDraft)
-        # DeepSeek/generic：普通 Markdown → ReportDraftAssembler（复用同一 registry）。
-        # P06-11F-live：真实 DeepSeek Writer 常把数千字正文生成在工具循环中间步骤
-        # （thought/observations），最终 final answer 只有 20~160 字符 → REPORT_INVALID。
-        # 修复：final answer 过短时，从 agent.last_messages 回收工具循环中已生成的
-        # 最长 assistant 正文（模型已生成的内容，不新增事实、不重新调用外部工具）。
-        raw_text = self._extract_markdown(raw)
-        assembler_out = self._assemble_writer_markdown(
-            raw_text, request, state, registry
+        return _to_packed(raw, ReportDraft)
+
+    def _exec_writer_stage_direct(
+        self,
+        request: ResearchRequest,
+        ctx: _RunContext,
+        state: ResearchFlowState,
+        registry: Any,
+    ) -> ReportDraft:
+        """P06-11I：无工具 Writer 直接调度（确定性上下文 + 至多两次 LLM 调用）。
+
+        数据流：
+        - 确定性加载 research_pack / analysis_pack / citation_registry；
+        - ``WriterContextBuilder`` 构建紧凑上下文（writer.context_build span）；
+        - 一次无工具 ``chat.completions.create``（writer.direct_llm span）；
+        - ``ReportDraftAssembler`` 本地组装（writer.assemble span）；
+        - 第一次命中重试条件（空 content / finish_reason=length / 组装失败）时，
+          复用**同一份上下文**再调用一次（携带结构化错误摘要）；
+        - 第二次仍失败 → LiveFlowExecutionError（REPORT_INVALID/REPORT_TRUNCATED），
+          不无限重试、不自动切换模型、不伪造报告。
+
+        保证不触发：tools / tool_choice / available_functions / beta.parse / Crew 循环。
+        """
+
+        # 1. 确定性紧凑上下文（writer.context_build）。
+        context = None
+        try:
+            from invest_research.infrastructure.observability.tracing import get_tracer
+
+            tracer = get_tracer("writer")
+            with tracer.start_as_current_span(
+                "writer.context_build",
+                attributes={
+                    "context_chars": 0,
+                    "estimated_tokens": 0,
+                    "fact_count": 0,
+                    "source_count": 0,
+                    "citation_count": len(registry.keys()),
+                    "status": "running",
+                },
+            ):
+                context = WriterContextBuilder().build(
+                    request, state.research_pack, state.analysis_pack, registry
+                )
+        except Exception:  # noqa: BLE001 - 观测尽力而为，构建失败不掩盖业务错误
+            context = WriterContextBuilder().build(
+                request, state.research_pack, state.analysis_pack, registry
+            )
+        assert context is not None
+
+        # 2. 构造/注入 Direct Writer dispatch（测试注入 mock 时零真实网络）。
+        if self._direct_writer_factory is not None:
+            dispatch = self._direct_writer_factory(ctx.effective_config)
+        else:
+            dispatch = DirectLlmWriterDispatch(ctx.effective_config)
+
+        # 3. 第一次无工具调用。
+        first_result = self._dispatch_direct_writer(dispatch, request, context)
+        retry_count = 0
+        error_summary: str | None = None
+
+        def _use_result(result: WriterDispatchResult, summary: str | None) -> ReportDraft:
+            nonlocal error_summary
+            try:
+                return self._assemble_direct_writer(
+                    result,
+                    request,
+                    state,
+                    registry,
+                    context,
+                    finish_reason=result.finish_reason,
+                    retry_count=retry_count,
+                )
+            except ReportAssemblerError as exc:
+                error_summary = summary or str(exc)
+                raise
+
+        try:
+            return _use_result(first_result, None)
+        except ReportAssemblerError:
+            pass
+
+        # 4. 第一次失败 → 最多一次 Writer-only 重试（复用同一份上下文）。
+        if not first_result.markdown.strip():
+            retry_reason = "empty"
+        elif first_result.finish_reason == "length":
+            retry_reason = "length"
+        else:
+            retry_reason = (
+                "too_short"
+                if len(first_result.markdown.strip()) < 200
+                else "missing_section"
+            )
+        retry_count = 1
+        try:
+            from invest_research.infrastructure.observability.metrics_events import (
+                count_writer_direct_retry,
+            )
+
+            count_writer_direct_retry(retry_reason)
+        except Exception:  # noqa: BLE001 - 指标尽力而为
+            pass
+        _LOGGER.info(
+            "writer direct retry: reason=%s context_chars=%d",
+            retry_reason,
+            context.context_chars,
         )
-        return assembler_out
+        second_result = self._dispatch_direct_writer(
+            dispatch, request, context, error_summary=error_summary
+        )
+        try:
+            return self._assemble_direct_writer(
+                second_result,
+                request,
+                state,
+                registry,
+                context,
+                finish_reason=second_result.finish_reason,
+                retry_count=1,
+            )
+        except ReportAssemblerError as exc:
+            # 第二次仍失败：稳定失败（不无限重试、不自动切换模型、不伪造报告）。
+            raise LiveFlowExecutionError(
+                str(exc),
+                error_code=exc.error_code,
+                failure_stage=exc.failure_stage,
+            ) from exc
+
+    def _dispatch_direct_writer(
+        self,
+        dispatch: Any,
+        request: ResearchRequest,
+        context: Any,
+        *,
+        error_summary: str | None = None,
+    ) -> WriterDispatchResult:
+        """执行一次无工具 Writer 调用并记录 Jaeger writer.direct_llm span。"""
+        from invest_research.infrastructure.observability.tracing import get_tracer
+
+        tracer = get_tracer("writer")
+        try:
+            with tracer.start_as_current_span(
+                "writer.direct_llm",
+                attributes={
+                    "context_chars": context.context_chars,
+                    "estimated_tokens": context.estimated_tokens,
+                    "fact_count": context.fact_count,
+                    "source_count": context.source_count,
+                    "citation_count": context.citation_count,
+                    "retry_count": int(error_summary is not None),
+                    "status": "running",
+                },
+            ):
+                raw_result = dispatch.dispatch(
+                    request, context, error_summary=error_summary
+                )
+                assert isinstance(raw_result, WriterDispatchResult)
+                result = raw_result
+            status = self._direct_status(result)
+            _record_direct_metrics(result, status)
+            return result
+        except WriterDispatchError as exc:
+            _record_direct_error(exc.error_code, context)
+            raise LiveFlowExecutionError(
+                str(exc),
+                error_code=exc.error_code,
+                failure_stage="05_writer",
+            ) from exc
+
+    def _assemble_direct_writer(
+        self,
+        result: WriterDispatchResult,
+        request: ResearchRequest,
+        state: ResearchFlowState,
+        registry: Any,
+        context: Any,
+        *,
+        finish_reason: str | None,
+        retry_count: int,
+    ) -> ReportDraft:
+        """把 Direct Writer 输出经 ReportDraftAssembler 组装（writer.assemble span）。"""
+        from invest_research.infrastructure.observability.tracing import get_tracer
+
+        tracer = get_tracer("writer")
+        try:
+            with tracer.start_as_current_span(
+                "writer.assemble",
+                attributes={
+                    "context_chars": context.context_chars,
+                    "estimated_tokens": context.estimated_tokens,
+                    "fact_count": context.fact_count,
+                    "source_count": context.source_count,
+                    "citation_count": context.citation_count,
+                    "output_chars": int(len(result.markdown)),
+                    "finish_reason": result.finish_reason,
+                    "retry_count": retry_count,
+                    "status": "running",
+                },
+            ):
+                return ReportDraftAssembler().assemble(
+                    result.markdown,
+                    request,
+                    state.research_pack,
+                    state.analysis_pack,
+                    registry=registry,
+                    finish_reason=finish_reason,
+                )
+        except ReportAssemblerError as exc:
+            if tracer is not None:
+                span = tracer.start_span("writer.assemble")
+                span.set_attribute("output_chars", int(len(result.markdown)))
+                span.set_attribute("finish_reason", result.finish_reason)
+                span.set_attribute("retry_count", int(retry_count))
+                span.set_attribute("status", "failed")
+                span.set_attribute("error_code", exc.error_code)
+                span.end()
+            try:
+                from invest_research.infrastructure.observability.metrics_events import (
+                    count_writer_direct_request,
+                )
+
+                status = (
+                    exc.error_code
+                    if exc.error_code in ("REPORT_INVALID", "REPORT_TRUNCATED")
+                    else "invalid"
+                )
+                count_writer_direct_request(status)
+            except Exception:  # noqa: BLE001 - 指标尽力而为
+                pass
+            raise
+
+    @staticmethod
+    def _direct_status(result: WriterDispatchResult) -> str:
+        """Direct Writer 调用状态分桶（success/empty/length/error）。"""
+        if not result.markdown.strip():
+            return "empty"
+        if result.finish_reason == "length":
+            return "length"
+        return "success"
 
     def _assemble_writer_markdown(
         self,
@@ -2032,6 +2275,38 @@ class LiveResearchFlowRunner:
             # P05.5-fix：live 单次运行覆盖旧工件，保证工件反映本次运行（诊断不误导）
             data = content if isinstance(content, bytes) else content.encode("utf-8")
             store.write(key, data, overwrite=True)
+
+
+def _record_direct_metrics(result: WriterDispatchResult, status: str) -> None:
+    """Direct Writer 单次调用完成后写入低基数指标（尽力而为，不改变业务结果）。
+
+    - 只记录 status / duration / output_chars / tokens，绝不记录正文或公司名；
+    - status 白名单由 metrics_events 内部过滤（success/empty/length）。
+    """
+    try:
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_writer_direct_request,
+            observe_writer_direct_duration,
+            observe_writer_direct_output_chars,
+        )
+
+        count_writer_direct_request(status)
+        observe_writer_direct_duration(status, result.duration_s)
+        observe_writer_direct_output_chars(status, int(len(result.markdown)))
+    except Exception:  # noqa: BLE001 - 指标写入尽力而为
+        _LOGGER.warning("writer direct metrics recording skipped")
+
+
+def _record_direct_error(error_code: str, context: Any) -> None:
+    """Direct Writer LLM 调用失败时记录低基数指标（尽力而为）。"""
+    try:
+        from invest_research.infrastructure.observability.metrics_events import (
+            count_writer_direct_request,
+        )
+
+        count_writer_direct_request("error")
+    except Exception:  # noqa: BLE001 - 指标写入尽力而为
+        _LOGGER.warning("writer direct error metrics recording skipped")
 
 
 def _ensure_live_api_key(settings: Settings) -> str:

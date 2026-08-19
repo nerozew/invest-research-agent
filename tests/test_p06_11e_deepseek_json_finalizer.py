@@ -34,7 +34,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import SecretStr
 
-from invest_research.agents.llm_factory import LLMConfig
+from invest_research.agents.llm_factory import LLMConfig, LLMRole
 from invest_research.application.boundary_canonicalizer import BoundaryCanonicalizer
 from invest_research.application.research_assembler import ResearchPackAssembler
 from invest_research.application.structured_finalizer import FinalizerError
@@ -388,7 +388,7 @@ def test_qwen_native_path_not_using_finalizer() -> None:
     from invest_research.agents.llm_factory import StructuredOutputMode, structured_output_mode
 
     cfg = _config("qwen")
-    assert structured_output_mode(cfg) == StructuredOutputMode.NATIVE_PYDANTIC
+    assert structured_output_mode(cfg, LLMRole.WRITER) == StructuredOutputMode.NATIVE_PYDANTIC
 
 
 # ---------------------------------------------------------------------------
