@@ -390,10 +390,30 @@ Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E�
 - `fdd1b8f` test(P06-11E)：22 项契约测试
 - `5fc3267` docs(P06-11E)：路线图标记 ✅
 - `62addc2` docs(P06-11E)：学习日志
+- `a84578c` docs(P06-11E)：Phase 6 handoff 追加
+- `2b50031` fix(P06-11E)：Research 分阶段选草稿无来源时回退有界结构化收尾（真实 live 暴露）
 
-**限制**：Finalizer 修复未携带结构化字段错误（`_extract_field_errors` 空列表）；分阶段
-生产路径未在真实 DeepSeek 下运行（遵守不 live）；未 push；未启动 Docker；未运行
-100 次基准。
+**真实 live 验收（2026-08-19，Docker `agent-*` 栈 + DeepSeek `deepseek-v4-flash`）**：
+- 配置：FLOW_MODE=live、LLM_VENDOR=deepseek、模型 deepseek-v4-flash。
+- 首跑 job `2b7fd28b`：三阶段+Finalizer 生效（02_research running→failed，
+  Analysis/Writer 未执行——短路正确），失败原因「Research 选择草稿没有命中任何
+  可信 SEC 申报来源」——`_cache_filings_if_available` 未预热。
+- 修复 `_exec_research_stage`：选草稿无缓存来源 → 回退 `_finalize_research_pack`
+  （有界结构化收尾，不伪造来源）。
+- 重跑 job `c033e758`（fast，MSFT，as_of=2025-10-31，10-K）：
+  **succeeded（72.4s）**，02_research→04_analysis→05_writer→06_quality_gate→
+  07_manifest 全 succeeded；8 工件齐全（含 08_report.md/09_report.pdf）。
+  质量门禁正确拒绝：`["citation_keys 为空", "禁止的投资建议: 买入/卖出/目标价"]`
+  → recommendation=rejected（模型报告缺引用且含投资建议，门禁按设计拒绝）；
+  manifest.evidence 显示真实外部调用 sec_submissions=1、web_search=1、
+  sec_company_facts=1。
+- **结论**：DeepSeek 原生 JSON Finalizer + BoundaryCanonicalizer + 三阶段执行 +
+  确定性 Assembler 在真实 DeepSeek 下全链路跑通；质量门禁与禁止项按设计工作。
 
-**下一候选任务**：受控 live 验证 Finalizer 转 SelectionDraft 并被本地 Assembler 组装；
+**限制（真实 live 已验收）**：Finalizer 修复未携带结构化字段错误（`_extract_field_errors`
+空列表）；首次真实 live 暴露"选草稿无可信缓存来源"→ 已回退有界收尾修复（commit
+`2b50031`）；未 push；未运行 100 次基准。
+
+**下一候选任务**：受控 live 下持续观察 DeepSeek 报告的引用与禁止项质量（本次报告被
+门禁 rejected——缺 citation_keys 且含买入/卖出/目标价），优化 Writer 提示词后重测；
 随后 `P06-11`（10 家公司效率对照实验）或 `P06-12`（README 演示）。
