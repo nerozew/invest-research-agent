@@ -40,6 +40,7 @@ __all__ = [
     "get_tracer",
     "span",
     "trace_id_from_context",
+    "current_trace_ids",
     "current_trace_carrier",
     "extract_trace_context",
 ]
@@ -175,3 +176,18 @@ def trace_id_from_context() -> str | None:
     if ctx.trace_id == 0:
         return None
     return format(ctx.trace_id, "032x")
+
+
+def current_trace_ids() -> tuple[str | None, str | None]:
+    """返回当前 span context 的 (trace_id, span_id)，均为十六进制；无则 (None, None)。
+
+    P06-11K-5：诊断事件 / 结构化日志 / 时间线与 Jaeger 使用同一 trace_id，
+    保证「同一任务所有诊断事件 trace_id 一致，可交叉定位」。
+    """
+    current_span = trace.get_current_span()
+    ctx = current_span.get_span_context()
+    if ctx.trace_id == 0:
+        return None, None
+    trace_id = format(ctx.trace_id, "032x")
+    span_id = format(ctx.span_id, "016x") if ctx.span_id and ctx.span_id != 0 else None
+    return trace_id, span_id

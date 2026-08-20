@@ -702,12 +702,24 @@ class LlmFullObserver:
                 tool_call_count=len(getattr(event, "tool_calls", None) or []),
                 error_code=error_code,
             )
+            # P06-11K-5：LLM 摘要事件与 Jaeger 链路使用同一 trace_id/span_id。
+            trace_id, span_id = None, None
+            try:
+                from invest_research.infrastructure.observability.tracing import (
+                    current_trace_ids,
+                )
+
+                trace_id, span_id = current_trace_ids()
+            except Exception:  # noqa: BLE001 - 观测尽力而为
+                pass
             diagnostics.capture(
                 stage="llm",
                 component="llm_full_observer",
                 payload_kind=f"llm_response_{kind}",
                 data={**summary, "status": status},
                 direction=DiagnosticDirection.OUTPUT,
+                trace_id=trace_id,
+                span_id=span_id,
             )
         except Exception:  # noqa: BLE001 - 诊断尽力而为
             _LOGGER.warning("llm diagnostics capture skipped role=%s", role)

@@ -719,11 +719,55 @@ class LiveResearchFlowRunner:
     # P06-11K-3：诊断收口辅助（写入失败绝不掩盖业务异常）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _diag_trace_ids() -> tuple[str | None, str | None]:
+        """P06-11K-5：读取当前 OTel span context 的 trace_id / span_id（十六进制）。
+
+        - 诊断事件与 Jaeger 链路必须使用同一 trace_id（验收：同一任务所有事件
+          trace_id 一致，便于前端失败诊断页与 Jaeger 交叉定位）；
+        - 无当前 span 时返回 (None, None)（离线测试不产生 trace_id）。
+        """
+        try:
+            from invest_research.infrastructure.observability.tracing import current_trace_ids
+
+            return current_trace_ids()
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            return None, None
+
+    def _diag_capture(
+        self,
+        *,
+        stage: str,
+        component: str,
+        payload_kind: str,
+        data: Any,
+        direction: DiagnosticDirection | None = None,
+        content_type: str | None = None,
+    ) -> Any:
+        """P06-11K-5：统一诊断捕获入口（自动注入当前 trace_id/span_id）。"""
+        if self._diagnostics is None:
+            return None
+        trace_id, span_id = self._diag_trace_ids()
+        try:
+            return self._diagnostics.capture(
+                stage=stage,
+                component=component,
+                payload_kind=payload_kind,
+                data=data,
+                direction=direction,
+                content_type=content_type,
+                trace_id=trace_id,
+                span_id=span_id,
+            )
+        except Exception:  # noqa: BLE001 - 诊断尽力而为
+            return None
+
     def _finalize_diagnostics_success(self) -> None:
         if self._diagnostics is None:
             return
         try:
-            self._diagnostics.finalize_success()
+            trace_id, span_id = self._diag_trace_ids()
+            self._diagnostics.finalize_success(trace_id=trace_id, span_id=span_id)
             self._persist_diagnostics_bundle(failed=False, error_code="", failure_stage=None)
         except Exception:  # noqa: BLE001 - 诊断尽力而为，不得影响业务
             _LOGGER.warning("diagnostics success finalize skipped")
@@ -737,15 +781,20 @@ class LiveResearchFlowRunner:
         if self._diagnostics is None:
             return
         try:
+            trace_id, span_id = self._diag_trace_ids()
             self._diagnostics.record_exception(
                 stage="flow",
                 component="runner",
                 error_code=error_code,
                 message=f"任务失败: error_code={error_code} failure_stage={failure_stage or 'N/A'}",
+                trace_id=trace_id,
+                span_id=span_id,
             )
             self._diagnostics.finalize_failure(
                 error_code=error_code,
                 failure_stage=failure_stage,
+                trace_id=trace_id,
+                span_id=span_id,
             )
             self._persist_diagnostics_bundle(
                 failed=True,
@@ -857,7 +906,7 @@ class LiveResearchFlowRunner:
             self._mark("06_quality_gate", "succeeded")
             # P06-11K-3：Quality Gate 输出捕获（脱敏后入缓冲）。
             if self._diagnostics is not None and state.quality_report is not None:
-                self._diagnostics.capture(
+                self._diag_capture(
                     stage="06_quality_gate",
                     component="quality",
                     payload_kind="quality_report",
@@ -865,7 +914,7 @@ class LiveResearchFlowRunner:
                     direction=DiagnosticDirection.OUTPUT,
                 )
                 if state.revision_attempted:
-                    self._diagnostics.capture(
+                    self._diag_capture(
                         stage="revision",
                         component="revision",
                         payload_kind="revision_result",
@@ -1030,7 +1079,7 @@ class LiveResearchFlowRunner:
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         # P06-11K-3：Research Agent 输入捕获（脱敏后入缓冲）。
         if self._diagnostics is not None:
-            self._diagnostics.capture(
+            self._diag_capture(
                 stage="02_research",
                 component="agent",
                 payload_kind="research_inputs",
@@ -1045,7 +1094,7 @@ class LiveResearchFlowRunner:
             # Qwen：直接本地解析为 ResearchPack（Boundary 校验）
             pack = _normalize_research_sources(self._to_research_pack(raw, request, ctx))
             if self._diagnostics is not None:
-                self._diagnostics.capture(
+                self._diag_capture(
                     stage="02_research",
                     component="assembler",
                     payload_kind="ResearchPack",
@@ -1067,7 +1116,7 @@ class LiveResearchFlowRunner:
                 )
             )
             if self._diagnostics is not None:
-                self._diagnostics.capture(
+                self._diag_capture(
                     stage="02_research",
                     component="assembler",
                     payload_kind="ResearchPack",
@@ -1103,7 +1152,7 @@ class LiveResearchFlowRunner:
         )
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         if self._diagnostics is not None:
-            self._diagnostics.capture(
+            self._diag_capture(
                 stage="04_analysis",
                 component="agent",
                 payload_kind="analysis_inputs",
@@ -1117,7 +1166,7 @@ class LiveResearchFlowRunner:
         ):
             pack = _to_packed(raw, FinancialAnalysisPack)
             if self._diagnostics is not None:
-                self._diagnostics.capture(
+                self._diag_capture(
                     stage="04_analysis",
                     component="assembler",
                     payload_kind="FinancialAnalysisPack",
@@ -1131,7 +1180,7 @@ class LiveResearchFlowRunner:
             assert isinstance(draft, AnalysisSelectionDraft)
             pack = AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
             if self._diagnostics is not None:
-                self._diagnostics.capture(
+                self._diag_capture(
                     stage="04_analysis",
                     component="assembler",
                     payload_kind="FinancialAnalysisPack",
@@ -1246,7 +1295,7 @@ class LiveResearchFlowRunner:
 
         # P06-11K-3：Writer 紧凑上下文输入捕获（脱敏后入缓冲）。
         if self._diagnostics is not None:
-            self._diagnostics.capture(
+            self._diag_capture(
                 stage="05_writer",
                 component="context_builder",
                 payload_kind="writer_context",
@@ -1286,7 +1335,7 @@ class LiveResearchFlowRunner:
                 # P06-11K-3：Writer 每次 LLM 调用摘要 + ReportDraft 输出捕获（脱敏后）。
                 if self._diagnostics is not None:
                     kind = "content" if result.markdown.strip() else "empty"
-                    self._diagnostics.capture(
+                    self._diag_capture(
                         stage="05_writer",
                         component="llm",
                         payload_kind=f"writer_response_{kind}",
@@ -1297,7 +1346,7 @@ class LiveResearchFlowRunner:
                         },
                         direction=DiagnosticDirection.OUTPUT,
                     )
-                    self._diagnostics.capture(
+                    self._diag_capture(
                         stage="05_writer",
                         component="assembler",
                         payload_kind="ReportDraft",

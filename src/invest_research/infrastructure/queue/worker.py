@@ -82,9 +82,7 @@ def _build_session_factory() -> SessionFactory:
     return factory
 
 
-def _build_live_research_tools(
-    settings: Any, stats: dict[str, int] | None = None
-) -> list[Any]:
+def _build_live_research_tools(settings: Any, stats: dict[str, int] | None = None) -> list[Any]:
     """构造 live 模式的 Research 真实工具白名单（SEC/搜索/下载）。
 
     - 兼容旧名称；内部委托 live_resources.build_live_client_and_serper 完成
@@ -114,10 +112,63 @@ class LiveResearchComponents:
     prefetch: Callable[[ResearchRequest], Any]
 
 
+def _build_diagnostics_capture(settings: Any, job_id: str | None = None) -> Any | None:
+    """P06-11K-5：按 Settings 构建 Job-local DiagnosticCapture（off 时返回 None）。
+
+    - Settings 的 DIAGNOSTIC_CAPTURE_MODE=off（默认）返回 None，生产路径
+      tools/flow runner 全部走 no-op，不改变业务成功/失败路径；
+    - 非 off 时创建全新 ``BoundedDiagnosticBuffer`` + ``DiagnosticCapture``，
+      闭包不捕获跨 Job 的对象；buffer.job_id 由调用方传入（每次 run 刷新）。
+    """
+    from invest_research.application.diagnostics.capture import DiagnosticCapture
+    from invest_research.application.diagnostics.models import (
+        DiagnosticCaptureMode,
+        DiagnosticCapturePolicy,
+    )
+    from invest_research.application.diagnostics.sink import BoundedDiagnosticBuffer
+
+    if settings.diagnostic_capture_mode == "off":
+        return None
+    policy = DiagnosticCapturePolicy(
+        capture_mode=DiagnosticCaptureMode(settings.diagnostic_capture_mode),
+        max_event_bytes=settings.diagnostic_max_event_bytes,
+        max_bundle_bytes=settings.diagnostic_max_bundle_bytes,
+        max_events=settings.diagnostic_max_events,
+        retention_days=settings.diagnostic_retention_days,
+    )
+    return DiagnosticCapture(
+        buffer=BoundedDiagnosticBuffer(job_id=job_id or "job-local", policy=policy)
+    )
+
+
+@dataclass
+class LiveComponentFactory:
+    """P06-11K-5：live 模式每 Job 组件工厂 + Job-local 诊断工厂。
+
+    - ``build_components``：每次调用新建整套 job-local 组件
+      （budget/cache/recorder/stats/research_tools/prefetch），工具闭包经
+      ``diagnostics_provider`` 惰性读取当前 Job 的 DiagnosticCapture；
+    - ``diagnostics_factory``：FlowRunner 每次 run() 调用产出新的 Job-local
+      DiagnosticCapture（off 时返回 None），与 tools provider 共享同一 state；
+    - ``set_job_id``：每次 run 前由 ``_PerJobFlowRunner`` 刷新当前 job_id，
+      使 capture 的 buffer.job_id 与任务一致。
+    """
+
+    build_components: Callable[[], JobResearchComponents]
+    diagnostics_factory: Callable[[], Any | None]
+    set_job_id: Callable[[uuid.UUID | None], None]
+
+
 def _build_live_components(
-    settings: Any, stats: dict[str, int] | None = None
+    settings: Any,
+    stats: dict[str, int] | None = None,
+    diagnostics_provider: Callable[[], Any | None] | None = None,
 ) -> LiveResearchComponents:
-    """构建 live 模式的工具、缓存、性能记录器与并行预取（P05.5）。"""
+    """构建 live 模式的工具、缓存、性能记录器与并行预取（P05.5）。
+
+    ``diagnostics_provider``：P06-11K-5 可选惰性读取当前 Job 的
+    DiagnosticCapture（None 时不捕获，行为与之前完全一致）。
+    """
     from invest_research.infrastructure.live_resources import build_live_client_and_serper
     from invest_research.infrastructure.real_tools import (
         build_research_prefetcher,
@@ -131,7 +182,12 @@ def _build_live_components(
     recorder = PerformanceRecorder()
     budget = ToolBudget()
     research_tools = build_research_tools(
-        toolkit=toolkit, stats=stats, recorder=recorder, cache=cache, budget=budget
+        toolkit=toolkit,
+        stats=stats,
+        recorder=recorder,
+        cache=cache,
+        budget=budget,
+        diagnostics_provider=diagnostics_provider,
     )
     prefetch = build_research_prefetcher(
         toolkit=toolkit, cache=cache, recorder=recorder, budget=budget, stats=stats
@@ -145,18 +201,36 @@ def _build_live_components(
     )
 
 
-def _build_live_component_factory(settings: Any) -> Callable[[], JobResearchComponents]:
-    """P06-11G：返回每 Job 组件工厂，每次调用都新建整套 job-local 组件。
+def _build_live_component_factory(settings: Any) -> LiveComponentFactory:
+    """P06-11G：返回每 Job 组件工厂 + Job-local 诊断工厂组合。
 
-    - 每次调用创建全新的 ToolBudget / ToolCallCache / PerformanceRecorder /
-      stats / research_tools / prefetch，工具闭包只捕获当前 Job 的对象；
-    - ``_build_live_components`` 保持签名不变（兼容 test_live_e2e 直接调用）。
+    - ``build_components`` 每次调用创建全新的 ToolBudget / ToolCallCache /
+      PerformanceRecorder / stats / research_tools / prefetch，工具闭包只捕获
+      当前 Job 的对象；``diagnostics_provider`` 惰性读取当前 Job 的 capture；
+    - ``diagnostics_factory`` 由 FlowRunner 每次 run() 调用产出新的 Job-local
+      DiagnosticCapture（P06-11K-5 生产接线：capture 与 tools provider 共享
+      同一 state，保证工具摘要/LLM 摘要写入当前 Job 的 buffer）。
     """
     from invest_research.infrastructure.real_tools import (
         build_research_prefetcher,
         build_research_toolkit,
         build_research_tools,
     )
+
+    # P06-11K-5：共享 Job-local 诊断状态（capture 由 diagnostics_factory 在
+    # 每次 run 创建；tools provider 惰性读取，保证工具闭包不绑定旧 capture）。
+    state: dict[str, Any] = {"capture": None, "job_id": None}
+
+    def set_job_id(job_id: uuid.UUID | None) -> None:
+        state["job_id"] = str(job_id) if job_id is not None else None
+
+    def diagnostics_factory() -> Any | None:
+        capture = _build_diagnostics_capture(settings, job_id=state.get("job_id"))
+        state["capture"] = capture
+        return capture
+
+    def diagnostics_provider() -> Any | None:
+        return state.get("capture")
 
     def factory() -> JobResearchComponents:
         from invest_research.infrastructure.live_resources import build_live_client_and_serper
@@ -168,7 +242,12 @@ def _build_live_component_factory(settings: Any) -> Callable[[], JobResearchComp
         recorder = PerformanceRecorder()
         budget = ToolBudget()
         research_tools = build_research_tools(
-            toolkit=toolkit, stats=stats, recorder=recorder, cache=cache, budget=budget
+            toolkit=toolkit,
+            stats=stats,
+            recorder=recorder,
+            cache=cache,
+            budget=budget,
+            diagnostics_provider=diagnostics_provider,
         )
         prefetch = build_research_prefetcher(
             toolkit=toolkit, cache=cache, recorder=recorder, budget=budget, stats=stats
@@ -182,7 +261,11 @@ def _build_live_component_factory(settings: Any) -> Callable[[], JobResearchComp
             stats=stats,
         )
 
-    return factory
+    return LiveComponentFactory(
+        build_components=factory,
+        diagnostics_factory=diagnostics_factory,
+        set_job_id=set_job_id,
+    )
 
 
 class _PerJobFlowRunner:
@@ -192,12 +275,16 @@ class _PerJobFlowRunner:
     （ToolBudget/ToolCallCache/PerformanceRecorder/stats/research_tools/prefetch），
     再交给全新的 ``LiveResearchFlowRunner`` 执行——不在 Worker 启动时永久持有
     捕获旧预算/旧缓存的工具闭包，杜绝跨 Job 资源泄漏（真实故障根因）。
+
+    P06-11K-5：component_factory 现在是 ``LiveComponentFactory``——
+    ``run`` 前先 ``set_job_id`` 刷新诊断 job_id，再透传 ``diagnostics_factory``
+    给 ``build_flow_runner``（生产路径工具摘要/LLM 摘要捕获全链路生效）。
     """
 
     def __init__(
         self,
         settings: Any,
-        component_factory: Callable[[], JobResearchComponents],
+        component_factory: LiveComponentFactory,
     ) -> None:
         self._settings = settings
         self._component_factory = component_factory
@@ -209,9 +296,13 @@ class _PerJobFlowRunner:
     def run(self, request: ResearchRequest) -> Any:
         from invest_research.infrastructure.flow_wiring import build_flow_runner
 
+        # P06-11K-5：每次 run 前把 job_id 刷新进共享诊断 state（capture 的
+        # buffer.job_id 与任务一致；tools provider 才能读到当前 Job 的 capture）。
+        self._component_factory.set_job_id(self.job_id)
         runner = build_flow_runner(
             self._settings,
-            component_factory=self._component_factory,
+            component_factory=self._component_factory.build_components,
+            diagnostics_factory=self._component_factory.diagnostics_factory,
         )
         runner.progress = self.progress
         runner.job_id = self.job_id

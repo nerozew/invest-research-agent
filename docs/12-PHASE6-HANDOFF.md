@@ -14,7 +14,15 @@
 - **P06-06A**：每任务 fast/deep 研究档位（前端单选 + 0007 迁移 + Worker 路由 + fast 关闭思考模式）。
 - **P06-06B**：ProgressSink 实时步骤状态（幂等创建 00-07、合法状态转换、失败收口 running、终态清空 current_step、前端阶段中文映射）。
 - **当前验证**：相关测试 87 passed（含新增 SqlProgressSink/前端/ExecutionRecorder 不重复插入）；Ruff 全绿；`mypy src` 110 个源文件全绿；0007 迁移真实 PostgreSQL upgrade→downgrade→upgrade 通过；fast/deep fake smoke 通过（running 期间 current_step+steps、终态 8 步全成功、无真实 API 调用）。
-- **当前 commit**：P06-06A 代码 `b2d773e`（已存在）+ 本轮新增（未提交）。
+- **P06-11K 系列（K-1~K-5）已全部完成 ✅（最新 2026-08-20）**：
+  - K-1 `295611e`：settings/.env.example 诊断 5 配置 + diagnostics/{models,redaction,sink,__init__}.py + BoundedDiagnosticBuffer
+  - K-2 `69d0f4b`：diagnostics/persistence.py + diagnostics_bundle_store.py（原子写 + 幂等 + 清理）
+  - K-3 `96d00b0`：diagnostics/capture.py + flow_wiring run() 收口 + diagnostics_factory 透传
+  - K-4 `ea56a55`：工具/SEC/Serper/LLM 脱敏摘要 + Jaeger 白名单属性 + 诊断包安全下载 + 前端失败诊断页
+  - K-5（本窗口，待 commit）：worker 生产接线补齐（diagnostics_provider/diagnostics_factory/set_job_id）+ flow_wiring/real_tools/llm_full_observer trace_id 统一注入（current_trace_ids）+ tests/test_p06_11k5_fake_docker_injection.py（7 用例）+ docs/05/09/12 更新
+- **K-5 验证**：7 新测试 passed + K-1~K-4/J/工具 span 回归 69 passed；Ruff 全绿；mypy 受检 6 文件无问题（research_flow.py:89 detach 为既有错误，按约束不修）。
+- **当前 commit**：P06-06A 代码 `b2d773e`（已存在）+ P06-11K-1~K-4（295611e/69d0f4b/96d00b0/ea56a55，均未 push）+ 本轮 K-5（待提交）。
+- **下一候选**：P06-11（10 家公司效率对照实验）或 P06-12（完善 README 演示、架构图和限制）。
 
 ## 2. 已完成任务与本地 commit
 
@@ -473,3 +481,16 @@ Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E�
 **限制**：未执行真实 DeepSeek live 测试（遵守限制，等待授权）；Qwen NATIVE_PYDANTIC 原路径保留但未在真实 Qwen 下回归；Writer 上下文预算（max_chars=6000 等）为代码常量，可按需调参；本任务未同时重写 Research/Analysis。
 
 **下一候选任务**：受控 MSFT fast live 验收（DeepSeek）：Docker 重建 api/worker 镜像 → 创建 fast 任务 → 确认 05_writer 生成完整报告、正文含合法 citation keys、writer_direct_* 指标出现、Jaeger writer.context_build/direct_llm/assemble span 出现且不含 prompt/正文；随后 P06-11（10 家公司效率对照实验）。
+
+## P06-11K 系列收口（K-1~K-5 ✅，2026-08-20 全部完成）
+
+**P06-11K-5（本窗口）**：生产接线补齐（worker `_build_live_component_factory`/`_build_live_components`/`_PerJobFlowRunner` 补齐 `diagnostics_provider`/`diagnostics_factory`/`set_job_id`）+ 所有诊断捕获点统一注入 OTel trace_id/span_id（flow_wiring `_diag_trace_ids`/`_diag_capture`、real_tools `_capture_tool_call`、llm_full_observer `_capture_llm_summary`，均走 tracing.py 新增公共 `current_trace_ids()`）+ tests/test_p06_11k5_fake_docker_injection.py（7 用例）+ docs/05/09/12 更新。
+
+**验证（真实执行）**：
+- `pytest tests/test_p06_11k5_fake_docker_injection.py -v` → 7 passed（工具摘要 request/response、cache 命中去重、预算耗尽只打参数、build_research_tools 签名、worker 注入点静态断言、fake Writer 失败诊断包脱敏+trace 一致、阶段顺序+ValidationError 落盘）
+- `pytest tests/test_p06_11k1~k4 + test_p06_11j_observability + test_p06_11g_tool_span` → 69 passed
+- `ruff check` 全绿（W292 已 --fix）；`mypy` 受检 6 文件无问题（research_flow.py:89 detach 为既有错误，按约束不修）
+
+**限制**：未做真实 Docker live 故障注入验收（遵守限制，不执行 live/不 docker down）；worker 工厂注入点用源码文本静态断言（避免 import worker 触发 Celery app 构建 + DB 探活副作用）；fake 故障注入用 LiveResearchFlowRunner + fake crew + InMemorySpanExporter 隔离验证。
+
+**下一候选**：P06-11（10 家公司效率对照实验）或 P06-12（完善 README 演示、架构图和限制）。

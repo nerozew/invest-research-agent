@@ -2645,3 +2645,23 @@ DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_forma
 
 - 未执行真实 DeepSeek live 测试（遵守限制，等待授权）；Qwen NATIVE_PYDANTIC 原路径保留但未在真实 Qwen 下回归；Writer 上下文预算（max_chars=6000 等）为代码常量，可按需调参。
 - 下一候选：受控 MSFT fast live 验收（DeepSeek）：Docker 重建 api/worker 镜像 → 创建 fast 任务 → 确认 05_writer 生成完整报告、正文含合法 citation keys、writer_direct_* 指标出现、Jaeger writer.context_build/direct_llm/assemble span 出现且不含 prompt/正文；随后 P06-11（10 家公司效率对照实验）。
+
+## P06-11K-5：生产接线补齐 + fake Docker 故障注入 + 文档收尾 ✅（2026-08-20）
+
+**产物**：worker.py `_build_live_component_factory`/`_build_live_components`/`_PerJobFlowRunner` 补齐 `diagnostics_provider`/`diagnostics_factory`/`set_job_id` 生产接线（K-4 遗留贯通点）；flow_wiring `_diag_trace_ids`/`_diag_capture` 统一注入当前 OTel trace_id/span_id；real_tools `_capture_tool_call` 与 llm_full_observer `_capture_llm_summary` 同样注入 trace_id；tracing.py 新增公共 `current_trace_ids()`；tests/test_p06_11k5_fake_docker_injection.py（7 用例）；docs/05、09、12 更新。
+
+### 3 个知识点
+
+1. **生产接线的"共享 state"模式**：worker 的 `_build_live_component_factory` 用同一个 `state` dict 同时驱动 `diagnostics_factory`（每次 run 产出新 Job-local DiagnosticCapture）与 `diagnostics_provider`（工具闭包惰性读当前 capture）。这样工具闭包在 Worker 启动时构造（capture 尚未存在）也能在 run 时读到同一个 capture——**闭包不能绑定实例，只能绑定读取路径**。
+
+2. **trace_id 一致性的统一读取**：tracing.py 新增公共 `current_trace_ids()` 读取当前 OTel span context 的 trace_id/span_id，flow_wiring 的 `_diag_capture`、real_tools 的 `_capture_tool_call`、llm_full_observer 的 `_capture_llm_summary` 全部走它。保证"诊断事件 trace_id == Jaeger flow.run trace_id"，使前端失败诊断页与 Jaeger 可交叉定位。
+
+3. **fake 故障注入验证的是"隔离栈内全链路"**：不 import worker 顶层（会触发 `_build_celery_app()` → DB 探活卡死测试），改用 `LiveResearchFlowRunner` + fake crew 抛 Writer 失败 + InMemorySpanExporter，验证诊断包落盘四文件、阶段顺序、敏感字段脱敏、span 内 trace_id 一致。**测试自动化必须避免引入会真实联网/连库的副作用**。
+
+### 检查问题（请用自己的话回答）
+为什么工具的 `diagnostics_provider` 必须是"惰性读取"而不能在 `build_research_tools` 时直接绑定某个 DiagnosticCapture 实例？如果绑定了会发生什么跨 Job 问题？
+
+### 已知限制与下一任务建议
+
+- K 系列（K-1~K-5）已全部完成；未做真实 Docker live 故障注入验收（遵守限制，不执行 live/不 docker down）；worker 工厂注入点用源码静态断言而非真实 import（避免 Celery 副作用）；`research_flow.py:89 detach` 为既有 mypy 错误、按约束不修。
+- 下一候选：P06-11（10 家公司效率对照实验）或 P06-12（完善 README 演示、架构图和限制）。

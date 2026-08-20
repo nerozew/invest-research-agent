@@ -380,6 +380,15 @@ def _capture_tool_call(
             build_tool_response_summary,
         )
 
+        # P06-11K-5：工具摘要事件与 Jaeger 链路使用同一 trace_id/span_id。
+        trace_id, span_id = None, None
+        try:
+            from invest_research.infrastructure.observability.tracing import current_trace_ids
+
+            trace_id, span_id = current_trace_ids()
+        except Exception:  # noqa: BLE001 - 观测尽力而为
+            pass
+
         req = build_tool_request_summary(tool_name, params)
         if req:
             diagnostics.capture(
@@ -388,6 +397,8 @@ def _capture_tool_call(
                 payload_kind="tool_request",
                 data={"tool": tool_name, "cache_hit": cached_hit, **req},
                 direction=DiagnosticDirection.INPUT,
+                trace_id=trace_id,
+                span_id=span_id,
             )
         if output_text is not None:
             resp = build_tool_response_summary(tool_name, output_text)
@@ -399,6 +410,8 @@ def _capture_tool_call(
                 payload_kind="tool_response",
                 data={"tool": tool_name, "cache_hit": cached_hit, **resp},
                 direction=DiagnosticDirection.OUTPUT,
+                trace_id=trace_id,
+                span_id=span_id,
             )
     except Exception:  # noqa: BLE001 - 诊断尽力而为
         _LOGGER.warning("tool diagnostics capture skipped tool=%s", tool_name)
