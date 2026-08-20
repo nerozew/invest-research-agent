@@ -258,7 +258,9 @@ class TestCleanup:
 
 class TestNoMask:
     def test_persistence_error_does_not_mask_business_exception(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """模拟业务异常中诊断落盘失败：原始业务异常必须仍在。"""
 
@@ -270,27 +272,20 @@ class TestNoMask:
         files = build_bundle_files(buf, failed=True, error_code="REPORT_INVALID")
         job = _job_id()
 
+        def _raise_write_error(*_args: object, **_kwargs: object) -> Path:
+            raise OSError("deterministic persistence failure")
+
+        # 不使用 chmod 模拟失败：Windows 与 Linux 对只读文件的替换语义不同。
+        # 直接在存储边界注入 OSError，稳定验证“诊断失败不掩盖业务异常”。
+        monkeypatch.setattr(store, "_atomic_write", _raise_write_error)
+
         original_exc: Exception | None = None
         try:
             raise Boom("原始业务异常")
         except Boom as exc:
             original_exc = exc
-            # 模拟落盘失败：抢先创建不可写的 manifest（只读文件）
-            target_dir = resolve_diagnostics_dir(tmp_path, job)
-            target_dir.mkdir(parents=True)
-            blocker = target_dir / "manifest.json"
-            blocker.write_text("损坏内容", encoding="utf-8")
-            blocker.chmod(0o444)
-            try:
-                with pytest.raises(OSError):
-                    # manifest 已存在但非预期的非诊断内容 → os.replace 到只读
-                    # 目标可能被平台拒绝；此处只验证"捕获 OSError 后异常链仍在"
-                    try:
-                        store.write(job, files)
-                    except OSError:
-                        raise
-            finally:
-                blocker.chmod(0o644)
+            with pytest.raises(OSError, match="deterministic persistence failure"):
+                store.write(job, files)
         assert original_exc is not None
         assert isinstance(original_exc, Boom)
         assert "原始业务异常" in str(original_exc)

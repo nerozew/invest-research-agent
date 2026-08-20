@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from invest_research.api.app import create_app
 from invest_research.application.diagnostics.persistence import BUNDLE_FILE_NAMES
 from invest_research.infrastructure.diagnostics_bundle_store import DiagnosticsBundleStore
+from invest_research.settings import Settings
 
 
 class _FakeDiagnosticsStore:
@@ -32,10 +33,23 @@ class _FakeDiagnosticsStore:
         return self.bundles.get(str(job_id))
 
 
+def _test_settings() -> Settings:
+    """返回不依赖开发机 ``.env`` 或 CI secrets 的最小测试配置。"""
+    return Settings(
+        _env_file=None,
+        llm_api_key="test-only-key",
+        sec_user_agent_contact="tests@example.com",
+        flow_mode="fake",
+    )
+
+
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
     real_store = DiagnosticsBundleStore(tmp_path)
-    app = create_app(diagnostics_bundle_store=real_store)
+    app = create_app(
+        settings=_test_settings(),
+        diagnostics_bundle_store=real_store,
+    )
     return TestClient(app)
 
 
@@ -165,7 +179,10 @@ def test_download_existing_bundle_returns_targz(client: TestClient) -> None:
 
 
 def test_fake_store_missing_bundle_404() -> None:
-    app = create_app(diagnostics_bundle_store=_FakeDiagnosticsStore())
+    app = create_app(
+        settings=_test_settings(),
+        diagnostics_bundle_store=_FakeDiagnosticsStore(),
+    )
     with TestClient(app) as c:
         resp = c.get(f"/v1/research-jobs/{uuid.uuid4()}/diagnostics")
         assert resp.status_code == 404
