@@ -61,6 +61,11 @@ from invest_research.application.analysis_assembler import (
     AnalysisPackAssembler,
     parse_fact_records,
 )
+from invest_research.application.diagnostics.capture import DiagnosticCapture
+from invest_research.application.diagnostics.models import (
+    DiagnosticDirection,
+)
+from invest_research.application.diagnostics.persistence import build_bundle_files
 from invest_research.application.progress import ProgressSink
 from invest_research.application.report_draft_assembler import (
     ReportAssemblerError,
@@ -485,10 +490,16 @@ class LiveResearchFlowRunner:
         budget: ToolBudget | None = None,
         component_factory: Callable[[], JobResearchComponents] | None = None,
         direct_writer_factory: Callable[..., Any] | None = None,
+        diagnostics_factory: Callable[[], "DiagnosticCapture | None"] | None = None,
     ) -> None:
         self._config = config
         self._research_tools = research_tools
         self._artifact_root = Path(artifact_root)
+        # P06-11K-3：Job-local 诊断捕获器工厂（测试注入 buffer+redactor；
+        # None 生产走 no-op，不改变业务成功/失败路径）。
+        self._diagnostics_factory = diagnostics_factory
+        # 当前 Job 活跃的诊断捕获器（每次 run 重设，防止跨 Job 混用）
+        self._diagnostics: "DiagnosticCapture | None" = None
         # P06-11G：每 Job 组件工厂。提供时每次 run() 都新建一套
         # job-local 组件（budget/cache/recorder/stats/research_tools/prefetch），
         # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入
@@ -667,10 +678,102 @@ class LiveResearchFlowRunner:
         # 供 LlmCallObserver 捕获、_assemble_writer_markdown 恢复读取）。
         self._writer_response_buffer = ctx.writer_response_buffer
         self._active_ctx = ctx
-        state = self._run_live(request, ctx)
+        # P06-11K-3：Job-local 诊断捕获器（每次 run 重建，防跨 Job 混用）。
+        if self._diagnostics_factory is not None:
+            self._diagnostics = self._diagnostics_factory()
+        else:
+            self._diagnostics = None
+        try:
+            state = self._run_live(request, ctx)
+        except LiveFlowExecutionError as exc:
+            # 失败收口：记录异常 + finalize_failure + 生成诊断包（尽力而为）。
+            self._finalize_diagnostics_failure(
+                error_code=exc.error_code,
+                failure_stage=exc.failure_stage,
+            )
+            raise
+        except Exception:
+            # 未知异常：同类收口（INTERNAL_BUG 稳定分类）。
+            self._finalize_diagnostics_failure(
+                error_code=ErrorCode.INTERNAL_BUG.value,
+                failure_stage=None,
+            )
+            raise
+        else:
+            self._finalize_diagnostics_success()
         self.last_state = state
         self.run_manifest = state.run_manifest
         return state
+
+    # ------------------------------------------------------------------
+    # P06-11K-3：诊断收口辅助（写入失败绝不掩盖业务异常）
+    # ------------------------------------------------------------------
+
+    def _finalize_diagnostics_success(self) -> None:
+        if self._diagnostics is None:
+            return
+        try:
+            self._diagnostics.finalize_success()
+            self._persist_diagnostics_bundle(failed=False, error_code="", failure_stage=None)
+        except Exception:  # noqa: BLE001 - 诊断尽力而为，不得影响业务
+            _LOGGER.warning("diagnostics success finalize skipped")
+
+    def _finalize_diagnostics_failure(
+        self,
+        *,
+        error_code: str,
+        failure_stage: str | None,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        try:
+            self._diagnostics.record_exception(
+                stage="flow",
+                component="runner",
+                error_code=error_code,
+                message=f"任务失败: error_code={error_code} failure_stage={failure_stage or 'N/A'}",
+            )
+            self._diagnostics.finalize_failure(
+                error_code=error_code,
+                failure_stage=failure_stage,
+            )
+            self._persist_diagnostics_bundle(
+                failed=True,
+                error_code=error_code,
+                failure_stage=failure_stage,
+            )
+        except Exception:  # noqa: BLE001 - 诊断尽力而为，不得覆盖原始业务异常
+            _LOGGER.warning("diagnostics failure finalize skipped")
+
+    def _persist_diagnostics_bundle(
+        self,
+        *,
+        failed: bool,
+        error_code: str,
+        failure_stage: str | None,
+    ) -> None:
+        """把 Job-local 诊断缓冲落盘到 artifacts/<job_id>/diagnostics/（K-2 存储）。"""
+        buffer = self._diagnostics.buffer if self._diagnostics is not None else None
+        if buffer is None or self.job_id is None:
+            return
+        from invest_research.infrastructure.diagnostics_bundle_store import (
+            DiagnosticsBundleStore,
+        )
+
+        files = build_bundle_files(
+            buffer,
+            failed=failed,
+            error_code=error_code,
+            failure_stage=failure_stage,
+            retention_days=self._diagnostics_retention_days(),
+        )
+        store = DiagnosticsBundleStore(self._artifact_root)
+        store.write_if_absent(self.job_id, files)
+
+    @staticmethod
+    def _diagnostics_retention_days() -> int:
+        """默认保留天数（K-3 暂用固定 7；K-4 接 Settings 后由 build_flow_runner 注入）。"""
+        return 7
 
     def _run_live(self, request: ResearchRequest, ctx: _RunContext) -> ResearchFlowState:
         """P06-05：真实执行包在 ``flow.run`` OTel span 内（属性只含低基数字段）。"""
@@ -742,6 +845,26 @@ class LiveResearchFlowRunner:
             self._mark("06_quality_gate", "running")
             state.quality_report = run_quality_gate(state)
             self._mark("06_quality_gate", "succeeded")
+            # P06-11K-3：Quality Gate 输出捕获（脱敏后入缓冲）。
+            if self._diagnostics is not None and state.quality_report is not None:
+                self._diagnostics.capture(
+                    stage="06_quality_gate",
+                    component="quality",
+                    payload_kind="quality_report",
+                    data=state.quality_report.model_dump(mode="json"),
+                    direction=DiagnosticDirection.OUTPUT,
+                )
+                if state.revision_attempted:
+                    self._diagnostics.capture(
+                        stage="revision",
+                        component="revision",
+                        payload_kind="revision_result",
+                        data={
+                            "attempted": True,
+                            "succeeded": bool(state.revision_succeeded),
+                        },
+                        direction=DiagnosticDirection.OUTPUT,
+                    )
 
         # 3.5 P06-11F：一次有界 Writer 修订
         with stage_span("revision"):
@@ -895,19 +1018,37 @@ class LiveResearchFlowRunner:
             verbose=False,
         )
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
+        # P06-11K-3：Research Agent 输入捕获（脱敏后入缓冲）。
+        if self._diagnostics is not None:
+            self._diagnostics.capture(
+                stage="02_research",
+                component="agent",
+                payload_kind="research_inputs",
+                data=inputs,
+                direction=DiagnosticDirection.INPUT,
+            )
         raw = self._kickoff_single(crew, inputs)
         if (
             structured_output_mode(ctx.effective_config, LLMRole.RESEARCH)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
             # Qwen：直接本地解析为 ResearchPack（Boundary 校验）
-            return _normalize_research_sources(self._to_research_pack(raw, request, ctx))
+            pack = _normalize_research_sources(self._to_research_pack(raw, request, ctx))
+            if self._diagnostics is not None:
+                self._diagnostics.capture(
+                    stage="02_research",
+                    component="assembler",
+                    payload_kind="ResearchPack",
+                    data=pack.model_dump(mode="json"),
+                    direction=DiagnosticDirection.OUTPUT,
+                )
+            return pack
         # DeepSeek/generic：独立 Finalizer → ResearchSelectionDraft → 确定性组装
         finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
         try:
             draft = finalizer.finalize(raw, ResearchSelectionDraft, role="research")
             assert isinstance(draft, ResearchSelectionDraft)
-            return _normalize_research_sources(
+            pack = _normalize_research_sources(
                 ResearchPackAssembler().assemble(
                     draft,
                     request=request,
@@ -915,6 +1056,15 @@ class LiveResearchFlowRunner:
                     source_filings=self._cache_filings_if_available(request, ctx),
                 )
             )
+            if self._diagnostics is not None:
+                self._diagnostics.capture(
+                    stage="02_research",
+                    component="assembler",
+                    payload_kind="ResearchPack",
+                    data=pack.model_dump(mode="json"),
+                    direction=DiagnosticDirection.OUTPUT,
+                )
+            return pack
         except ResearchAssemblerError:
             # 选草稿成功但无可信来源（缓存未预热）→ 回退有界结构化收尾：
             # 从缓存读取 SEC 申报记录构建 ResearchPack（不伪造来源），
@@ -942,17 +1092,43 @@ class LiveResearchFlowRunner:
             verbose=False,
         )
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
+        if self._diagnostics is not None:
+            self._diagnostics.capture(
+                stage="04_analysis",
+                component="agent",
+                payload_kind="analysis_inputs",
+                data=inputs,
+                direction=DiagnosticDirection.INPUT,
+            )
         raw = self._kickoff_single(crew, inputs)
         if (
             structured_output_mode(ctx.effective_config, LLMRole.ANALYSIS)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
-            return _to_packed(raw, FinancialAnalysisPack)
+            pack = _to_packed(raw, FinancialAnalysisPack)
+            if self._diagnostics is not None:
+                self._diagnostics.capture(
+                    stage="04_analysis",
+                    component="assembler",
+                    payload_kind="FinancialAnalysisPack",
+                    data=pack.model_dump(mode="json"),
+                    direction=DiagnosticDirection.OUTPUT,
+                )
+            return pack
         finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
         try:
             draft = finalizer.finalize(raw, AnalysisSelectionDraft, role="analysis")
             assert isinstance(draft, AnalysisSelectionDraft)
-            return AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
+            pack = AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
+            if self._diagnostics is not None:
+                self._diagnostics.capture(
+                    stage="04_analysis",
+                    component="assembler",
+                    payload_kind="FinancialAnalysisPack",
+                    data=pack.model_dump(mode="json"),
+                    direction=DiagnosticDirection.OUTPUT,
+                )
+            return pack
         except (FinalizerError, AnalysisAssemblerError) as exc:
             error_code = getattr(exc, "error_code", "SCHEMA_INVALID")
             failure_stage = getattr(exc, "failure_stage", None) or "04_analysis"
@@ -1058,6 +1234,22 @@ class LiveResearchFlowRunner:
             )
         assert context is not None
 
+        # P06-11K-3：Writer 紧凑上下文输入捕获（脱敏后入缓冲）。
+        if self._diagnostics is not None:
+            self._diagnostics.capture(
+                stage="05_writer",
+                component="context_builder",
+                payload_kind="writer_context",
+                data={
+                    "context_chars": context.context_chars,
+                    "estimated_tokens": context.estimated_tokens,
+                    "fact_count": context.fact_count,
+                    "source_count": context.source_count,
+                    "citation_count": context.citation_count,
+                },
+                direction=DiagnosticDirection.INPUT,
+            )
+
         # 2. 构造/注入 Direct Writer dispatch（测试注入 mock 时零真实网络）。
         if self._direct_writer_factory is not None:
             dispatch = self._direct_writer_factory(ctx.effective_config)
@@ -1072,7 +1264,7 @@ class LiveResearchFlowRunner:
         def _use_result(result: WriterDispatchResult, summary: str | None) -> ReportDraft:
             nonlocal error_summary
             try:
-                return self._assemble_direct_writer(
+                draft = self._assemble_direct_writer(
                     result,
                     request,
                     state,
@@ -1081,6 +1273,28 @@ class LiveResearchFlowRunner:
                     finish_reason=result.finish_reason,
                     retry_count=retry_count,
                 )
+                # P06-11K-3：Writer 每次 LLM 调用摘要 + ReportDraft 输出捕获（脱敏后）。
+                if self._diagnostics is not None:
+                    kind = "content" if result.markdown.strip() else "empty"
+                    self._diagnostics.capture(
+                        stage="05_writer",
+                        component="llm",
+                        payload_kind=f"writer_response_{kind}",
+                        data={
+                            "content_chars": len(result.markdown),
+                            "finish_reason": result.finish_reason,
+                            "call_index": retry_count,
+                        },
+                        direction=DiagnosticDirection.OUTPUT,
+                    )
+                    self._diagnostics.capture(
+                        stage="05_writer",
+                        component="assembler",
+                        payload_kind="ReportDraft",
+                        data=draft.model_dump(mode="json"),
+                        direction=DiagnosticDirection.OUTPUT,
+                    )
+                return draft
             except ReportAssemblerError as exc:
                 error_summary = summary or str(exc)
                 raise
@@ -2335,6 +2549,7 @@ def build_flow_runner(
     prefetch: Callable[[ResearchRequest], PrefetchResult | None] | None = None,
     budget: ToolBudget | None = None,
     component_factory: Callable[[], JobResearchComponents] | None = None,
+    diagnostics_factory: Callable[[], "DiagnosticCapture | None"] | None = None,
 ) -> ResearchFlowRunner | LiveResearchFlowRunner:
     """按 settings.flow_mode 返回 FlowRunner 端口实现（P05-12A 入口）。
 
@@ -2366,4 +2581,5 @@ def build_flow_runner(
         prefetch=prefetch,
         budget=budget,
         component_factory=component_factory,
+        diagnostics_factory=diagnostics_factory,
     )

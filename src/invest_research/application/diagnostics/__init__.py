@@ -3,8 +3,13 @@
 K-1 范围：配置（Settings）、事件模型（models）、递归脱敏（redaction）、
 Job-local 有界缓冲（sink）。
 K-2 范围：诊断包持久化（persistence）——manifest + 5 文件内容与落盘语义。
+K-3 范围：业务边界捕获（capture）——先脱敏再入缓冲的 DiagnosticCapture。
 """
 
+from invest_research.application.diagnostics.capture import (
+    CapturedPayload,
+    DiagnosticCapture,
+)
 from invest_research.application.diagnostics.models import (
     DiagnosticCaptureMode,
     DiagnosticCapturePolicy,
@@ -61,4 +66,6 @@ __all__ = [
     "DiagnosticBundleFiles",
     "DiagnosticManifest",
     "build_bundle_files",
+    "CapturedPayload",
+    "DiagnosticCapture",
 ]
