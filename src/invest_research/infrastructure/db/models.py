@@ -426,9 +426,7 @@ class OutboxEvent(Base):
     """
 
     __tablename__ = "outbox_events"
-    __table_args__ = (
-        UniqueConstraint("job_id", "event_type", name="uq_outbox_events_job_event"),
-    )
+    __table_args__ = (UniqueConstraint("job_id", "event_type", name="uq_outbox_events_job_event"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(
@@ -438,9 +436,7 @@ class OutboxEvent(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

@@ -158,8 +158,7 @@ def check_analysis_completeness(
             return AnalysisCompletenessCheck(
                 verdict=CompletenessVerdict.REJECT,
                 issues=[
-                    "completeness=complete 但 facts/metrics 为空"
-                    "（核心事实缺失，不允许静默放行）"
+                    "completeness=complete 但 facts/metrics 为空（核心事实缺失，不允许静默放行）"
                 ],
                 data_integrity="complete",
             )

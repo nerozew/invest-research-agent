@@ -108,9 +108,7 @@ class DirectLlmWriterDispatch:
         # 与 build_real_llm / DeepSeekJsonObjectFinalizer 同一决策源）。
         if role_cfg.enable_thinking is not None and role_cfg.vendor == "deepseek":
             request_kwargs["extra_body"] = {
-                "thinking": {
-                    "type": "enabled" if role_cfg.enable_thinking else "disabled"
-                }
+                "thinking": {"type": "enabled" if role_cfg.enable_thinking else "disabled"}
             }
 
         # 审计（脱敏）：记录消息条数与每段长度，不记录正文。

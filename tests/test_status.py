@@ -115,8 +115,8 @@ def test_step_is_terminal() -> None:
 
 
 def test_error_code_count() -> None:
-    """必须包含全部 12 个错误码（P06-09 新增 TIMEOUT）。"""
-    assert len(ErrorCode) == 12
+    """必须包含 P06-11G 后用于稳定归因的全部 23 个错误码。"""
+    assert len(ErrorCode) == 23
 
 
 def test_retryable_error_codes() -> None:

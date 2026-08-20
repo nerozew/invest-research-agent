@@ -113,8 +113,10 @@ def _get_prompt_tokens_details(usage: Any) -> Any:
     if usage is None:
         return None
     try:
-        return usage.get("prompt_tokens_details") if isinstance(usage, dict) else getattr(
-            usage, "prompt_tokens_details", None
+        return (
+            usage.get("prompt_tokens_details")
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens_details", None)
         )
     except Exception:  # noqa: BLE001
         return None

@@ -68,9 +68,7 @@ def _source_entry(source: Source, citation_key: str) -> CitationRegistryEntry:
         concept=None,
         canonical_url=source.canonical_url,
         source_id=None,
-        period=(
-            source.published_at.isoformat() if source.published_at is not None else None
-        ),
+        period=(source.published_at.isoformat() if source.published_at is not None else None),
         value=None,
         unit=None,
         description=description or None,

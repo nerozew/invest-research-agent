@@ -104,6 +104,7 @@ def _strip_invalid_citation_keys(markdown: str, valid_keys: set[str]) -> tuple[s
     返回 (修订后文本, True)。删除非法 key 本身就是清理成功；
     无法识别为 citation key 的括号文字（如网页链接文本）保持不动。
     """
+
     def _replace(match: re.Match[str]) -> str:
         inner = match.group(1)
         if inner in valid_keys:

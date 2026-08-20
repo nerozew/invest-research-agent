@@ -195,9 +195,7 @@ def _sanitize(value: object, limit: int = 200) -> str:
     - 移除疑似密钥的键值（api_key / token / password / cookie / key 等）。
     """
     text = (
-        json.dumps(value, ensure_ascii=False, default=str)
-        if not isinstance(value, str)
-        else value
+        json.dumps(value, ensure_ascii=False, default=str) if not isinstance(value, str) else value
     )
     text = re.sub(r"[A-Za-z]:\\[^\s,;\"']+|/[A-Za-z0-9_./-]{3,}", "<PATH>", text)
     for secret_key in (
@@ -220,9 +218,7 @@ def _sanitize(value: object, limit: int = 200) -> str:
     return text
 
 
-def _validation_errors_to_boundary(
-    exc: ValidationError, stage: str
-) -> list[BoundaryError]:
+def _validation_errors_to_boundary(exc: ValidationError, stage: str) -> list[BoundaryError]:
     """把 Pydantic ValidationError 转成结构化 BoundaryError 列表。"""
     out: list[BoundaryError] = []
     for err in exc.errors():

@@ -165,9 +165,7 @@ class WriterContextBuilder:
         hard_sections: list[str] = []
 
         # 1. 公司身份（最高优先级，永远保留）
-        hard_sections.append(
-            self._company_section(request, research_pack)
-        )
+        hard_sections.append(self._company_section(request, research_pack))
 
         # 2. 写作规则（优先级 5；短且必需，永远保留）
         hard_sections.append("写作规则：\n" + _WRITING_RULES)
@@ -183,9 +181,7 @@ class WriterContextBuilder:
                 "keys）也无法放下；禁止静默丢弃全部 citation registry"
             )
         if estimate_tokens(hard_text) > self._limits.max_estimated_tokens:
-            raise WriterContextBuildError(
-                "Writer 紧凑上下文预估 token 超限且必须保留的块也放不下"
-            )
+            raise WriterContextBuildError("Writer 紧凑上下文预估 token 超限且必须保留的块也放不下")
 
         body_sections: list[str] = []
         dropped: list[str] = []
@@ -228,9 +224,7 @@ class WriterContextBuilder:
     # 私有构造辅助
     # ------------------------------------------------------------------
 
-    def _company_section(
-        self, request: ResearchRequest, research_pack: ResearchPack | None
-    ) -> str:
+    def _company_section(self, request: ResearchRequest, research_pack: ResearchPack | None) -> str:
         identity = research_pack.company_identity if research_pack is not None else None
         if identity is not None:
             name = identity.legal_name

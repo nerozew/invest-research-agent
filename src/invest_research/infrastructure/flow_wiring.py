@@ -762,6 +762,23 @@ class LiveResearchFlowRunner:
         except Exception:  # noqa: BLE001 - 诊断尽力而为
             return None
 
+    def _finalizer_diagnostic_callback(self, stage: str) -> Any:
+        """把直连供应商的 Finalizer 响应接入 Job-local 失败诊断包。"""
+        if self._diagnostics is None:
+            return None
+
+        def capture(event: dict[str, Any]) -> None:
+            self._diag_capture(
+                stage=stage,
+                component="structured_finalizer",
+                payload_kind=str(event.get("event", "finalizer_event")),
+                data=event,
+                direction=DiagnosticDirection.OUTPUT,
+                content_type="application/json",
+            )
+
+        return capture
+
     def _finalize_diagnostics_success(self) -> None:
         if self._diagnostics is None:
             return
@@ -1021,6 +1038,7 @@ class LiveResearchFlowRunner:
             if llm_scope is not None:
                 llm_scope.__exit__(None, None, None)
 
+        self._mark("03_documents", "running")
         self._mark("03_documents", "succeeded")
         state = self._extract_packs(result, request, ctx)
         return state, crew, result
@@ -1046,6 +1064,7 @@ class LiveResearchFlowRunner:
             self._mark("02_research", "running")
             state.research_pack = self._exec_research_stage(request, ctx)
             self._mark("02_research", "succeeded")
+            self._mark("03_documents", "running")
             self._mark("03_documents", "succeeded")
         # 3+4. Analysis（ResearchPack 成功后才执行；失败直接抛出不产生后续假 span）
         with stage_span("stage.analysis", {"agent.role": "analysis"}):
@@ -1103,7 +1122,10 @@ class LiveResearchFlowRunner:
                 )
             return pack
         # DeepSeek/generic：独立 Finalizer → ResearchSelectionDraft → 确定性组装
-        finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
+        finalizer = DeepSeekJsonObjectFinalizer(
+            ctx.effective_config,
+            diagnostic_callback=self._finalizer_diagnostic_callback("02_research"),
+        )
         try:
             draft = finalizer.finalize(raw, ResearchSelectionDraft, role="research")
             assert isinstance(draft, ResearchSelectionDraft)
@@ -1174,7 +1196,10 @@ class LiveResearchFlowRunner:
                     direction=DiagnosticDirection.OUTPUT,
                 )
             return pack
-        finalizer = DeepSeekJsonObjectFinalizer(ctx.effective_config)
+        finalizer = DeepSeekJsonObjectFinalizer(
+            ctx.effective_config,
+            diagnostic_callback=self._finalizer_diagnostic_callback("04_analysis"),
+        )
         try:
             draft = finalizer.finalize(raw, AnalysisSelectionDraft, role="analysis")
             assert isinstance(draft, AnalysisSelectionDraft)

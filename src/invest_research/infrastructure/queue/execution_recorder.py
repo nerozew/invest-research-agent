@@ -179,9 +179,7 @@ class ExecutionRecorder:
         with self._sf() as session:
             existing: dict[str, WorkflowStep] = {
                 s.step_name: s
-                for s in session.query(WorkflowStep)
-                .filter(WorkflowStep.job_id == job_id)
-                .all()
+                for s in session.query(WorkflowStep).filter(WorkflowStep.job_id == job_id).all()
             }
             for step in steps:
                 name = str(step["step_name"])
@@ -212,9 +210,7 @@ class ExecutionRecorder:
                 from sqlalchemy import select
 
                 existing_keys = set(
-                    session.execute(
-                        select(Artifact.artifact_key).where(Artifact.job_id == job_id)
-                    )
+                    session.execute(select(Artifact.artifact_key).where(Artifact.job_id == job_id))
                     .scalars()
                     .all()
                 )

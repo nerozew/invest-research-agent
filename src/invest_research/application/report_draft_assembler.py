@@ -275,18 +275,14 @@ class ReportDraftAssembler:
         """
         text = str(writer_output or "").strip()
         if not text:
-            raise ReportAssemblerError(
-                "REPORT_INVALID", "Writer 输出为空，无法组装 ReportDraft"
-            )
+            raise ReportAssemblerError("REPORT_INVALID", "Writer 输出为空，无法组装 ReportDraft")
         if len(text) < _MIN_MARKDOWN_CHARS:
             raise ReportAssemblerError(
                 "REPORT_INVALID",
                 f"Writer 输出过短（{len(text)} 字符），不像合法报告正文",
             )
         if _looks_rejected(text):
-            raise ReportAssemblerError(
-                "REPORT_INVALID", "Writer 输出是拒绝/工具说明，不是报告正文"
-            )
+            raise ReportAssemblerError("REPORT_INVALID", "Writer 输出是拒绝/工具说明，不是报告正文")
         if _looks_truncated(text, finish_reason=finish_reason):
             raise ReportAssemblerError(
                 "REPORT_TRUNCATED", "Writer 输出明显截断，禁止发布不完整报告"

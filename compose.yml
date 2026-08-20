@@ -39,6 +39,12 @@ x-app-env: &app-env
   # P06-06：应用 OTLP trace 导出到 observability profile 的 collector。
   # 未启用该 profile 时，导出失败由 OTel SDK 批量处理器静默重试丢弃，不影响业务。
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  # P06-11K/L：失败诊断包默认只在任务失败时落盘；不把完整内容写入 Jaeger/Prometheus。
+  DIAGNOSTIC_CAPTURE_MODE: ${DIAGNOSTIC_CAPTURE_MODE:-failure_payload}
+  DIAGNOSTIC_MAX_EVENT_BYTES: ${DIAGNOSTIC_MAX_EVENT_BYTES:-65536}
+  DIAGNOSTIC_MAX_BUNDLE_BYTES: ${DIAGNOSTIC_MAX_BUNDLE_BYTES:-4194304}
+  DIAGNOSTIC_MAX_EVENTS: ${DIAGNOSTIC_MAX_EVENTS:-200}
+  DIAGNOSTIC_RETENTION_DAYS: ${DIAGNOSTIC_RETENTION_DAYS:-7}
 
 services:
   postgres:

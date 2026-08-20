@@ -263,7 +263,8 @@ def build_writer_task(
         "包含非投资建议声明与数据截止日。"
     )
     if (
-        structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+        structured_output_mode(config, LLMRole.WRITER)
+        == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
     ):
         # P06-11D：deepseek/generic 只输出 Markdown 报告正文，不触发 CrewAI
         # 远程 Pydantic parse；由本地 ReportDraftAssembler 确定性组装为 ReportDraft。

@@ -280,7 +280,7 @@ def build_analysis_task(
         "禁止从模型知识、新闻摘要或推测填数。\n"
         "如果 financial_facts 是空数组 []：必须输出 schema_version=analysis_pack_v2、"
         "completeness=unavailable、facts=[]、metrics=[]，并在 unavailable_reason 中说明"
-        "未取得 SEC 财务事实；禁止输出 {\"ok\": false, ...} 之类的工具错误结构，也不得把"
+        '未取得 SEC 财务事实；禁止输出 {"ok": false, ...} 之类的工具错误结构，也不得把'
         "该 JSON 当作文本原样输出。\n"
         "若只有部分可用事实或指标口径缺失：completeness=partial 并在 limitations 说明"
         "缺哪些数据及原因；不得把缺失伪装成 complete。\n"
@@ -290,15 +290,14 @@ def build_analysis_task(
         "；completeness=unavailable 是合法业务结果，不是系统异常。"
     )
     if (
-        structured_output_mode(config) == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
+        structured_output_mode(config, LLMRole.ANALYSIS)
+        == StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
     ):
         # P06-11B：deepseek/generic 走 JSON 文本 + 本地校验路径。
         # 提示词明确要求只输出 JSON object；不得触发 CrewAI 远程 Pydantic parse。
         # P06-11C：要求模型只输出 AnalysisSelectionDraft（selected_fact_refs），
         # 不输出完整 FinancialFact；由本地 AnalysisPackAssembler 确定性组装。
-        description = (
-            description + _JSON_TEXT_INSTRUCTION + _JSON_TEXT_SELECTION_DRAFT_SCHEMA
-        )
+        description = description + _JSON_TEXT_INSTRUCTION + _JSON_TEXT_SELECTION_DRAFT_SCHEMA
         return Task(
             description=description,
             expected_output=(

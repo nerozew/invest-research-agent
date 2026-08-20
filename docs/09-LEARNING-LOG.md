@@ -2665,3 +2665,24 @@ DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_forma
 
 - K 系列（K-1~K-5）已全部完成；未做真实 Docker live 故障注入验收（遵守限制，不执行 live/不 docker down）；worker 工厂注入点用源码静态断言而非真实 import（避免 Celery 副作用）；`research_flow.py:89 detach` 为既有 mypy 错误、按约束不修。
 - 下一候选：P06-11（10 家公司效率对照实验）或 P06-12（完善 README 演示、架构图和限制）。
+
+---
+
+## P06-11L：恢复可复现运行基线与 Finalizer/诊断链路正确性 ✅（2026-08-20）
+
+**产物**：Finalizer 有效 JSON 实例与字段级有限修复、Finalizer 失败响应诊断、03_documents 合法状态转换、Compose failure_payload 接线、OTel attach/detach 修复、完整离线及 Docker fake 验收。
+
+### 3 个知识点
+
+1. **修复请求必须面向上一次失败结果**：第一次 Finalizer 已经把自然语言转换为接近目标的 JSON 后，第二次应接收“这份无效 JSON + Pydantic 字段路径”，而不是再次接收最初自然语言；否则修复不是最小修改，成功率和可解释性都会下降。
+2. **Schema 描述不等于实例**：`{"type":"object","properties":...}` 是给程序理解的结构说明，并不是模型应提交的业务 JSON。提示词应给出能通过目标模型的值示例，本地仍由 Pydantic 做最终裁决。
+3. **Git、工作区与 Docker 镜像是三个版本**：本地 `docker build` 会把当前工作区（包括未提交改动）复制进镜像；是否 push GitHub 不影响本机运行，但会影响复现。通过容器内外 SHA256 对比才能证明当前容器确实运行了指定源码。
+
+### 检查问题（请先用自己的话回答）
+
+为什么 Finalizer 的第二次修复必须使用第一次返回的无效 JSON 和结构化字段错误，而不能继续把最初 Agent 自然语言交给模型？
+
+### 已知限制与下一步建议
+
+- 本轮只执行 fake Docker smoke，未做付费 live 调用；当前 `agent` 栈明确运行 `FLOW_MODE=fake`。
+- 工作区仍包含此前多轮未提交修改；镜像已与当前工作区对齐，但 Git HEAD 尚不能单独复现该镜像。下一步先审查并建立 Git 安全检查点，再进行一次受控 AAPL/MSFT fast live smoke。

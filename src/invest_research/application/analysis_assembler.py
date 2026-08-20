@@ -71,9 +71,7 @@ def _fact_ref_payload(fact: FinancialFact) -> str:
     form_type/fiscal_period 区分，否则 fact_ref 碰撞 → FACT_REFERENCE_AMBIGUOUS。
     """
     company = fact.company_id or ""
-    period = (
-        fact.period_start.isoformat() if fact.period_start is not None else ""
-    )
+    period = fact.period_start.isoformat() if fact.period_start is not None else ""
     period_end = fact.period_end.isoformat() if fact.period_end is not None else ""
     instant = fact.instant_date.isoformat() if fact.instant_date is not None else ""
     accession = fact.accession_number or ""
@@ -93,7 +91,7 @@ def _fact_ref_payload(fact: FinancialFact) -> str:
             fiscal_period,
         )
     )
-    return payload[: _MAX_FACT_INDEX_CHARS]
+    return payload[:_MAX_FACT_INDEX_CHARS]
 
 
 def build_fact_ref(fact: FinancialFact) -> str:
@@ -168,10 +166,7 @@ class AnalysisPackAssembler:
             match = matches[0]
             # 来源一致性：草稿本身不携带事实内容，此处只校验 company_identity_hint
             # 与原始事实的 company_id 是否一致（防止跨公司串数据）。
-            if (
-                company_identity_hint is not None
-                and match.company_id != company_identity_hint
-            ):
+            if company_identity_hint is not None and match.company_id != company_identity_hint:
                 raise AnalysisAssemblerError(
                     ErrorCode.FACT_PROVENANCE_MISMATCH.value,
                     f"fact_ref {ref} 的公司身份与预期不一致",

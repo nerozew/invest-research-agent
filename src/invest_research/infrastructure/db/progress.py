@@ -51,13 +51,11 @@ def _other_running_exists(job_id: uuid.UUID, step_name: str) -> Any:
     用于 ``mark_step_running`` 的唯一 running 不变量：
     只有"当前 Job 没有其它 running 步骤"时才允许新步骤进入 running。
     """
-    return (
-        exists(
-            select(WorkflowStepORM.id).where(
-                WorkflowStepORM.job_id == job_id,
-                WorkflowStepORM.step_name != step_name,
-                WorkflowStepORM.status == "running",
-            )
+    return exists(
+        select(WorkflowStepORM.id).where(
+            WorkflowStepORM.job_id == job_id,
+            WorkflowStepORM.step_name != step_name,
+            WorkflowStepORM.status == "running",
         )
     )
 
@@ -78,9 +76,7 @@ class SqlProgressSink:
             try:
                 existing = set(
                     session.scalars(
-                        select(WorkflowStepORM.step_name).where(
-                            WorkflowStepORM.job_id == job_id
-                        )
+                        select(WorkflowStepORM.step_name).where(WorkflowStepORM.job_id == job_id)
                     ).all()
                 )
                 for name in STEP_NAMES:
@@ -299,9 +295,7 @@ class SqlProgressSink:
                 session.commit()
             except SQLAlchemyError as exc:
                 session.rollback()
-                raise StepRecordError(
-                    f"收口 running 步骤失败 job={job_id}: {exc}"
-                ) from exc
+                raise StepRecordError(f"收口 running 步骤失败 job={job_id}: {exc}") from exc
 
     def cancel_pending_steps(self, job_id: uuid.UUID) -> None:
         """Job 取消时收口步骤（P06-06B 收口）。
@@ -370,9 +364,7 @@ class SqlProgressSink:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _clear_current_step_if_matches(
-        session: Any, job_id: uuid.UUID, step_name: str
-    ) -> None:
+    def _clear_current_step_if_matches(session: Any, job_id: uuid.UUID, step_name: str) -> None:
         """仅当 current_step 仍指向该步骤时清空（条件更新，防误清其它 running 步骤）。
 
         场景：某步骤进入终态，但另一个代码路径可能已经把 current_step 指向了

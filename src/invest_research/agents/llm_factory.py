@@ -1,8 +1,11 @@
-"""P03-01 OpenAI-compatible LLM config/factory adapter（供应商无关）。
+"""P03-01 OpenAI-compatible LLM config/factory adapter（供应商无关 + 角色可解耦）。
 
 设计目标（对齐 docs/02-ARCHITECTURE.md §8「LLM 配置策略」）：
-- 供应商无关：业务代码只表达 research/analysis/writer 模型、base_url、
-  api_key、timeout、temperature；不出现具体供应商类名（无 DeepSeek/Qwen Factory）。
+- 供应商无关：业务代码只表达 research/analysis/writer 角色；每个角色可独立指定
+  vendor / base_url / api_key / model / temperature / timeout / enable_thinking。
+- 角色解耦（P06-11G 扩展）：``RoleLLMConfig`` 表示单个角色的完整 LLM 配置；
+  ``LLMConfig.config_for(role)`` 把全局默认与角色覆盖合并为 ``RoleLLMConfig``。
+  未来新增 Agent/角色只需在 ``LLMConfig`` 增加一个覆盖项，不改业务代码。
 - 默认适配阿里云百炼（Model Studio）qwen-max，通过 OpenAI-compatible 接口调用；
   未来切换供应商只改环境变量，不改 Agent/Task/Flow 代码。
 - 构建 factory 期间不发任何网络请求；真实 builder 采用惰性 import，
@@ -15,6 +18,13 @@
 - ``_build_real_llm``：按当前安装的 CrewAI 版本实现 OpenAI-compatible LLM
   构造（CrewAI 1.6.1：``LLM(model, base_url, api_key, temperature, timeout)``，
   provider 自动识别为 openai；构造阶段不发起网络请求）。
+
+角色解耦边界（P06-11G）：
+- ``structured_output_mode(config, role)``：按**该角色**的 vendor 判定是否允许
+  CrewAI 原生 Pydantic parse（不同角色可混用 qwen/deepseek/generic）；
+- ``build_real_llm(config, role)``：用该角色合并后的配置构造 LLM；
+- ``enable_thinking``（思考模式）也按角色生效：如 Research/Analysis 关闭、
+  Writer 开启深度思考可分别配置，互不影响。
 
 依赖边界：
 - P03-01 阶段：只导入标准库与 Pydantic，禁止导入 CrewAI/LiteLLM/OpenAI SDK；
@@ -32,7 +42,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from invest_research.settings import Settings
+from invest_research.settings import RoleLLMOverride, Settings
 
 
 class LLMRole(StrEnum):
@@ -64,38 +74,97 @@ class StructuredOutputMode(StrEnum):
     JSON_TEXT_LOCAL_VALIDATION = "json_text_local_validation"
 
 
-def structured_output_mode(config: LLMConfig) -> StructuredOutputMode:
-    """按显式 ``LLM_VENDOR`` 决定供应商的结构化输出路径（P06-11B，集中决策）。
+def structured_output_mode(
+    config: LLMConfig, role: LLMRole = LLMRole.RESEARCH
+) -> StructuredOutputMode:
+    """按**该角色**的显式 vendor 决定结构化输出路径（P06-11G 角色解耦）。
 
+    - 使用 ``config.config_for(role).vendor``——允许 Research=deepseek、
+      Analysis=deepseek、Writer=qwen 等混合组网，各角色互不影响；
     - ``qwen``：允许当前原生 output_pydantic 路径（供应商支持 response_format）；
     - ``deepseek``：禁止 CrewAI 原生 Pydantic parse，改用 JSON 文本 + 本地校验
       （DeepSeek 普通 Chat Completion 不支持 OpenAI json_schema response_format，
-      已实测 HTTP 400 “This response_format type is unavailable now”）；
+      已实测 HTTP 400 "This response_format type is unavailable now"）；
     - ``generic``：默认采用安全的 JSON 文本 + 本地校验，除非未来明确声明支持。
 
-    不根据 base_url 猜测 —— 一律使用显式 ``LLMConfig.vendor``。
+    不根据 base_url 猜测 —— 一律使用显式 ``RoleLLMConfig.vendor``。
+    ``role`` 默认 research 仅用于兼容 P06-11G 之前的单供应商调用；生产路径均应
+    显式传入角色，混合供应商配置不会依赖此默认值。
     """
-    if config.vendor == "qwen":
+    vendor = config.config_for(role).vendor
+    if vendor == "qwen":
         return StructuredOutputMode.NATIVE_PYDANTIC
-    if config.vendor == "deepseek":
+    if vendor == "deepseek":
         return StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
     return StructuredOutputMode.JSON_TEXT_LOCAL_VALIDATION
 
 
-class LLMConfig(BaseModel):
-    """供应商无关的 LLM 配置契约（纯数据，无外部依赖）。
+class RoleLLMConfig(BaseModel):
+    """单个角色（Agent）的完整 LLM 配置（P06-11G 解耦单元）。
 
-    - api_key 使用 SecretStr：str()/repr()/model_dump() 均不泄露明文；
-    - base_url 必须是 http/https；
-    - temperature 限制在 OpenAI-compatible 合法范围 [0, 2]；
-    - timeout 必须为正数。
+    - 每个角色可独立指定 vendor/base_url/api_key/model/temperature/timeout/
+      enable_thinking；
+    - 由 ``LLMConfig.config_for(role)`` 负责把全局默认与角色覆盖合并；
+    - ``api_key`` 使用 SecretStr，str()/repr()/model_dump() 均不泄露明文。
     """
 
     model_config = ConfigDict(frozen=True)
 
     provider: str = "openai_compatible"
-    # P06-11：显式供应商标识（qwen/deepseek/generic），决定 thinking 参数格式；
+    # 显式供应商标识（qwen/deepseek/generic），决定 thinking 参数格式；
     # qwen=enable_thinking；deepseek=thinking.type；generic=不传供应商专用参数。
+    vendor: Literal["qwen", "deepseek", "generic"] = "qwen"
+    base_url: str = Field(min_length=1)
+    api_key: SecretStr
+    model: str = Field(min_length=1)
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    timeout: float = Field(default=60.0, gt=0.0)
+    # 供应商专有参数：Qwen3.5 等默认思考模式（reasoning），显式关闭可显著提速；
+    # None=不传（保持其它 OpenAI-compatible 供应商兼容）
+    enable_thinking: bool | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_supported(cls, value: str) -> str:
+        """当前仅支持 openai_compatible；未来增加协议在此扩展。"""
+        if value != "openai_compatible":
+            raise ValueError("provider 仅支持 openai_compatible")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        """base_url 必须是 http/https，且不能带多余尾部斜杠。"""
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("base_url 必须是有效的 http/https URL")
+        return value.rstrip("/")
+
+    @field_validator("model")
+    @classmethod
+    def _non_blank_model(cls, value: str) -> str:
+        """模型名不得为空或纯空白（fail-fast：禁止空模型名启动，不降级 fake）。"""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("模型名不能为空或纯空白")
+        return cleaned
+
+
+class LLMConfig(BaseModel):
+    """供应商无关的 LLM 配置契约（纯数据，无外部依赖）。
+
+    角色解耦（P06-11G）：
+    - 全局默认字段（vendor/base_url/api_key/temperature/timeout/enable_thinking）
+      仍是向后兼容的"默认值"；每个角色可通过 ``role_overrides`` 独立覆盖；
+    - ``config_for(role)`` 返回该角色**合并后**的 ``RoleLLMConfig``；
+    - ``model_research/model_analysis/model_writer`` 是三个角色的模型名快捷字段
+      （等价于给 role_overrides 配 model），保留旧用法。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str = "openai_compatible"
+    # 全局默认供应商标识（qwen/deepseek/generic）；角色未覆盖时使用。
     vendor: Literal["qwen", "deepseek", "generic"] = "qwen"
     base_url: str = Field(min_length=1)
     api_key: SecretStr
@@ -104,13 +173,29 @@ class LLMConfig(BaseModel):
     model_writer: str = Field(min_length=1)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     timeout: float = Field(default=60.0, gt=0.0)
-    # 供应商专有参数：Qwen3.5 等默认思考模式（reasoning），显式关闭可显著提速；
-    # None=不传（保持其它 OpenAI-compatible 供应商兼容）
+    # 供应商专有参数（全局默认）：Qwen3.5 等默认思考模式（reasoning），
+    # 显式关闭可显著提速；None=不传（保持其它 OpenAI-compatible 供应商兼容）
+    # 角色可通过 role_overrides[role].enable_thinking 独立覆盖。
     enable_thinking: bool | None = None
+
+    # P06-11G：按角色覆盖的完整配置（vendor/base_url/api_key/model/... 均可覆盖）。
+    # 键必须是 LLMRole.value（research/analysis/writer）；未来新增角色在此扩展。
+    role_overrides: dict[str, "RoleLLMOverride"] = Field(default_factory=dict)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "LLMConfig":
-        """从项目 Settings 构造配置（唯一允许触碰 SecretStr 的入口）。"""
+        """从项目 Settings 构造配置（唯一允许触碰 SecretStr 的入口）。
+
+        P06-11G：解析 Settings 中每角色的"完整覆盖块"（LLM_<ROLE>_VENDOR /
+        LLM_<ROLE>_BASE_URL / LLM_<ROLE>_API_KEY / LLM_<ROLE>_MODEL /
+        LLM_<ROLE>_TEMPERATURE / LLM_<ROLE>_TIMEOUT / LLM_<ROLE>_ENABLE_THINKING）。
+        角色未配置覆盖块时回退全局字段（向后兼容）。
+        """
+        role_overrides: dict[str, RoleLLMOverride] = {}
+        for role in LLMRole:
+            override = settings.build_role_llm_config(role)
+            if override is not None:
+                role_overrides[role.value] = override
         return cls(
             provider=settings.llm_provider,
             vendor=settings.llm_vendor,
@@ -122,10 +207,51 @@ class LLMConfig(BaseModel):
             temperature=settings.llm_temperature,
             timeout=settings.llm_timeout,
             enable_thinking=settings.llm_enable_thinking,
+            role_overrides=role_overrides,
+        )
+
+    def config_for(self, role: LLMRole) -> RoleLLMConfig:
+        """返回该角色合并后的完整 LLM 配置（全局默认 + 角色覆盖）。
+
+        - 角色未配置 ``role_overrides`` 时回退全局默认 + 该角色模型名；
+        - 已配置时用角色覆盖块替换对应字段（未覆盖的字段仍继承全局默认）。
+        """
+        override = self.role_overrides.get(role.value)
+        base = RoleLLMConfig(
+            provider=self.provider,
+            vendor=self.vendor,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model_for(role),
+            temperature=self.temperature,
+            timeout=self.timeout,
+            enable_thinking=self.enable_thinking,
+        )
+        if override is None:
+            return base
+        # RoleLLMOverride 不携带 provider（始终 openai_compatible，全局唯一）；
+        # 角色覆盖只替换 vendor/base_url/api_key/model/temperature/timeout/enable_thinking。
+        return base.model_copy(
+            update={
+                "vendor": override.vendor,
+                "base_url": override.base_url,
+                "api_key": override.api_key,
+                "model": override.model,
+                "temperature": override.temperature,
+                "timeout": override.timeout,
+                "enable_thinking": override.enable_thinking,
+            }
         )
 
     def model_for(self, role: LLMRole) -> str:
-        """按角色返回模型名（业务只表达角色，不写死供应商/模型名）。"""
+        """按角色返回模型名（业务只表达角色，不写死供应商/模型名）。
+
+        角色覆盖了 model 时返回覆盖值；否则返回全局 model_research/analysis/writer。
+        """
+        override = self.role_overrides.get(role.value)
+        if override is not None:
+            assert isinstance(override.model, str)
+            return override.model
         match role:
             case LLMRole.RESEARCH:
                 return self.model_research
@@ -185,8 +311,9 @@ class FakeLLM(BaseLLM):
     ) -> None:
         # BaseLLM.__init__ 需要 model；temperature 用配置值；api_key/base_url 不传给
         # fake（fake 从不联网，绝不携带真实 key）。
-        effective_model = config.model_for(role)
-        super().__init__(model=effective_model, temperature=config.temperature)
+        # P06-11G：fake 也按角色解析（确保测试断言角色模型/温度与真实路径一致）。
+        role_cfg = config.config_for(role)
+        super().__init__(model=role_cfg.model, temperature=role_cfg.temperature)
         self._config = config
         self._role = role
         self._responses: list[Any] = list(responses or [])
@@ -195,7 +322,7 @@ class FakeLLM(BaseLLM):
 
     @property
     def model_name(self) -> str:
-        return self._config.model_for(self._role)
+        return self._config.config_for(self._role).model
 
     def invoke(self, prompt: str) -> Any:
         """按顺序返回响应；耗尽后循环复用第一份（CrewAI 多次调用 LLM）。"""
@@ -265,28 +392,24 @@ AnyLLM = FakeLLM | BaseLLM
 LLMBuilder = Callable[[LLMConfig, LLMRole], AnyLLM]
 
 
-def _build_thinking_extra_body(config: LLMConfig) -> dict[str, Any] | None:
-    """按 vendor 把 enable_thinking 翻译为对应的供应商专有参数（P06-11）。
+def _build_thinking_extra_body(role_cfg: RoleLLMConfig) -> dict[str, Any] | None:
+    """按角色的 vendor 把 enable_thinking 翻译为对应的供应商专有参数（P06-11G）。
 
     - qwen：``{"enable_thinking": bool}``；
     - deepseek：``{"thinking": {"type": "enabled"|"disabled"}}``；
     - generic 与 enable_thinking=None：返回 None（不传任何供应商专用参数）；
       generic 且显式设置 enable_thinking 时给出清晰告警（不静默误传）。
     """
-    if config.enable_thinking is None:
+    if role_cfg.enable_thinking is None:
         return None
-    if config.vendor == "qwen":
-        return {"enable_thinking": config.enable_thinking}
-    if config.vendor == "deepseek":
-        return {
-            "thinking": {
-                "type": "enabled" if config.enable_thinking else "disabled"
-            }
-        }
+    if role_cfg.vendor == "qwen":
+        return {"enable_thinking": role_cfg.enable_thinking}
+    if role_cfg.vendor == "deepseek":
+        return {"thinking": {"type": "enabled" if role_cfg.enable_thinking else "disabled"}}
     # generic：不传供应商专用参数；显式设置不支持的参数时给出清晰告警。
     warnings.warn(
         "LLM_VENDOR=generic 不支持 enable_thinking 供应商专有参数，"
-        f"已忽略 LLM_ENABLE_THINKING={config.enable_thinking}（不会传给供应商）。",
+        f"已忽略 LLM_ENABLE_THINKING={role_cfg.enable_thinking}（不会传给供应商）。",
         UserWarning,
         stacklevel=2,
     )
@@ -294,29 +417,32 @@ def _build_thinking_extra_body(config: LLMConfig) -> dict[str, Any] | None:
 
 
 def build_real_llm(config: LLMConfig, role: LLMRole) -> AnyLLM:
-    """惰性构造真实 OpenAI-compatible LLM 实例（P05-12B/ P06-11 实现）。
+    """惰性构造真实 OpenAI-compatible LLM 实例（P05-12B / P06-11 实现 + P06-11G 解耦）。
 
-    依据当前安装的 CrewAI 1.6.1 官方 API：
-    ``crewai.LLM(model=..., base_url=..., api_key=..., temperature=..., timeout=...)``。
+    - 使用 ``config.config_for(role)`` 的角色合并配置（vendor/base_url/api_key/
+      model/temperature/timeout/enable_thinking 均可被 role_overrides 覆盖）；
+    - 依据当前安装的 CrewAI 1.6.1 官方 API：
+      ``crewai.LLM(model=..., base_url=..., api_key=..., temperature=..., timeout=...)``；
     - API Key 只在构造真实客户端的这一刻解包（``SecretStr.get_secret_value()``），
       之后由 CrewAI 内部持有，不进入本模块的 repr/日志/异常；
     - 构造阶段不发起任何网络请求（CrewAI 1.6.1 实测：仅 model/provider 解析）；
     - 供应商无关：不做任何 Qwen/DeepSeek 专属业务类，仅透传配置；
-    - thinking 供应商专有参数按 config.vendor 翻译（qwen=enable_thinking、
+    - thinking 供应商专有参数按角色 vendor 翻译（qwen=enable_thinking、
       deepseek=thinking.type、generic=不传并在显式设置时告警）。
     """
     from crewai import LLM as CrewAILLM
 
+    role_cfg = config.config_for(role)
     kwargs: dict[str, Any] = {}
-    extra_body = _build_thinking_extra_body(config)
+    extra_body = _build_thinking_extra_body(role_cfg)
     if extra_body is not None:
         kwargs["extra_body"] = extra_body
     return CrewAILLM(
-        model=config.model_for(role),
-        base_url=config.base_url,
-        api_key=config.api_key.get_secret_value(),
-        temperature=config.temperature,
-        timeout=config.timeout,
+        model=role_cfg.model,
+        base_url=role_cfg.base_url,
+        api_key=role_cfg.api_key.get_secret_value(),
+        temperature=role_cfg.temperature,
+        timeout=role_cfg.timeout,
         **kwargs,
     )
 

@@ -43,10 +43,10 @@ def test_fast_profile_budgets() -> None:
     assert p.mode == "fast"
     assert p.research_max_iter == 8
     assert p.analysis_max_iter == 6
-    # P06-11B：一次 WriterContextReader + 最终输出；5 是有界安全余量。
-    assert p.writer_max_iter == 5
+    # P06-11F：真实 smoke 证明 5 次不足以完成读取、撰写与有界修订。
+    assert p.writer_max_iter == 8
     assert p.max_retry_limit == 1
-    assert p.max_execution_time == 180
+    assert p.max_execution_time == 240
     assert p.max_rpm == 60
 
 
@@ -55,7 +55,7 @@ def test_deep_profile_budgets() -> None:
     assert p.mode == "deep"
     assert p.research_max_iter == 15
     assert p.analysis_max_iter == 10
-    assert p.writer_max_iter == 5
+    assert p.writer_max_iter == 8
     assert p.max_retry_limit == 2
     assert p.max_execution_time == 600
     assert p.max_rpm is None
@@ -98,7 +98,7 @@ def test_research_agent_applies_fast_budget() -> None:
     try:
         assert agent.max_iter == 8
         assert agent.max_retry_limit == 1
-        assert agent.max_execution_time == 180
+        assert agent.max_execution_time == 240
         assert agent.max_rpm == 60
     finally:
         _stop_rpm_controller(agent)
@@ -121,10 +121,10 @@ def test_analysis_and_writer_agents_apply_own_max_iter() -> None:
     writer = build_writer_agent(_config(), fake=_fake(LLMRole.WRITER), profile=fast)
     try:
         assert analysis.max_iter == 6
-        # P06-11B：聚合上下文读取后保留 max_iter=5 的有界安全余量。
-        assert writer.max_iter == 5
+        # P06-11F：与集中档位配置保持一致，仍是有上限的 8 次。
+        assert writer.max_iter == 8
         assert analysis.max_retry_limit == 1
-        assert writer.max_execution_time == 180
+        assert writer.max_execution_time == 240
     finally:
         _stop_rpm_controller(analysis)
         _stop_rpm_controller(writer)

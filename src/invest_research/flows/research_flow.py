@@ -71,22 +71,25 @@ class ResearchFlow(Flow[ResearchFlowState]):
         self._active_stage_span = None
         self._active_stage_token = None
         try:
+            from opentelemetry import context as otel_context
             from opentelemetry import trace
 
             from invest_research.infrastructure.observability.tracing import get_tracer
 
             span = get_tracer("stages").start_span(f"step.{step}", attributes={"step": step})
             self._active_stage_span = span
+            self._active_stage_token = otel_context.attach(trace.set_span_in_context(span))
         except Exception:
             self._active_stage_span = None
 
     def _stage_span_end(self, status: str) -> None:
         """结束 step 真实执行 span（尽力而为）。"""
         try:
-            from opentelemetry import trace
+            from opentelemetry import context as otel_context
 
-            if getattr(self, "_active_stage_token", None) is not None:
-                trace.detach(self._active_stage_token)
+            token = getattr(self, "_active_stage_token", None)
+            if token is not None:
+                otel_context.detach(token)
             span = getattr(self, "_active_stage_span", None)
             if span is not None:
                 span.set_attribute("status", status)

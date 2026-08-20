@@ -89,7 +89,8 @@ def classify_failure(exc: Exception, *, stage: str | None = None) -> FailureInfo
         or "response format" in text
         or "json_schema" in text
         or "this response_format type is unavailable" in text
-        or "structured output" in text and "not support" in text
+        or "structured output" in text
+        and "not support" in text
     ):
         return FailureInfo(
             error_code=ErrorCode.STRUCTURED_OUTPUT_UNSUPPORTED.value,

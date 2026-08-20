@@ -90,9 +90,7 @@ def _cmd_run(args: argparse.Namespace) -> NoReturn:
     )
     # 每次 run 生成新的 Idempotency-Key（真正的新任务）。
     idempotency_key = f"cli-{uuid.uuid4()}"
-    created = client.create_research_job(
-        request=request, idempotency_key=idempotency_key
-    )
+    created = client.create_research_job(request=request, idempotency_key=idempotency_key)
     print(f"created job_id={created.job_id} status={created.status.value}")
     print(f"idempotency_key={idempotency_key}")
 

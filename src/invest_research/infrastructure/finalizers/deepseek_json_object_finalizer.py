@@ -37,7 +37,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from copy import deepcopy
+from typing import Any, Callable
 
 from pydantic import BaseModel, ValidationError
 
@@ -64,13 +65,75 @@ _ROLE_MAP: dict[RoleName, LLMRole] = {
 _MAX_LLM_CALLS = 2
 
 
+def _schema_value(schema: dict[str, Any], root: dict[str, Any]) -> Any:
+    """把 JSON Schema 确定性转换为“值示例”，而不是回显 Schema 本身。"""
+    # 带 $ref 的字段也可能有业务默认值（例如 completeness=partial），
+    # 字段级 default 必须优先于引用定义里的第一个 enum 值。
+    if "default" in schema:
+        return deepcopy(schema["default"])
+    if "$ref" in schema:
+        target: Any = root
+        for part in str(schema["$ref"]).removeprefix("#/").split("/"):
+            target = target[part]
+        return _schema_value(target, root)
+    if "const" in schema:
+        return deepcopy(schema["const"])
+    if schema.get("enum"):
+        return deepcopy(schema["enum"][0])
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if variants:
+        non_null = [item for item in variants if item.get("type") != "null"]
+        return _schema_value(non_null[0] if non_null else variants[0], root)
+
+    kind = schema.get("type")
+    if kind == "object" or "properties" in schema:
+        return {
+            name: _schema_value(child, root)
+            for name, child in schema.get("properties", {}).items()
+        }
+    if kind == "array":
+        return []
+    if kind == "integer":
+        return 0
+    if kind == "number":
+        return 0.0
+    if kind == "boolean":
+        return False
+    if kind == "null":
+        return None
+    if schema.get("format") == "date":
+        return "2025-01-01"
+    if schema.get("format") == "date-time":
+        return "2025-01-01T00:00:00Z"
+    if schema.get("format") in {"uri", "url"}:
+        return "https://example.com/source"
+    return "example"
+
+
+def _apply_example_semantics(data: dict[str, Any]) -> dict[str, Any]:
+    """让示例满足本项目的跨字段语义，但不用于修改真实业务数据。"""
+    if isinstance(data.get("schema_version"), str):
+        data["version"] = data["schema_version"]
+    if data.get("completeness") == "partial" and not data.get("limitations"):
+        data["limitations"] = ["部分数据不可用；请在此说明缺失项及原因"]
+    return data
+
+
 def _build_schema_example(model: type[BaseModel]) -> str:
-    """从模型 JSON Schema 生成提示词中的完整结构示例（紧凑 JSON 文本）。"""
+    """生成能被目标模型读取的 JSON 实例，而不是不可提交的 Schema 描述。"""
     schema = model.model_json_schema()
-    return json.dumps(
-        {"type": "object", "properties": schema.get("properties", {})},
-        ensure_ascii=False,
-    )
+    example = _schema_value(schema, schema)
+    if not isinstance(example, dict):
+        example = {}
+    return json.dumps(_apply_example_semantics(example), ensure_ascii=False)
+
+
+class _ModelValidationFinalizerError(FinalizerError):
+    """保留 Pydantic 字段错误，供唯一一次修复请求使用。"""
+
+    def __init__(self, message: str, field_errors: list[BoundaryError]) -> None:
+        super().__init__("SCHEMA_INVALID", message)
+        self.field_errors = field_errors
 
 
 def _role_for(role: RoleName) -> LLMRole:
@@ -112,6 +175,7 @@ class DeepSeekJsonObjectFinalizer:
         canonicalizer: BoundaryCanonicalizer | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: Any | None = None,
+        diagnostic_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._config = config
         self._canonicalizer = canonicalizer or BoundaryCanonicalizer()
@@ -121,6 +185,7 @@ class DeepSeekJsonObjectFinalizer:
         # 可注入 client（测试用 mock / MockTransport）；None 时惰性构造真实 openai.Client。
         self._client: Any | None = client
         self._client_built = client is not None
+        self._diagnostic_callback = diagnostic_callback
         # 测试/审计：记录每次请求体（不含响应内容，避免敏感数据）
         self.requests: list[dict[str, Any]] = []
 
@@ -163,6 +228,16 @@ class DeepSeekJsonObjectFinalizer:
             return self._canonicalize_validate(parsed, model)
         except FinalizerError as exc:
             first_errors = self._extract_field_errors(exc)
+            self._emit_diagnostic(
+                {
+                    "event": "validation_failed",
+                    "attempt": 1,
+                    "role": role,
+                    "target_model": model.__name__,
+                    "invalid_output": content[:16000],
+                    "errors": [item.model_dump(mode="json") for item in first_errors],
+                }
+            )
 
         # 4) 第一次 Schema 失败：携带结构化字段错误进行**一次**修复
         if self._llm_calls >= _MAX_LLM_CALLS:
@@ -170,7 +245,9 @@ class DeepSeekJsonObjectFinalizer:
                 "SCHEMA_INVALID",
                 "Finalizer 已超过 LLM 调用上限，禁止重跑整个 Agent",
             )
-        repair_prompt = self._build_repair_prompt(raw_text, model, first_errors)
+        # 修复对象必须是“第一次 Finalizer 产生的不合格 JSON”，不能退回最初的
+        # Agent 自然语言；否则第二次调用无法针对具体字段做最小修复。
+        repair_prompt = self._build_repair_prompt(content, model, first_errors)
         repaired_content, repair_finish = self._call_llm(repair_prompt, model, role=role)
         if repair_finish == "length":
             raise FinalizerError(
@@ -240,13 +317,55 @@ class DeepSeekJsonObjectFinalizer:
     ) -> BaseModel:
         """BoundaryCanonicalizer → Pydantic；失败抛 FinalizerError。"""
         normalized = self._canonicalizer.canonicalize_for(model, data)
+        normalized = self._fill_contract_metadata(normalized, model)
         try:
             return model.model_validate(normalized)
-        except (ValidationError, ValueError) as exc:
+        except ValidationError as exc:
+            field_errors = [self._to_boundary_error(dict(item)) for item in exc.errors()]
+            raise _ModelValidationFinalizerError(
+                f"Finalizer 输出未通过 {model.__name__} 校验: {exc}",
+                field_errors,
+            ) from exc
+        except ValueError as exc:
             raise FinalizerError(
                 "SCHEMA_INVALID",
                 f"Finalizer 输出未通过 {model.__name__} 校验: {exc}",
             ) from exc
+
+    @staticmethod
+    def _fill_contract_metadata(
+        data: dict[str, Any], model: type[BaseModel]
+    ) -> dict[str, Any]:
+        """只补协议元数据，绝不补 company/source/fact 等业务事实。"""
+        normalized = dict(data)
+        schema_field = model.model_fields.get("schema_version")
+        schema_default = schema_field.default if schema_field is not None else None
+        if isinstance(schema_default, str) and schema_default:
+            if "schema_version" in normalized and (
+                not isinstance(normalized.get("schema_version"), str)
+                or not str(normalized.get("schema_version", "")).strip()
+            ):
+                normalized["schema_version"] = schema_default
+            if "version" in normalized and (
+                not isinstance(normalized.get("version"), str)
+                or not str(normalized.get("version", "")).strip()
+            ):
+                normalized["version"] = schema_default
+        return normalized
+
+    @staticmethod
+    def _to_boundary_error(item: dict[str, Any]) -> BoundaryError:
+        location = ".".join(str(part) for part in item.get("loc", ())) or None
+        error_type = str(item.get("type", "value_error"))
+        message = str(item.get("msg", "字段值不合法"))
+        return BoundaryError(
+            error_code="MISSING_FIELD" if error_type == "missing" else "VALUE_INVALID",
+            stage="schema",
+            field=location,
+            expected=message,
+            actual=type(item.get("input")).__name__,
+            detail=message,
+        )
 
     def _call_llm(
         self,
@@ -279,9 +398,16 @@ class DeepSeekJsonObjectFinalizer:
             "response_format": {"type": "json_object"},  # DeepSeek 原生 json_object
             "max_tokens": self._max_tokens,
         }
-        # thinking=false：仅 DeepSeek 供应商显式关闭思考（其它供应商不传专用参数）。
-        if self._config.vendor == "deepseek":
-            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        # P06-11G：thinking 按角色配置（RoleLLMConfig.enable_thinking）。
+        # - enable_thinking=True → DeepSeek thinking enabled；
+        # - enable_thinking=False → disabled；
+        # - None → 不传（供应商默认）。
+        # 与 build_real_llm 的 _build_thinking_extra_body 保持同一决策源。
+        role_cfg = self._config.config_for(llm_role)
+        if role_cfg.enable_thinking is not None and role_cfg.vendor == "deepseek":
+            request_kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if role_cfg.enable_thinking else "disabled"}
+            }
 
         # 记录请求体（脱敏：不含 api_key）
         self.requests.append(
@@ -311,7 +437,29 @@ class DeepSeekJsonObjectFinalizer:
             return "", "stop"
         finish_reason = str(getattr(choice, "finish_reason", "stop") or "stop")
         content = getattr(choice.message, "content", None)
-        return (content if isinstance(content, str) else ""), finish_reason
+        text = content if isinstance(content, str) else ""
+        self._emit_diagnostic(
+            {
+                "event": "response",
+                "attempt": self._llm_calls,
+                "role": role,
+                "model": model_name,
+                "target_model": model.__name__,
+                "finish_reason": finish_reason,
+                "content_length": len(text),
+                "content": text[:16000],
+            }
+        )
+        return text, finish_reason
+
+    def _emit_diagnostic(self, event: dict[str, Any]) -> None:
+        """诊断失败不能影响业务；脱敏和总大小限制由 DiagnosticCapture 负责。"""
+        if self._diagnostic_callback is None:
+            return
+        try:
+            self._diagnostic_callback(event)
+        except Exception:  # noqa: BLE001 - 观测必须尽力而为
+            return
 
     def _build_client(self) -> Any:
         """惰性构造 openai.Client（mock 可注入；真实路径不包含密钥明文）。
@@ -354,14 +502,17 @@ class DeepSeekJsonObjectFinalizer:
     ) -> str:
         """构造修复提示词：携带结构化字段错误，只修正格式不发明事实。"""
         schema_example = _build_schema_example(model)
-        error_lines = "\n".join(
-            (
-                f"- field={e.field or '?'} code={e.error_code} "
-                f"expected={e.expected or '?'} actual={e.actual or '?'} "
-                f"detail={e.detail or '?'}"
+        error_lines = (
+            "\n".join(
+                (
+                    f"- field={e.field or '?'} code={e.error_code} "
+                    f"expected={e.expected or '?'} actual={e.actual or '?'} "
+                    f"detail={e.detail or '?'}"
+                )
+                for e in (errors or [])
             )
-            for e in (errors or [])
-        ) or "- 未提供具体字段错误"
+            or "- 未提供具体字段错误"
+        )
         return (
             "以下是上一次生成的 JSON 未通过目标结构校验。请修复字段使输出成为"
             "合法 JSON object。\n"
@@ -375,9 +526,6 @@ class DeepSeekJsonObjectFinalizer:
 
     @staticmethod
     def _extract_field_errors(exc: FinalizerError) -> list[BoundaryError]:
-        """从 FinalizerError 消息中提取结构化字段错误（尽力而为，失败返回空列表）。
-
-        生产路径中 Pydantic ValidationError 的详细信息已在 ``_canonicalize_validate``
-        中转为文本；这里只做轻量提取，不虚构错误。
-        """
-        return []
+        """读取校验异常携带的结构化字段错误；没有时保持空列表。"""
+        errors = getattr(exc, "field_errors", None)
+        return list(errors) if isinstance(errors, list) else []
