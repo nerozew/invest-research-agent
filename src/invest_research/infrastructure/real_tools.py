@@ -350,6 +350,60 @@ def _cached_lookup(
     return cached, key
 
 
+def _capture_tool_call(
+    diagnostics_provider: Callable[[], Any] | None,
+    *,
+    tool_name: str,
+    params: dict[str, Any],
+    cached_hit: bool | None,
+    output_text: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    """P06-11K-4：工具调用摘要捕获（尽力而为，绝不抛异常）。
+
+    - ``diagnostics_provider``：惰性读取当前 Job 的 DiagnosticCapture
+      （工具闭包在 Worker 启动时构造，但 capture 在 run() 内创建）。
+    - INPUT：参数白名单摘要（tool_summaries.build_tool_request_summary）；
+    - OUTPUT：结构化结果摘要（build_tool_response_summary，含 count/locator）；
+    - 摘要构造阶段已做白名单裁剪，capture 内部再做一次递归脱敏。
+    """
+    if diagnostics_provider is None or cached_hit is True:
+        # 缓存命中只补打 cache_hit=true 事件（结果不重复捕获）
+        return
+    try:
+        diagnostics = diagnostics_provider()
+        if diagnostics is None:
+            return
+        from invest_research.application.diagnostics.models import DiagnosticDirection
+        from invest_research.application.diagnostics.tool_summaries import (
+            build_tool_request_summary,
+            build_tool_response_summary,
+        )
+
+        req = build_tool_request_summary(tool_name, params)
+        if req:
+            diagnostics.capture(
+                stage="tool",
+                component=tool_name,
+                payload_kind="tool_request",
+                data={"tool": tool_name, "cache_hit": cached_hit, **req},
+                direction=DiagnosticDirection.INPUT,
+            )
+        if output_text is not None:
+            resp = build_tool_response_summary(tool_name, output_text)
+            if error_code:
+                resp["error_code"] = error_code
+            diagnostics.capture(
+                stage="tool",
+                component=tool_name,
+                payload_kind="tool_response",
+                data={"tool": tool_name, "cache_hit": cached_hit, **resp},
+                direction=DiagnosticDirection.OUTPUT,
+            )
+    except Exception:  # noqa: BLE001 - 诊断尽力而为
+        _LOGGER.warning("tool diagnostics capture skipped tool=%s", tool_name)
+
+
 def _cached_execute(
     *,
     cache: ToolCallCache | None,
@@ -359,6 +413,7 @@ def _cached_execute(
     serialize_fn: Callable[[Any], str],
     execute_fn: Callable[[], Any],
     budget: ToolBudget | None = None,
+    diagnostics_provider: Callable[[], Any] | None = None,
 ) -> str:
     """带缓存执行：命中→预算→执行→序列化→（成功）写缓存；预算耗尽返回 TOOL_BUDGET_EXHAUSTED。
 
@@ -375,15 +430,29 @@ def _cached_execute(
         observe_tool_duration,
     )
 
+    _capture_tool_call(
+        diagnostics_provider, tool_name=tool_name, params=params, cached_hit=None
+    )
     cached, key = _cached_lookup(cache, recorder, tool_name, params)
     if cached is not None:
-        # 缓存命中：仍然产生脱敏 span（cache_hit=true，无网络耗时）。
+        # 缓存命中：仍然产生脱敏 span（cache_hit=true，无网络耗时）；
+        # 事件只记录参数（cached_hit=True），结果不重复捕获。
+        _capture_tool_call(
+            diagnostics_provider, tool_name=tool_name, params=params, cached_hit=True
+        )
         with _tool_span(tool_name, cache_hit=True, attempt_count=1) as current:
             _set_span_result_attrs(current, tool_name=tool_name)
         return cached
     exhausted = _budget_exhausted(budget, tool_name)
     if exhausted is not None:
         # 预算耗尽：span 记录稳定错误码（TOOL_BUDGET_EXHAUSTED，不可重试）。
+        _capture_tool_call(
+            diagnostics_provider,
+            tool_name=tool_name,
+            params=params,
+            cached_hit=False,
+            error_code=ErrorCode.TOOL_BUDGET_EXHAUSTED.value,
+        )
         with _tool_span(tool_name, cache_hit=False, attempt_count=1, budget=budget) as current:
             _set_span_result_attrs(
                 current,
@@ -429,6 +498,14 @@ def _cached_execute(
             retryable=retryable,
         )
     text = serialize_fn(result)
+    _capture_tool_call(
+        diagnostics_provider,
+        tool_name=tool_name,
+        params=params,
+        cached_hit=False,
+        output_text=text,
+        error_code=error_code,
+    )
     if cache is not None and key is not None and getattr(result, "kind", None) == "success":
         cache.put(key, text)
     _record_tool_metrics(tool_name, result)
@@ -508,6 +585,7 @@ def build_research_tools(
     recorder: PerformanceRecorder | None = None,
     cache: ToolCallCache | None = None,
     budget: ToolBudget | None = None,
+    diagnostics_provider: Callable[[], Any] | None = None,
 ) -> list[Any]:
     """构造 Research Agent 的真实工具白名单。
 
@@ -516,7 +594,9 @@ def build_research_tools(
     - stats：可选调用统计 dict（P05-13 验收：外部调用证据写入 manifest；
       None 时不记录，行为与之前完全一致）；
     - recorder：可选 PerformanceRecorder（P05.5 工具耗时/次数统计；None 时不计时）；
-    - cache：可选 ToolCallCache（P05.5 相同工具名+规范化参数单 Job 只执行一次）。
+    - cache：可选 ToolCallCache（P05.5 相同工具名+规范化参数单 Job 只执行一次）；
+    - diagnostics_provider：P06-11K-4 可选惰性读取当前 Job 的 DiagnosticCapture
+      （工具闭包构造时 run() 的 capture 尚未创建，用闭包懒读；None 时不捕获）。
 
     返回给 CrewAI 使用的工具函数列表（@tool 包装）。
     """
@@ -551,6 +631,7 @@ def build_research_tools(
             serialize_fn=_unpack,
             execute_fn=_run,
             budget=budget,
+            diagnostics_provider=diagnostics_provider,
         )
 
     @tool("SECSubmissions")
@@ -592,6 +673,7 @@ def build_research_tools(
             serialize_fn=_unpack,
             execute_fn=_run,
             budget=budget,
+            diagnostics_provider=diagnostics_provider,
         )
 
     @tool("SECCompanyFacts")
@@ -651,6 +733,7 @@ def build_research_tools(
             serialize_fn=_unpack,
             execute_fn=_run,
             budget=budget,
+            diagnostics_provider=diagnostics_provider,
         )
 
     @tool("DocumentParser")
@@ -733,6 +816,7 @@ def build_research_tools(
             serialize_fn=_serialize_search_result,
             execute_fn=_run,
             budget=budget,
+            diagnostics_provider=diagnostics_provider,
         )
 
     return [

@@ -9,6 +9,9 @@
    span + 低基数指标；
 4. 记录 ``agent_iteration_total`` / ``agent_max_iteration_total``；
 5. 写入 Job-local ExecutionTimeline（脱敏，失败不影响业务）。
+
+P06-11K-4：LLM 三态摘要（content / tool_calls / empty）入诊断包 +
+Jaeger Span 只加 diagnostic.* 低基数属性（绝不塞完整 Payload）。
 """
 
 from __future__ import annotations
@@ -89,10 +92,13 @@ class LlmFullObserver:
         *,
         agent_roles: dict[str, str] | None = None,
         timeline: ExecutionTimelineSink | None = None,
+        diagnostics_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._config = config
         self._agent_roles = dict(agent_roles or {})
         self._timeline = timeline
+        # P06-11K-4：惰性读取当前 Job 的 DiagnosticCapture（tool/LLM 摘要捕获）。
+        self._diagnostics_provider = diagnostics_provider
         self._llm_pending: dict[str, Deque[_LlmSpanHandle]] = {
             "research": deque(),
             "analysis": deque(),
@@ -245,6 +251,17 @@ class LlmFullObserver:
                 if duration >= 0:
                     span.set_attribute("llm.duration_s", duration)
                 self._apply_response_kind_attrs(span, event, usage)
+                # P06-11K-4：LLM 三态摘要（content / tool_calls / empty）入诊断包。
+                self._capture_llm_summary(event, role=role, status="success")
+                # P06-11K-4：Span 只加 diagnostic.* 低基数属性（不塞 Payload）。
+                self._set_diagnostic_span_attrs(
+                    span,
+                    event_id=f"llm.{role}.{handle.call_index}",
+                    payload_kind="llm_response",
+                    input_size=None,
+                    output_size=None,
+                    validation_error_count=0,
+                )
                 self._count_llm_metrics(provider, model_lbl, role, "success", duration, usage)
                 span.end(end_time=time.time_ns())
             except Exception:  # noqa: BLE001 - 属性/指标尽力而为
@@ -284,6 +301,19 @@ class LlmFullObserver:
                 error_text = str(getattr(event, "error", "") or "")
                 span.record_exception(
                     Exception(error_text[:200])  # noqa: TRY002 - 观测用
+                )
+                # P06-11K-4：失败 LLM 摘要（error_code 为稳定错误码）。
+                self._capture_llm_summary(
+                    event, role=role, status="failure", error_code="LLM_CALL_FAILED"
+                )
+                # P06-11K-4：Span 只加 diagnostic.* 低基数属性。
+                self._set_diagnostic_span_attrs(
+                    span,
+                    event_id=f"llm.{role}.{handle.call_index}",
+                    payload_kind="llm_response_failure",
+                    input_size=None,
+                    output_size=None,
+                    validation_error_count=0,
                 )
                 span.end(end_time=time.time_ns())
                 self._count_llm_metrics(provider, model_lbl, role, "failure", duration, None)
@@ -541,6 +571,35 @@ class LlmFullObserver:
         except Exception:  # noqa: BLE001
             return None
 
+    def _set_diagnostic_span_attrs(
+        self,
+        span: Any,
+        *,
+        event_id: str,
+        payload_kind: str,
+        input_size: int | None,
+        output_size: int | None,
+        validation_error_count: int,
+    ) -> None:
+        """P06-11K-4：Span 只加 diagnostic.* 白名单低基数属性（不塞 Payload）。
+
+        属性白名单（与任务文档一致）：
+        diagnostic.event_id / diagnostic.available / diagnostic.payload_kind /
+        diagnostic.input_size / diagnostic.output_size /
+        diagnostic.validation_error_count。禁止把完整 Payload 塞入 Span。
+        """
+        try:
+            span.set_attribute("diagnostic.event_id", str(event_id))
+            span.set_attribute("diagnostic.available", True)
+            span.set_attribute("diagnostic.payload_kind", str(payload_kind))
+            if input_size is not None:
+                span.set_attribute("diagnostic.input_size", int(input_size))
+            if output_size is not None:
+                span.set_attribute("diagnostic.output_size", int(output_size))
+            span.set_attribute("diagnostic.validation_error_count", int(validation_error_count))
+        except Exception:  # noqa: BLE001 - span 属性尽力而为
+            pass
+
     def _apply_response_kind_attrs(self, span: Any, event: Any, usage: Any) -> None:
         """记录 response_kind / content_chars / tool_call_count / finish_reason。"""
         try:
@@ -580,6 +639,78 @@ class LlmFullObserver:
                 span.set_attribute("llm.finish_reason", str(finish))
         except Exception:  # noqa: BLE001
             pass
+
+    def _capture_llm_summary(
+        self,
+        event: Any,
+        *,
+        role: str,
+        status: str,
+        error_code: str | None = None,
+    ) -> None:
+        """P06-11K-4：LLM 调用摘要（content / tool_calls / empty 三态）入诊断包。
+
+        - 从事件提取 content / call_type / finish_reason / tokens；
+        - 摘要只含计数/长度/角色，绝不包含回复正文或工具参数；
+        - 由 DiagnosticCapture.capture 再做一次递归脱敏（纵深防御）。
+        """
+        if self._diagnostics_provider is None:
+            return
+        try:
+            diagnostics = self._diagnostics_provider()
+            if diagnostics is None:
+                return
+            event_usage = self._event_usage(event)
+            tokens = extract_usage_tokens(event_usage)
+            response = getattr(event, "response", None)
+            content = ""
+            if isinstance(response, str):
+                content = response
+            elif isinstance(response, dict):
+                content = response.get("content") or ""
+            else:
+                content = getattr(response, "content", "") or ""
+            content_chars = int(len(str(content)))
+            call_type = str(getattr(event, "call_type", "") or "")
+            if "tool" in call_type.lower() or getattr(event, "tool_calls", None):
+                kind = "tool_calls"
+            elif content_chars:
+                kind = "content"
+            else:
+                kind = "empty"
+            finish = None
+            try:
+                finish = (
+                    response.get("finish_reason")
+                    if isinstance(response, dict)
+                    else getattr(response, "finish_reason", None)
+                )
+            except Exception:  # noqa: BLE001
+                finish = None
+            from invest_research.application.diagnostics.models import DiagnosticDirection
+            from invest_research.application.diagnostics.tool_summaries import (
+                build_llm_response_summary,
+            )
+
+            summary = build_llm_response_summary(
+                kind,
+                role=role,
+                content_chars=content_chars,
+                finish_reason=str(finish) if finish is not None else None,
+                input_tokens=int(tokens["input"]) if tokens["input"] is not None else None,
+                output_tokens=int(tokens["output"]) if tokens["output"] is not None else None,
+                tool_call_count=len(getattr(event, "tool_calls", None) or []),
+                error_code=error_code,
+            )
+            diagnostics.capture(
+                stage="llm",
+                component="llm_full_observer",
+                payload_kind=f"llm_response_{kind}",
+                data={**summary, "status": status},
+                direction=DiagnosticDirection.OUTPUT,
+            )
+        except Exception:  # noqa: BLE001 - 诊断尽力而为
+            _LOGGER.warning("llm diagnostics capture skipped role=%s", role)
 
     def _count_llm_metrics(
         self,

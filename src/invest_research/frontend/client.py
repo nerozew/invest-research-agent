@@ -205,6 +205,15 @@ class ResearchApiClient:
         resp = self._request("GET", f"/v1/research-jobs/{job_id}/artifacts/{artifact_key}")
         return resp.content
 
+    def download_diagnostics_bundle(self, job_id: str) -> bytes:
+        """GET /v1/research-jobs/{id}/diagnostics：下载脱敏诊断包（.tar.gz）。
+
+        job_id 必须合法 UUID（后端防路径穿越）；诊断包不存在返回 404 明确提示。
+        返回字节为 tar.gz 内容；前端只下载不解析内部文件（本地调试用）。
+        """
+        resp = self._request("GET", f"/v1/research-jobs/{job_id}/diagnostics")
+        return resp.content
+
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------

@@ -104,6 +104,8 @@ class JobSnapshot(BaseModel):
     research_profile: str = "deep"
     error_code: str | None = None
     error_message: str | None = None
+    # P06-11K-4：失败阶段（如 05_writer），由后端稳定错误分类写入。
+    failure_stage: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_seconds: float | None = None

@@ -21,7 +21,11 @@ import streamlit as st
 from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
-from invest_research.frontend.render import is_terminal_status, render_job_snapshot
+from invest_research.frontend.render import (
+    is_terminal_status,
+    render_failed_diagnostics,
+    render_job_snapshot,
+)
 from invest_research.frontend.state import load_job_id, save_job_id
 
 st.set_page_config(page_title="任务状态", page_icon="🔍", layout="wide")
@@ -104,6 +108,15 @@ def _render_status_fragment(client: ResearchApiClient, job_id: str) -> None:
     if is_terminal_status(snapshot.status):
         render_job_snapshot(snapshot)
         st.success("任务已到达终态，已停止自动轮询。")
+        # P06-11K-4：失败/部分完成 → 失败诊断入口（错误阶段/错误码/下载诊断包）。
+        if snapshot.status.value in ("failed", "partial"):
+            render_failed_diagnostics(
+                client,
+                str(snapshot.job_id),
+                error_code=snapshot.error_code,
+                failure_stage=snapshot.failure_stage,
+                recent_events=None,
+            )
         return
 
     render_job_snapshot(snapshot)

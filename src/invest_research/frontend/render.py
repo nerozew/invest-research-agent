@@ -26,6 +26,7 @@ __all__ = [
     "STATUS_LABELS",
     "STEP_STATUS_ICONS",
     "ArtifactDownloader",
+    "DiagnosticsDownloader",
     "JsonArtifactView",
     "current_stage_label",
     "decode_artifact_text",
@@ -36,6 +37,7 @@ __all__ = [
     "job_list_row",
     "load_viewable_json_artifacts",
     "profile_badge",
+    "render_failed_diagnostics",
     "render_job_snapshot",
     "status_label",
 ]
@@ -178,6 +180,13 @@ class ArtifactDownloader(Protocol):
         """下载已登记工件字节（后端路径穿越防护）。"""
 
 
+class DiagnosticsDownloader(Protocol):
+    """脱敏诊断包下载端口：页面与测试只需提供 ``download_diagnostics_bundle``。"""
+
+    def download_diagnostics_bundle(self, job_id: str) -> bytes:
+        """下载脱敏诊断包（.tar.gz 字节，仅本地调试）。"""
+
+
 class JsonArtifactView(BaseModel):
     """一个可在页面内只读查看的 JSON 中间工件（含原始正文）。"""
 
@@ -186,6 +195,76 @@ class JsonArtifactView(BaseModel):
     artifact_key: str
     byte_size: int
     text: str
+
+
+def build_diagnostics_event_rows(
+    events: list[dict[str, object]] | None,
+) -> list[dict[str, str]]:
+    """P06-11K-4：把执行事件压缩为最近 10 条的表格行（纯函数，可离线测试）。
+
+    只提取展示白名单字段（时间/阶段/类型/摘要类型/状态），绝不暴露 payload
+    正文、密钥或内部路径。超过 10 条只保留最后 10 条。
+    """
+    rows: list[dict[str, str]] = []
+    for ev in (events or [])[-10:]:
+        rows.append(
+            {
+                "时间": str(ev.get("timestamp") or ""),
+                "阶段": str(ev.get("stage") or ""),
+                "类型": str(ev.get("event_type") or ""),
+                "摘要类型": str(ev.get("payload_kind") or ""),
+                # 稳定错误码优先（错误码是任务/步骤级稳定分类，status 是状态桶）。
+                "状态/错误码": str(ev.get("error_code") or ev.get("status") or ""),
+            }
+        )
+    return rows
+
+
+def render_failed_diagnostics(
+    client: DiagnosticsDownloader,
+    job_id: str,
+    *,
+    error_code: str | None,
+    failure_stage: str | None,
+    recent_events: list[dict[str, object]] | None = None,
+) -> None:
+    """P06-11K-4：失败任务诊断入口（错误阶段/稳定错误码/最近 10 条事件/下载按钮）。
+
+    - 只显示稳定错误码与错误阶段（不展示内部路径/密钥）；
+    - 最近 10 条执行事件以表格展示（失败时后端才提供；缺省空列表）；
+    - 「下载脱敏诊断包」按钮只通过后端 FastAPI 下载（前端不存密钥）；
+    - 紧邻按钮提供「诊断包可能包含业务输入，仅供本地调试」提示。
+    """
+    st.subheader("🧪 失败诊断")
+
+    col_code, col_stage = st.columns(2)
+    with col_code:
+        st.metric("错误阶段", failure_stage or "—")
+    with col_stage:
+        st.metric("稳定错误码", error_code or "—")
+
+    rows = build_diagnostics_event_rows(recent_events)
+    if rows:
+        st.markdown("**最近 10 条执行事件**")
+        st.table(rows)
+    else:
+        st.info("暂无执行事件（任务未失败或诊断捕获未启用）。")
+
+    try:
+        archive_bytes = client.download_diagnostics_bundle(job_id)
+    except ApiClientError as exc:
+        st.warning(f"诊断包不可用：{exc}")
+        return
+
+    st.download_button(
+        label="⬇️ 下载脱敏诊断包",
+        data=archive_bytes,
+        file_name=f"diagnostics-{job_id}.tar.gz",
+        mime="application/gzip",
+        type="secondary",
+        key=f"download_diagnostics_{job_id}",
+    )
+    st.caption("⚠️ 诊断包可能包含业务输入（公司名/查询词），仅供本地调试，请勿对外分享。")
 
 
 def load_viewable_json_artifacts(

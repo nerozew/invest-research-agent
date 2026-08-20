@@ -41,6 +41,11 @@ from invest_research.application.diagnostics.sink import (
     BufferStats,
     DiagnosticCaptureSink,
 )
+from invest_research.application.diagnostics.tool_summaries import (
+    build_llm_response_summary,
+    build_tool_request_summary,
+    build_tool_response_summary,
+)
 
 __all__ = [
     "DiagnosticCaptureMode",
@@ -68,4 +73,7 @@ __all__ = [
     "build_bundle_files",
     "CapturedPayload",
     "DiagnosticCapture",
+    "build_llm_response_summary",
+    "build_tool_request_summary",
+    "build_tool_response_summary",
 ]

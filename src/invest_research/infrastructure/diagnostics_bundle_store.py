@@ -119,6 +119,31 @@ class DiagnosticsBundleStore:
             return None
         return self.write(job_id, files)
 
+    def read_bundle(self, job_id: str | uuid.UUID) -> dict[str, bytes] | None:
+        """P06-11K-4：读取整个脱敏诊断包（5 文件字节）。
+
+        - job_id 经 ``_validate_job_id``（UUID 防穿越：拒绝 ``..``/绝对路径/非 UUID）；
+        - 目录固定为 ``<artifact_root>/<job_id>/diagnostics``，不接受用户可控文件名；
+        - manifest.json 不存在 → 返回 None（API 层转 404 明确提示，不 500）；
+        - 目录存在但缺少部分文件 → 尽量返回已存在文件（诊断包尽力而为）。
+        """
+        safe_job = _validate_job_id(job_id)
+        diag_dir = self._artifact_root / safe_job / "diagnostics"
+        manifest_path = diag_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        bundle: dict[str, bytes] = {}
+        for name in BUNDLE_FILE_NAMES:
+            path = diag_dir / name
+            if not path.exists():
+                continue
+            try:
+                bundle[name] = path.read_bytes()
+            except OSError:
+                # 只读单个文件失败不影响其他文件（诊断包尽力而为）
+                continue
+        return bundle or None
+
     def _atomic_write(self, target: Path, content: bytes) -> Path:
         """复用 ArtifactStore 同款原子写：同目录临时文件 + fsync + os.replace。"""
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -500,6 +500,9 @@ class LiveResearchFlowRunner:
         self._diagnostics_factory = diagnostics_factory
         # 当前 Job 活跃的诊断捕获器（每次 run 重设，防止跨 Job 混用）
         self._diagnostics: "DiagnosticCapture | None" = None
+        # P06-11K-4：惰性读取当前 Job 诊断捕获器的闭包（供 LlmFullObserver /
+        # 工具包装层在事件回调内读取；每次 run 由 _set_diagnostics_provider 刷新）。
+        self._diagnostics_provider_lazy: Callable[[], "DiagnosticCapture | None"] | None = None
         # P06-11G：每 Job 组件工厂。提供时每次 run() 都新建一套
         # job-local 组件（budget/cache/recorder/stats/research_tools/prefetch），
         # 禁止跨 Job 复用捕获旧预算/旧缓存的工具闭包；未提供时回退构造注入
@@ -683,6 +686,13 @@ class LiveResearchFlowRunner:
             self._diagnostics = self._diagnostics_factory()
         else:
             self._diagnostics = None
+        # P06-11K-4：刷新惰性读取闭包（先于任何工具/LLM 回调使用）。
+        captured = self._diagnostics
+
+        def _current_diagnostics() -> "DiagnosticCapture | None":
+            return captured
+
+        self._diagnostics_provider_lazy = _current_diagnostics
         try:
             state = self._run_live(request, ctx)
         except LiveFlowExecutionError as exc:
@@ -1882,6 +1892,7 @@ class LiveResearchFlowRunner:
                 self._effective_config,
                 agent_roles=agent_roles,
                 timeline=timeline,
+                diagnostics_provider=self._diagnostics_provider_lazy,
             ).subscribe()
         except Exception:  # noqa: BLE001 - 观测尽力而为
             return None

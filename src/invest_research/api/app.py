@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -136,6 +136,7 @@ def create_app(
     cancel_step_cleanup: CancelStepCleanup | None = None,
     job_dispatcher: JobDispatcher | None = None,
     outbox_relay_service: OutboxRelayService | None = None,
+    diagnostics_bundle_store: Any | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例（application factory）。
 
@@ -146,8 +147,21 @@ def create_app(
     - ``job_store``：创建投研任务的持久化端口（P04-02）。注入后用于
       ``POST /v1/research-jobs``；缺省 ``None`` 表示"未连接存储"
       （此时创建任务接口返回 503），保持模块导入零数据库连接。
+    - ``diagnostics_bundle_store``：P06-11K-4 可选注入的脱敏诊断包存储；
+      缺省惰性按 ``settings.artifact_root`` 构建（保持模块导入零磁盘依赖）。
     """
     resolved_settings = settings or get_settings()
+    # P06-11K-4：诊断包存储（可注入 fake；缺省惰性按 artifact_root 构建）。
+    if diagnostics_bundle_store is None:
+        from pathlib import Path as _Path
+
+        from invest_research.infrastructure.diagnostics_bundle_store import (
+            DiagnosticsBundleStore,
+        )
+
+        diagnostics_bundle_store = DiagnosticsBundleStore(
+            _Path(resolved_settings.artifact_root)
+        )
     owns_checker = health_checker is None
     checker = health_checker or build_health_checker(resolved_settings)
     job_service = CreateResearchJobService(store=job_store) if job_store is not None else None
@@ -267,6 +281,7 @@ def create_app(
     app.state.idempotent_job_service = idempotent_job_service
     app.state.job_dispatcher = job_dispatcher
     app.state.outbox_relay_service = outbox_relay_service
+    app.state.diagnostics_bundle_store = diagnostics_bundle_store
 
     @app.get(
         "/health",
@@ -557,6 +572,61 @@ def create_app(
 
     def _get_cancel_job_service(request: Request) -> CancelResearchJobService | None:
         return cast(CancelResearchJobService | None, request.app.state.cancel_job_service)
+
+    def _get_diagnostics_bundle_store(request: Request) -> Any | None:
+        return getattr(request.app.state, "diagnostics_bundle_store", None)
+
+    @app.get(
+        "/v1/research-jobs/{job_id}/diagnostics",
+        tags=["diagnostics"],
+        summary="下载脱敏诊断包",
+        description=(
+            "仅允许下载该 job 的脱敏诊断包（manifest/execution_timeline/stage_payloads/"
+            "validation_errors/failure 共 5 个文件，打包为一个 .tar.gz）。"
+            "job_id 必须是合法 UUID（防路径穿越）；诊断包不存在返回 404 明确提示，不 500。"
+        ),
+        responses={
+            status.HTTP_200_OK: {"content": {"application/gzip": {}}},
+            status.HTTP_404_NOT_FOUND: {"description": "诊断包不存在"},
+        },
+    )
+    def download_diagnostics_bundle(
+        job_id: uuid.UUID,
+        bundle_store: Any | None = Depends(_get_diagnostics_bundle_store),
+    ) -> Response:
+        if bundle_store is None:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "诊断包存储未连接，无法下载"},
+            )
+        try:
+            bundle = bundle_store.read_bundle(job_id)
+        except Exception as exc:  # noqa: BLE001 - 非法 job_id 转 400（防路径穿越）
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": f"无法读取诊断包: {exc}"},
+            )
+        if bundle is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"detail": "该任务不存在脱敏诊断包（可能未启用诊断捕获或任务未收口）"},
+            )
+        # 打包为 tar.gz（固定 5 文件，不支持用户传入文件名 → 无路径穿越）。
+        import io
+        import tarfile
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, content in sorted(bundle.items()):
+                info = tarfile.TarInfo(name=f"diagnostics/{name}")
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+        body = buf.getvalue()
+        return Response(
+            content=body,
+            media_type="application/gzip",
+            headers={"Content-Disposition": f'attachment; filename="diagnostics-{job_id}.tar.gz"'},
+        )
 
     @app.delete(
         "/v1/research-jobs/{job_id}",
