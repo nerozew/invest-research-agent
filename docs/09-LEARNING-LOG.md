@@ -2686,3 +2686,56 @@ DeepSeek 的 `response_format={"type":"json_object"}` 与 OpenAI `response_forma
 
 - 本轮只执行 fake Docker smoke，未做付费 live 调用；当前 `agent` 栈明确运行 `FLOW_MODE=fake`。
 - 工作区仍包含此前多轮未提交修改；镜像已与当前工作区对齐，但 Git HEAD 尚不能单独复现该镜像。下一步先审查并建立 Git 安全检查点，再进行一次受控 AAPL/MSFT fast live smoke。
+## P06-11M：财务分析“有事实、无指标”的确定性修复
+
+- CrewAI `@tool` 会直接从 Python 函数签名生成 JSON Schema；`date` 前向引用和
+  `**inputs` 在当前组合下分别造成 Schema 未完成、把所有输入压成一个错误字段。
+- Agent 是否调用计算工具具有不确定性，所以核心财务公式不能依赖它的行为。
+  正确边界是 LLM 选择/解释，Python 从可信 SEC facts 用 Decimal 计算。
+- 年度同比需要两个可比 10-K 期间；若缓存键和筛选都不包含 requested_forms，
+  较新的 10-Q 会挤掉上一年度事实，结果即使能算也会口径错误。
+
+检查问题：为什么把 SEC fact 的 concept、期间、accession 和 source_id 写入每个
+MetricResult.inputs_json，比只保存最终比率更适合审计与事故排查？
+
+### P06-11M 真实验收补充：成功状态、内容正确性与观测正确性是三件事
+
+1. Job succeeded 只能证明流程到达终态；必须继续核对分析 Pack 的指标数量、计算状态和
+   source_facts，才能证明业务计算真正生效。本次 MSFT 验收为 10/10 computed。
+2. 模板占位文本即使通过 Schema，也不代表它是有效业务数据；确定性边界应精确清理已知
+   占位符，但不得粗暴清空真实 limitations。
+3. 主 trace 完整不代表所有子事件都正确挂载；异步事件回调若丢失当前 OTel context，
+   LLM/tool span 会成为独立 trace。Counter 在首次抓取前已为 1 时，短窗口 increase 也可能
+   显示 0，应同时检查原始 Counter 与 target health。
+
+## P06-11N：指标消费契约与 Direct Writer 可观测性收口
+
+### 任务目标
+
+把 P06-11M 已确定性计算的 10 项指标真正交给 Writer 并逐项约束报告展示，同时让绕过
+CrewAI 事件总线的 Direct Writer 进入统一 LLM 指标，并修复事件回调产生孤儿 span 的问题。
+
+### 3 个知识点
+
+1. **“上游已经计算”不等于“下游已经消费”**：FinancialAnalysisPack 有 10 项指标，只能
+   证明分析阶段正确。WriterContextBuilder 必须把指标作为硬保留区交给模型，报告组装边界还要
+   逐项检查反引号指标代码；否则模型可能完全忽略指标，而任务仍然显示 succeeded。
+2. **旁路 LLM 调用必须在真实调用边界埋点**：Direct Writer 不经过 CrewAI 的
+   LLMCallCompletedEvent，因此不能期待事件 Observer 自动统计。应直接使用响应 usage 写入
+   `llm_requests_total`、耗时与 input/output/cached_input token；供应商不返回 usage 时只增加
+   missing 计数，绝不能估算 token 冒充真实值。
+3. **异步回调会丢失当前 OTel context**：LLM/tool 事件可能在阶段 span 结束后才执行；若回调
+   现场直接 start_span，就会生成独立 trace。Observer 创建时捕获父 context，回调时显式传给
+   start_span，才能让子 span 稳定挂到对应 research/analysis 阶段。
+
+### 检查问题（请先用自己的话回答）
+
+为什么最终报告覆盖检查要求出现 `` `metric_name` ``，而不是只检查正文是否包含
+`metric_name` 这个普通子串？
+
+### 已知限制
+
+- 本轮只做离线契约与观测回归，没有调用真实 DeepSeek/Qwen/SEC/Serper；真实供应商是否返回
+  cached token 仍以其实际 usage 为准。
+- 报告指标门禁验证“指标被显式展示”，不验证模型对指标的自然语言解释是否完全正确；后者属于
+  P06-11 的公司对照评测维度。

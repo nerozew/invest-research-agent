@@ -23,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Deque, Tuple
 
+from opentelemetry import context as otel_context
+
 from invest_research.agents.llm_factory import LLMConfig
 from invest_research.infrastructure.observability.execution_timeline import (
     ExecutionTimelineSink,
@@ -93,12 +95,19 @@ class LlmFullObserver:
         agent_roles: dict[str, str] | None = None,
         timeline: ExecutionTimelineSink | None = None,
         diagnostics_provider: Callable[[], Any] | None = None,
+        parent_context: Any | None = None,
     ) -> None:
         self._config = config
         self._agent_roles = dict(agent_roles or {})
         self._timeline = timeline
         # P06-11K-4：惰性读取当前 Job 的 DiagnosticCapture（tool/LLM 摘要捕获）。
         self._diagnostics_provider = diagnostics_provider
+        # CrewAI 事件回调可能在框架内部切换 Context，不能假定 Started handler
+        # 仍处于 stage.* 当前 span。Observer 在阶段内构造时捕获父 Context，后续
+        # LLM/Tool span 显式挂到该父节点，避免 Jaeger 出现孤立单 span trace。
+        self._parent_context = (
+            parent_context if parent_context is not None else otel_context.get_current()
+        )
         self._llm_pending: dict[str, Deque[_LlmSpanHandle]] = {
             "research": deque(),
             "analysis": deque(),
@@ -202,6 +211,7 @@ class LlmFullObserver:
             tracer = get_tracer("llm")
             span = tracer.start_span(
                 "llm.request",
+                context=self._parent_context,
                 attributes={
                     "llm.model": model,
                     "llm.role": role,
@@ -345,6 +355,7 @@ class LlmFullObserver:
             tracer = get_tracer("crewai")
             span = tracer.start_span(
                 f"crewai.tool.{name}",
+                context=self._parent_context,
                 attributes={
                     "tool.name": name,
                     "crewai.tool.call_index": self._tool_call_index,

@@ -261,6 +261,7 @@ class ReportDraftAssembler:
         claim_keys: Iterable[str] | None = None,
         finish_reason: str | None = None,
         registry: Any | None = None,
+        require_metric_coverage: bool = False,
     ) -> ReportDraft:
         """把 Writer 的原始 Markdown 组装为合法 ReportDraft。
 
@@ -291,6 +292,13 @@ class ReportDraftAssembler:
             raise ReportAssemblerError(
                 "REPORT_INVALID", "Writer 输出缺少任何必需章节，不是合法报告正文"
             )
+        if require_metric_coverage and analysis_pack is not None:
+            missing_metrics = missing_report_metric_names(text, analysis_pack)
+            if missing_metrics:
+                raise ReportAssemblerError(
+                    "REPORT_METRICS_MISSING",
+                    "Writer 报告未覆盖确定性核心指标代码: " + ", ".join(missing_metrics),
+                )
 
         identity = research_pack.company_identity if research_pack is not None else None
         as_of_date = (
@@ -312,3 +320,20 @@ class ReportDraftAssembler:
             markdown=text,
             citation_keys=citation_keys,
         )
+
+
+def missing_report_metric_names(
+    markdown: str, analysis_pack: FinancialAnalysisPack | None
+) -> list[str]:
+    """返回报告未以代码标记展示的确定性指标；空分析包不制造额外失败。
+
+    Writer 提示词要求指标代码使用反引号，例如 ``revenue_growth``。这里只接受
+    同样的显式标记，避免正文偶然提到一个英文单词就被误判为“已展示指标”。
+    """
+    if analysis_pack is None or not analysis_pack.metrics:
+        return []
+    return [
+        metric.metric_name
+        for metric in analysis_pack.metrics
+        if f"`{metric.metric_name}`" not in markdown
+    ]

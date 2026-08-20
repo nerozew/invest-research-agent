@@ -494,3 +494,55 @@ Writer 用 ReportDraftAssembler、双 Job 状态隔离、Qwen 回归、fake E2E�
 **限制**：未做真实 Docker live 故障注入验收（遵守限制，不执行 live/不 docker down）；worker 工厂注入点用源码文本静态断言（避免 import worker 触发 Celery app 构建 + DB 探活副作用）；fake 故障注入用 LiveResearchFlowRunner + fake crew + InMemorySpanExporter 隔离验证。
 
 **下一候选**：P06-11（10 家公司效率对照实验）或 P06-12（完善 README 演示、架构图和限制）。
+## P06-11M：确定性财务指标装配
+
+真实成功任务曾出现 `FinancialAnalysisPack.metrics=[]`。根因不是 fake 或模型未联网，
+而是 FinancialCalculator 的 CrewAI/Pydantic Schema 无法生成，且 assembler 原样接受
+LLM 的空 metric_results。现已改为从预取的可信 SEC facts 确定性计算固定 10 项指标，
+DeepSeek 与 Qwen 路径统一接线；requested_forms 同时进入事实筛选和缓存键，保证
+10-K 年度同比保留两个可比期间。缺失输入只产生 NOT_COMPUTABLE 和明确 limitations。
+
+### P06-11M 真实 Docker fast 验收（2026-08-20）
+
+- `agent` 栈重建 API/Worker 后，宿主机与 Worker 内 `analysis_metrics.py` SHA256 一致；
+  脱敏配置确认 `FLOW_MODE=live`、供应商/三角色模型均为 DeepSeek V4 Flash。
+- MSFT / 2025-10-31 / 10-K / fast：job
+  `f8b3757b-7eb4-463b-bdd1-fd65dcde3057`，102.694 秒后 succeeded；00-07
+  八步骤均一次成功，08_report.md（8523 B）和 09_report.pdf（1792046 B，`%PDF-`）齐全。
+- `04_financial_analysis_pack.json` 含固定 10 项指标，10/10 均为 `computed`；每项
+  `inputs_json.source_facts` 含 2-3 条 SEC 来源。质量门禁 all_passed=True、published。
+- 真实验收发现 Finalizer 示例占位限制会污染 complete Pack；已在确定性 assembler
+  精确过滤该固定占位符，同时保留真实业务限制。相关测试 19 passed、Ruff/mypy 通过；
+  未为此追加第二次付费调用。
+- Jaeger 主 trace `4313ddfc828b85026bce8ff43ad849ed` 含 18 spans，可看到各业务阶段；
+  但 CrewAI LLM/tool 的部分 span 仍以独立 trace 落库。Prometheus 能看到本任务计数，
+  但 direct Writer 不在 CrewAI LLM 事件指标中且 token usage 为 0。
+
+**下一候选任务**：补“AnalysisPack 10 项指标必须被 Writer 消费/报告展示”的确定性契约；
+再修 direct Writer 的 LLM token 观测与 LLM/tool span 上下文传播，之后才进入 10 公司 live 对照。
+
+## P06-11N：指标消费与 Direct Writer 可观测性收口（✅）
+
+- WriterContextBuilder 现在把 AnalysisPack.metrics 作为硬保留区写入上下文，并记录
+  `metric_count`；写作规则要求关键指标表覆盖全部指标及反引号代码。
+- ReportDraftAssembler 在生产 Direct Writer 路径和 Qwen native 路径逐项检查指标代码；缺失
+  指标稳定归类 `REPORT_METRICS_MISSING`，Direct Writer 只允许复用同一上下文重试一次，不重跑
+  Research/Analysis，也不伪造指标。
+- Direct Writer 在真实 chat completion 边界写统一 `llm_requests_total`、LLM 耗时和
+  input/output/cached_input token；usage 全部缺失时只写 missing 指标，不填假 0。
+- LlmFullObserver 在创建时捕获 OTel 父 context，LLM/tool 事件回调显式使用该 context 创建 span，
+  修复 callback 在阶段上下文退出后产生孤儿 trace 的问题。
+- 验证：P06-11N/P06-11J/P06-11I 专项 31 passed；相关回归 127 passed；完整离线套件
+  1282 passed/19 skipped；Ruff、mypy src（142 files）全绿；隔离 benchmark Docker fake
+  smoke 1/1 succeeded，Worker 日志外部调用命中数为 0，隔离栈已 `down`（未带 `-v`）。
+- 部署：确认主栈无 running Job 后，仅强制重建 `agent-api-1`/`agent-worker-1`；二者 healthy，
+  `/health` 与 `/readiness` 通过，4 个关键源码的宿主机/Worker SHA256 全部一致。主栈仍为
+  `FLOW_MODE=live`，本轮没有创建 live Job，因此没有产生付费调用。
+
+### 已知限制与下一步
+
+- 本轮未执行 live；真实验收时应确认 08_report.md 含 10 个反引号指标代码、Prometheus 的
+  Direct Writer provider/model/role token 非空（若供应商确实返回 usage），并在 Jaeger 确认
+  llm/tool span 与主 flow trace 同 trace_id。
+- 完成一次受控 fast live smoke 后，再进入 P06-11 的 10 公司效率/质量对照，避免把单公司成功
+  当作总体成功率。

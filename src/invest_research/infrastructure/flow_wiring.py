@@ -59,6 +59,7 @@ from invest_research.agents.writer_task import ArtifactLoader, build_writer_task
 from invest_research.application.analysis_assembler import (
     AnalysisAssemblerError,
     AnalysisPackAssembler,
+    canonicalize_analysis_pack,
     parse_fact_records,
 )
 from invest_research.application.diagnostics.capture import DiagnosticCapture
@@ -70,6 +71,7 @@ from invest_research.application.progress import ProgressSink
 from invest_research.application.report_draft_assembler import (
     ReportAssemblerError,
     ReportDraftAssembler,
+    missing_report_metric_names,
 )
 from invest_research.application.research_assembler import (
     ResearchAssemblerError,
@@ -1186,7 +1188,11 @@ class LiveResearchFlowRunner:
             structured_output_mode(ctx.effective_config, LLMRole.ANALYSIS)
             == StructuredOutputMode.NATIVE_PYDANTIC
         ):
-            pack = _to_packed(raw, FinancialAnalysisPack)
+            pack = canonicalize_analysis_pack(
+                _to_packed(raw, FinancialAnalysisPack),
+                ctx.analysis_facts,
+                job_id=str(self.job_id or "analysis"),
+            )
             if self._diagnostics is not None:
                 self._diag_capture(
                     stage="04_analysis",
@@ -1203,7 +1209,11 @@ class LiveResearchFlowRunner:
         try:
             draft = finalizer.finalize(raw, AnalysisSelectionDraft, role="analysis")
             assert isinstance(draft, AnalysisSelectionDraft)
-            pack = AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
+            pack = AnalysisPackAssembler().assemble(
+                draft,
+                ctx.analysis_facts,
+                job_id=str(self.job_id or "analysis"),
+            )
             if self._diagnostics is not None:
                 self._diag_capture(
                     stage="04_analysis",
@@ -1268,7 +1278,15 @@ class LiveResearchFlowRunner:
         self._writer_agent = task.agent
         inputs = self._build_crew_inputs(request, ctx.prefetch_result)
         raw = self._kickoff_single(crew, inputs)
-        return _to_packed(raw, ReportDraft)
+        draft = _to_packed(raw, ReportDraft)
+        missing_metrics = missing_report_metric_names(draft.markdown, state.analysis_pack)
+        if missing_metrics:
+            raise LiveFlowExecutionError(
+                "Writer 报告未覆盖确定性核心指标代码: " + ", ".join(missing_metrics),
+                error_code="REPORT_METRICS_MISSING",
+                failure_stage="05_writer",
+            )
+        return draft
 
     def _exec_writer_stage_direct(
         self,
@@ -1304,14 +1322,22 @@ class LiveResearchFlowRunner:
                     "context_chars": 0,
                     "estimated_tokens": 0,
                     "fact_count": 0,
+                    "metric_count": 0,
                     "source_count": 0,
                     "citation_count": len(registry.keys()),
                     "status": "running",
                 },
-            ):
+            ) as span:
                 context = WriterContextBuilder().build(
                     request, state.research_pack, state.analysis_pack, registry
                 )
+                span.set_attribute("context_chars", context.context_chars)
+                span.set_attribute("estimated_tokens", context.estimated_tokens)
+                span.set_attribute("fact_count", context.fact_count)
+                span.set_attribute("metric_count", context.metric_count)
+                span.set_attribute("source_count", context.source_count)
+                span.set_attribute("citation_count", context.citation_count)
+                span.set_attribute("status", "success")
         except Exception:  # noqa: BLE001 - 观测尽力而为，构建失败不掩盖业务错误
             context = WriterContextBuilder().build(
                 request, state.research_pack, state.analysis_pack, registry
@@ -1328,6 +1354,7 @@ class LiveResearchFlowRunner:
                     "context_chars": context.context_chars,
                     "estimated_tokens": context.estimated_tokens,
                     "fact_count": context.fact_count,
+                    "metric_count": context.metric_count,
                     "source_count": context.source_count,
                     "citation_count": context.citation_count,
                 },
@@ -1341,7 +1368,9 @@ class LiveResearchFlowRunner:
             dispatch = DirectLlmWriterDispatch(ctx.effective_config)
 
         # 3. 第一次无工具调用。
-        first_result = self._dispatch_direct_writer(dispatch, request, context)
+        first_result = self._dispatch_direct_writer(
+            dispatch, request, context, ctx.effective_config
+        )
         retry_count = 0
         error_summary: str | None = None
 
@@ -1412,7 +1441,11 @@ class LiveResearchFlowRunner:
             context.context_chars,
         )
         second_result = self._dispatch_direct_writer(
-            dispatch, request, context, error_summary=error_summary
+            dispatch,
+            request,
+            context,
+            ctx.effective_config,
+            error_summary=error_summary,
         )
         try:
             return self._assemble_direct_writer(
@@ -1437,34 +1470,59 @@ class LiveResearchFlowRunner:
         dispatch: Any,
         request: ResearchRequest,
         context: Any,
+        config: LLMConfig,
         *,
         error_summary: str | None = None,
     ) -> WriterDispatchResult:
         """执行一次无工具 Writer 调用并记录 Jaeger writer.direct_llm span。"""
+        from invest_research.agents.llm_factory import LLMRole
+        from invest_research.infrastructure.observability.metrics_events import (
+            label_provider_model,
+        )
         from invest_research.infrastructure.observability.tracing import get_tracer
 
         tracer = get_tracer("writer")
         try:
+            role_config = config.config_for(LLMRole.WRITER)
+            provider, model = label_provider_model(
+                role_config.vendor, role_config.model, base_url=role_config.base_url
+            )
             with tracer.start_as_current_span(
                 "writer.direct_llm",
                 attributes={
                     "context_chars": context.context_chars,
                     "estimated_tokens": context.estimated_tokens,
                     "fact_count": context.fact_count,
+                    "metric_count": context.metric_count,
                     "source_count": context.source_count,
                     "citation_count": context.citation_count,
                     "retry_count": int(error_summary is not None),
                     "status": "running",
+                    "llm.provider": provider,
+                    "llm.model": model,
+                    "llm.role": "writer",
                 },
-            ):
+            ) as span:
                 raw_result = dispatch.dispatch(request, context, error_summary=error_summary)
                 assert isinstance(raw_result, WriterDispatchResult)
                 result = raw_result
-            status = self._direct_status(result)
-            _record_direct_metrics(result, status)
+                status = self._direct_status(result)
+                span.set_attribute("status", status)
+                span.set_attribute("llm.status", "success")
+                span.set_attribute("llm.duration_s", result.duration_s)
+                span.set_attribute("output_chars", len(result.markdown))
+                if result.input_tokens is not None:
+                    span.set_attribute("llm.tokens.input", result.input_tokens)
+                if result.output_tokens is not None:
+                    span.set_attribute("llm.tokens.output", result.output_tokens)
+                if result.cached_input_tokens is not None:
+                    span.set_attribute(
+                        "llm.tokens.cached_input", result.cached_input_tokens
+                    )
+            _record_direct_metrics(result, status, config)
             return result
         except WriterDispatchError as exc:
-            _record_direct_error(exc.error_code, context)
+            _record_direct_error(exc.error_code, context, config)
             raise LiveFlowExecutionError(
                 str(exc),
                 error_code=exc.error_code,
@@ -1493,6 +1551,7 @@ class LiveResearchFlowRunner:
                     "context_chars": context.context_chars,
                     "estimated_tokens": context.estimated_tokens,
                     "fact_count": context.fact_count,
+                    "metric_count": context.metric_count,
                     "source_count": context.source_count,
                     "citation_count": context.citation_count,
                     "output_chars": int(len(result.markdown)),
@@ -1508,6 +1567,7 @@ class LiveResearchFlowRunner:
                     state.analysis_pack,
                     registry=registry,
                     finish_reason=finish_reason,
+                    require_metric_coverage=True,
                 )
         except ReportAssemblerError as exc:
             if tracer is not None:
@@ -2279,14 +2339,22 @@ class LiveResearchFlowRunner:
                     failure_stage="04_analysis",
                 ) from exc
             try:
-                return AnalysisPackAssembler().assemble(draft, ctx.analysis_facts)
+                return AnalysisPackAssembler().assemble(
+                    draft,
+                    ctx.analysis_facts,
+                    job_id=str(self.job_id or "analysis"),
+                )
             except AnalysisAssemblerError as exc:
                 raise LiveFlowExecutionError(
                     str(exc),
                     error_code=exc.error_code,
                     failure_stage="04_analysis",
                 ) from exc
-        return _to_packed(obj, FinancialAnalysisPack)
+        return canonicalize_analysis_pack(
+            _to_packed(obj, FinancialAnalysisPack),
+            ctx.analysis_facts,
+            job_id=str(self.job_id or "analysis"),
+        )
 
     def _extract_research_pack(
         self, obj: Any, request: ResearchRequest, ctx: _RunContext
@@ -2581,15 +2649,23 @@ class LiveResearchFlowRunner:
             store.write(key, data, overwrite=True)
 
 
-def _record_direct_metrics(result: WriterDispatchResult, status: str) -> None:
+def _record_direct_metrics(
+    result: WriterDispatchResult, status: str, config: LLMConfig
+) -> None:
     """Direct Writer 单次调用完成后写入低基数指标（尽力而为，不改变业务结果）。
 
     - 只记录 status / duration / output_chars / tokens，绝不记录正文或公司名；
     - status 白名单由 metrics_events 内部过滤（success/empty/length）。
     """
     try:
+        from invest_research.agents.llm_factory import LLMRole
         from invest_research.infrastructure.observability.metrics_events import (
+            count_llm_request,
+            count_llm_tokens,
+            count_llm_usage_missing,
             count_writer_direct_request,
+            label_provider_model,
+            observe_llm_duration,
             observe_writer_direct_duration,
             observe_writer_direct_output_chars,
         )
@@ -2597,18 +2673,43 @@ def _record_direct_metrics(result: WriterDispatchResult, status: str) -> None:
         count_writer_direct_request(status)
         observe_writer_direct_duration(status, result.duration_s)
         observe_writer_direct_output_chars(status, int(len(result.markdown)))
+        role_config = config.config_for(LLMRole.WRITER)
+        provider, model = label_provider_model(
+            role_config.vendor, role_config.model, base_url=role_config.base_url
+        )
+        count_llm_request(provider, model, "writer", "success")
+        observe_llm_duration(provider, model, "writer", "success", result.duration_s)
+        token_values = {
+            "input": result.input_tokens,
+            "output": result.output_tokens,
+            "cached_input": result.cached_input_tokens,
+        }
+        if all(value is None for value in token_values.values()):
+            count_llm_usage_missing(provider, model, "writer")
+        else:
+            for token_type, amount in token_values.items():
+                if amount is not None:
+                    count_llm_tokens(provider, model, "writer", token_type, amount)
     except Exception:  # noqa: BLE001 - 指标写入尽力而为
         _LOGGER.warning("writer direct metrics recording skipped")
 
 
-def _record_direct_error(error_code: str, context: Any) -> None:
+def _record_direct_error(error_code: str, context: Any, config: LLMConfig) -> None:
     """Direct Writer LLM 调用失败时记录低基数指标（尽力而为）。"""
     try:
+        from invest_research.agents.llm_factory import LLMRole
         from invest_research.infrastructure.observability.metrics_events import (
+            count_llm_request,
             count_writer_direct_request,
+            label_provider_model,
         )
 
         count_writer_direct_request("error")
+        role_config = config.config_for(LLMRole.WRITER)
+        provider, model = label_provider_model(
+            role_config.vendor, role_config.model, base_url=role_config.base_url
+        )
+        count_llm_request(provider, model, "writer", "failure")
     except Exception:  # noqa: BLE001 - 指标写入尽力而为
         _LOGGER.warning("writer direct error metrics recording skipped")
 

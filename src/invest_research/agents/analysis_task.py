@@ -66,9 +66,9 @@ _CONCEPTS_V1_PATH = (
 @tool("FinancialFactQuery")
 def financial_fact_query(
     concept: str,
-    available_concepts: tuple[str, ...],
+    available_concepts: list[str],
     prefer_annual: bool = True,
-    period_end: date | None = None,
+    period_end: str | None = None,
 ) -> dict[str, object]:
     """查询财务事实的优先 concept（确定性，不猜数）。
 
@@ -78,7 +78,7 @@ def financial_fact_query(
       交由计算层 NOT_COMPUTABLE）。
     """
     mapping: ConceptMapping = load_concept_mapping(_CONCEPTS_V1_PATH)
-    picked = select_concept(mapping, concept, available_concepts)
+    picked = select_concept(mapping, concept, tuple(available_concepts))
     return {"selected_concept": picked}
 
 
@@ -86,8 +86,21 @@ def financial_fact_query(
 def financial_calculator(
     metric_name: str,
     job_id: str,
-    period_end: date,
-    **inputs: str,
+    period_end: str,
+    current: str | None = None,
+    prior: str | None = None,
+    revenue: str | None = None,
+    gross_profit: str | None = None,
+    operating_income: str | None = None,
+    net_income: str | None = None,
+    current_assets: str | None = None,
+    current_liabilities: str | None = None,
+    total_liabilities: str | None = None,
+    total_assets: str | None = None,
+    total_assets_begin: str | None = None,
+    total_assets_end: str | None = None,
+    operating_cash_flow: str | None = None,
+    capital_expenditure: str | None = None,
 ) -> dict[str, object]:
     """确定性财务指标计算器（LLM 不自算，Decimal / 版本化公式）。
 
@@ -95,8 +108,12 @@ def financial_calculator(
     net_margin / net_income_growth / current_ratio / asset_liability_ratio /
     operating_cash_flow_ratio / free_cash_flow / roa。
 
-    ``inputs`` 传字符串形式的数值（如 "100" / "-10"），工具内部转 Decimal 并计算，
+    数值参数使用显式、可选的字符串字段（如 "100" / "-10"），工具内部转 Decimal 并计算，
     返回 ``MetricResult.model_dump()``（含 formula_version / inputs_json / status）。
+
+    ``period_end`` 在工具 JSON Schema 中使用 ISO 日期字符串，避免 CrewAI 1.6.1
+    在 ``from __future__ import annotations`` 下无法解析局部 ``date`` forward reference。
+    显式数值字段同时避免旧 ``**inputs`` 被错误生成成单个必填字符串 ``inputs``。
     """
     # 允许的最大白名单：任何不在 PRD §8 的指标名 → 明确拒绝（不静默返回）
     _ALLOWED_METRICS = frozenset(
@@ -119,49 +136,83 @@ def financial_calculator(
             "reason": f"不支持的指标: {metric_name}（FinancialCalculator 仅支持 PRD §8 白名单）",
         }
 
-    d = {k: Decimal(v) for k, v in inputs.items()}
+    resolved_period_end = (
+        period_end if isinstance(period_end, date) else date.fromisoformat(period_end)
+    )
+    raw_inputs = {
+        "current": current,
+        "prior": prior,
+        "revenue": revenue,
+        "gross_profit": gross_profit,
+        "operating_income": operating_income,
+        "net_income": net_income,
+        "current_assets": current_assets,
+        "current_liabilities": current_liabilities,
+        "total_liabilities": total_liabilities,
+        "total_assets": total_assets,
+        "total_assets_begin": total_assets_begin,
+        "total_assets_end": total_assets_end,
+        "operating_cash_flow": operating_cash_flow,
+        "capital_expenditure": capital_expenditure,
+    }
+    d = {key: Decimal(value) for key, value in raw_inputs.items() if value is not None}
 
     if metric_name == "revenue_growth":
         result = compute_revenue_growth(
-            d.get("current"), d.get("prior"), job_id=job_id, period_end=period_end
+            d.get("current"), d.get("prior"), job_id=job_id, period_end=resolved_period_end
         )
     elif metric_name == "gross_margin":
         result = compute_gross_margin(
-            d.get("revenue"), d.get("gross_profit"), job_id=job_id, period_end=period_end
+            d.get("revenue"),
+            d.get("gross_profit"),
+            job_id=job_id,
+            period_end=resolved_period_end,
         )
     elif metric_name == "operating_margin":
         result = compute_operating_margin(
-            d.get("revenue"), d.get("operating_income"), job_id=job_id, period_end=period_end
+            d.get("revenue"),
+            d.get("operating_income"),
+            job_id=job_id,
+            period_end=resolved_period_end,
         )
     elif metric_name == "net_margin":
         result = compute_net_margin(
-            d.get("revenue"), d.get("net_income"), job_id=job_id, period_end=period_end
+            d.get("revenue"),
+            d.get("net_income"),
+            job_id=job_id,
+            period_end=resolved_period_end,
         )
     elif metric_name == "net_income_growth":
         result = compute_net_income_growth(
-            d.get("current"), d.get("prior"), job_id=job_id, period_end=period_end
+            d.get("current"), d.get("prior"), job_id=job_id, period_end=resolved_period_end
         )
     elif metric_name == "current_ratio":
         result = compute_current_ratio(
             d.get("current_assets"),
             d.get("current_liabilities"),
             job_id=job_id,
-            period_end=period_end,
+            period_end=resolved_period_end,
         )
     elif metric_name == "asset_liability_ratio":
         result = compute_asset_liability_ratio(
-            d.get("total_liabilities"), d.get("total_assets"), job_id=job_id, period_end=period_end
+            d.get("total_liabilities"),
+            d.get("total_assets"),
+            job_id=job_id,
+            period_end=resolved_period_end,
         )
     elif metric_name == "operating_cash_flow_ratio":
         result = compute_operating_cash_flow_ratio(
-            d.get("operating_cash_flow"), d.get("revenue"), job_id=job_id, period_end=period_end
+            d.get("operating_cash_flow"),
+            d.get("revenue"),
+            job_id=job_id,
+            period_end=resolved_period_end,
         )
     elif metric_name == "free_cash_flow":
         result = compute_free_cash_flow(
             d.get("operating_cash_flow"),
             d.get("capital_expenditure"),
             job_id=job_id,
-            period_end=period_end,
+            period_end=resolved_period_end,
         )
     elif metric_name == "roa":
         result = compute_roa(
@@ -169,7 +220,7 @@ def financial_calculator(
             d.get("total_assets_begin"),
             d.get("total_assets_end"),
             job_id=job_id,
-            period_end=period_end,
+            period_end=resolved_period_end,
         )
     else:  # pragma: no cover - 已在白名单前置拦截
         raise ValueError(metric_name)

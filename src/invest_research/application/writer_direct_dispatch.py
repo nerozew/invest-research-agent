@@ -56,7 +56,7 @@ class WriterDispatchResult:
 
     - ``markdown``：模型输出的普通 Markdown 正文（可为空/截断，由调用方校验）；
     - ``finish_reason``：供应商返回的 finish_reason（"stop"/"length"/其它）；
-    - ``usage``：供应商返回的 usage 摘要（input_tokens/output_tokens，可能为 None）；
+    - ``usage``：供应商返回的 usage 摘要（input/output/cached_input，可能为 None）；
     - ``duration_s``：本次模型调用实测耗时（秒，本地测量）。
     """
 
@@ -64,6 +64,7 @@ class WriterDispatchResult:
     finish_reason: str = "stop"
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cached_input_tokens: int | None = None
     duration_s: float = 0.0
 
 

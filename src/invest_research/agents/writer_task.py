@@ -259,6 +259,8 @@ def build_writer_task(
         "必须读取 analysis_pack.completeness 并按状态组织报告：complete 正常撰写财务表现；"
         "partial 把 limitations 中的缺失数据及原因写入数据限制章节；unavailable 在财务/"
         "指标章节仅说明数据不可用（引用 unavailable_reason），不得推断或编造财务数据。\n"
+        "若 analysis_pack.metrics 非空，关键指标表必须逐项覆盖每个 metric_name，"
+        "并原样保留反引号包裹的指标代码、status/value/unit；不得静默遗漏不可计算项。\n"
         "要求：每个事实带 citation key，区分事实/分析/风险/数据限制，"
         "包含非投资建议声明与数据截止日。"
     )

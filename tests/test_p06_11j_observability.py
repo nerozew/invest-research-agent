@@ -69,6 +69,32 @@ class TestLlm:
         assert len(spans) == 1
         assert spans[0].attributes.get("llm.status") == "success"
 
+    def test_event_callback_span_keeps_captured_stage_parent(
+        self, memory_exporter: InMemorySpanExporter
+    ) -> None:
+        """CrewAI 回调脱离当前 Context 后，LLM span 仍属于创建时的 stage trace。"""
+        with stage_span("stage.research"):
+            obs = LlmFullObserver(CFG, agent_roles={"a1": "research"})
+        obs._on_llm_started(
+            None, _evt(type="start", model="m", agent_id="a1", agent_role="research")
+        )
+        obs._on_llm_completed(
+            None,
+            _evt(
+                type="completed",
+                model="m",
+                agent_id="a1",
+                agent_role="research",
+                response=SimpleNamespace(content="ok", usage=None),
+                call_type="llm_call",
+            ),
+        )
+        spans = memory_exporter.get_finished_spans()
+        stage = next(span for span in spans if span.name == "stage.research")
+        llm = next(span for span in spans if span.name == "llm.request")
+        assert llm.parent.span_id == stage.context.span_id
+        assert llm.context.trace_id == stage.context.trace_id
+
 
 class TestStage:
     def test_parent_child(self, memory_exporter: InMemorySpanExporter) -> None:
@@ -104,6 +130,27 @@ class TestTool:
         ]
         assert len(spans) == 1
         assert spans[0].attributes.get("status") == "success"
+
+    def test_tool_callback_span_keeps_captured_stage_parent(
+        self, memory_exporter: InMemorySpanExporter
+    ) -> None:
+        with stage_span("stage.analysis"):
+            obs = LlmFullObserver(CFG, agent_roles={})
+        obs._on_tool_started(None, _evt(type="start", tool_name="FinancialCalculator"))
+        obs._on_tool_finished(
+            None,
+            _evt(
+                type="finished",
+                tool_name="FinancialCalculator",
+                output="ok",
+                from_cache=False,
+            ),
+        )
+        spans = memory_exporter.get_finished_spans()
+        stage = next(span for span in spans if span.name == "stage.analysis")
+        tool = next(span for span in spans if span.name == "crewai.tool.FinancialCalculator")
+        assert tool.parent.span_id == stage.context.span_id
+        assert tool.context.trace_id == stage.context.trace_id
 
 
 class TestGrafana:

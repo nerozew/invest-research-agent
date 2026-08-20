@@ -103,7 +103,11 @@ def _serialize_search_result(result: Any) -> str:
     )
 
 
-def _serialize_facts(result: Any, as_of_date: str | None) -> str:
+def _serialize_facts(
+    result: Any,
+    as_of_date: str | None,
+    requested_forms: tuple[str, ...] | None = None,
+) -> str:
     """序列化有限、可追溯的 SEC XBRL 事实集。
 
     只选 concepts_v1 中的指标候选，每个指标选实际存在的最高
@@ -134,6 +138,13 @@ def _serialize_facts(result: Any, as_of_date: str | None) -> str:
             key=lambda fact: fact.period_end or fact.instant_date or date.min,
             reverse=True,
         )
+        if requested_forms:
+            normalized = {form.upper().removesuffix("/A") for form in requested_forms}
+            candidates = [
+                fact
+                for fact in candidates
+                if (fact.form_type or "").upper().removesuffix("/A") in normalized
+            ]
         seen_periods: set[tuple[object, ...]] = set()
         for fact in candidates:
             period_key = (
@@ -690,11 +701,19 @@ def build_research_tools(
         )
 
     @tool("SECCompanyFacts")
-    def sec_company_facts(cik: str, as_of_date: str | None = None) -> str:
+    def sec_company_facts(
+        cik: str,
+        as_of_date: str | None = None,
+        requested_forms: str = "10-K,10-Q",
+    ) -> str:
         """拉取 XBRL Company Facts 摘要（按 as_of_date 过滤 + 条数上限）。"""
         _count(stats, "sec_company_facts_calls")
+        forms = tuple(form.strip() for form in requested_forms.split(",") if form.strip())
         cached, key = _cached_lookup(
-            cache, recorder, "sec_company_facts", {"cik": cik, "as_of_date": as_of_date}
+            cache,
+            recorder,
+            "sec_company_facts",
+            {"cik": cik, "as_of_date": as_of_date, "requested_forms": requested_forms},
         )
         if cached is not None:
             return cached
@@ -708,7 +727,7 @@ def build_research_tools(
             )
             with _timed(recorder, "sec_company_facts"):
                 result = facts_tool.execute(req)
-            text = _serialize_facts(result, as_of_date)
+            text = _serialize_facts(result, as_of_date, forms or None)
             if cache is not None and key is not None and result.kind == "success":
                 cache.put(key, text)
             _record_tool_metrics("sec_company_facts", result)
@@ -961,7 +980,10 @@ def resolve_and_prefetch(
 
     def fetch_facts() -> None:
         nonlocal financial_facts_summary
-        key = cache.key("sec_company_facts", {"cik": cik, "as_of_date": as_of})
+        key = cache.key(
+            "sec_company_facts",
+            {"cik": cik, "as_of_date": as_of, "requested_forms": forms_str},
+        )
         cached = cache.get(key)
         if cached is not None:
             financial_facts_summary = cached
@@ -976,7 +998,9 @@ def resolve_and_prefetch(
                 FetchFactsRequest(cik=cik, as_of_date=request.as_of_date)
             )
         if result.kind == "success":
-            financial_facts_summary = _serialize_facts(result, as_of)
+            financial_facts_summary = _serialize_facts(
+                result, as_of, request.requested_forms or None
+            )
             cache.put(key, financial_facts_summary)
         else:
             _LOGGER.warning("prefetch sec_company_facts 失败: %s", result.error.message)

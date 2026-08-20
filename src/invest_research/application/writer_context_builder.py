@@ -38,6 +38,8 @@ from invest_research.application.citation_registry import CitationRegistry
 from invest_research.domain.models import (
     AnalysisCompleteness,
     FinancialAnalysisPack,
+    MetricResult,
+    MetricStatus,
     ResearchPack,
     ResearchRequest,
 )
@@ -55,7 +57,9 @@ _WRITING_RULES = (
     "必须包含以下章节：" + _REQUIRED_SECTIONS_TEXT + "。\n"
     "禁止给出买入/卖出建议、目标价、持仓比例或确定性收益承诺；必须保留非投资建议声明。\n"
     "引用格式：只能使用下方 citation keys 中列出的合法 key，写成 [src_<hash>] 或 "
-    "[fr_<hash>]；禁止自行生成、拼接或猜测任何 key。"
+    "[fr_<hash>]；禁止自行生成、拼接或猜测任何 key。\n"
+    "关键指标表必须覆盖下方‘确定性核心指标’中的每一项，并在每行原样保留反引号包裹的"
+    "指标代码（例如 `revenue_growth`）；computed 写真实值，其他状态如实写不可计算及原因。"
 )
 
 # 估算公式：中文约 1~2 字符/token、英文约 4 字符/token；取 /3 为保守统一估算。
@@ -91,6 +95,7 @@ class BuiltWriterContext:
     context_chars: int
     estimated_tokens: int
     fact_count: int
+    metric_count: int
     source_count: int
     citation_count: int
     truncated: bool
@@ -142,6 +147,47 @@ def _fmt_analysis_status(pack: FinancialAnalysisPack | None) -> str:
     return "\n".join(lines)
 
 
+_METRIC_LABELS: dict[str, str] = {
+    "revenue_growth": "收入增长率",
+    "gross_margin": "毛利率",
+    "operating_margin": "营业利润率",
+    "net_margin": "净利率",
+    "net_income_growth": "净利润增长率",
+    "current_ratio": "流动比率",
+    "asset_liability_ratio": "资产负债率",
+    "operating_cash_flow_ratio": "经营现金流比率",
+    "free_cash_flow": "自由现金流",
+    "roa": "总资产收益率（ROA）",
+}
+
+
+def _fmt_metric(metric: MetricResult) -> str:
+    """把确定性 MetricResult 压缩为一行，保留可验证指标代码与计算状态。"""
+    label = _METRIC_LABELS.get(metric.metric_name, metric.metric_name)
+    value = str(metric.value) if metric.status == MetricStatus.COMPUTED else "不可计算"
+    parts = [
+        f"code=`{metric.metric_name}`",
+        f"name={label}",
+        f"status={metric.status.value}",
+        f"value={value}",
+        f"unit={metric.unit}",
+        f"period_end={metric.period_end.isoformat()}",
+        f"formula={metric.formula_version}",
+    ]
+    source_facts = metric.inputs_json.get("source_facts")
+    if isinstance(source_facts, list):
+        concepts = [
+            str(item.get("concept"))
+            for item in source_facts
+            if isinstance(item, dict) and item.get("concept")
+        ]
+        if concepts:
+            parts.append("source_concepts=" + ",".join(concepts))
+    if metric.explanation:
+        parts.append("explanation=" + metric.explanation)
+    return "；".join(parts)
+
+
 class WriterContextBuilder:
     """确定性构建紧凑写作上下文（每次调用产出独立文本，无内部可变状态跨调用）。"""
 
@@ -174,6 +220,12 @@ class WriterContextBuilder:
         citation_section = self._citation_section(citation_registry)
         hard_sections.append(citation_section)
 
+        # 4. 确定性核心指标是 Writer 的必需业务输入：不能像来源摘要一样静默裁剪。
+        # 指标通常固定为 10 项；若连同其它硬块超预算，明确失败并要求调整预算。
+        metric_section = self._metric_section(analysis_pack)
+        if metric_section:
+            hard_sections.append(metric_section)
+
         hard_text = "\n\n".join(hard_sections)
         if len(hard_text) > self._limits.max_chars:
             raise WriterContextBuildError(
@@ -186,13 +238,13 @@ class WriterContextBuilder:
         body_sections: list[str] = []
         dropped: list[str] = []
 
-        # 4. 财务事实（优先级 2；按 max_facts 条数 + 预算裁剪）
+        # 5. 财务事实（优先级 2；按 max_facts 条数 + 预算裁剪）
         self._append_facts_section(body_sections, dropped, analysis_pack, hard_text)
 
-        # 5. 限制与不可用原因（优先级 4；与分析状态合并展示）
+        # 6. 限制与不可用原因（优先级 4；与分析状态合并展示）
         self._append_limits_section(body_sections, analysis_pack)
 
-        # 6. 来源（优先级 3；按 max_sources + 摘要预算裁剪）
+        # 7. 来源（优先级 3；按 max_sources + 摘要预算裁剪）
         self._append_sources_section(body_sections, dropped, research_pack, hard_text)
 
         # 汇总：逐步加入 body section，超出预算即停止（确定性截断）。
@@ -214,6 +266,7 @@ class WriterContextBuilder:
             context_chars=len(output),
             estimated_tokens=estimate_tokens(output),
             fact_count=self._fact_count(analysis_pack, output),
+            metric_count=self._metric_count(analysis_pack, output),
             source_count=self._source_count(research_pack, output),
             citation_count=len(citation_registry.keys()),
             truncated=truncated or bool(dropped),
@@ -248,6 +301,14 @@ class WriterContextBuilder:
             return "citation keys：（无可用来源/事实，不得伪造任何 key，在数据限制章节如实说明）"
         # 只列出 key 本身；描述性字段按需省略（key 完整保留）。
         return "citation keys（只能复制以下合法 key）：\n" + ", ".join(keys)
+
+    @staticmethod
+    def _metric_section(analysis_pack: FinancialAnalysisPack | None) -> str:
+        if analysis_pack is None or not analysis_pack.metrics:
+            return ""
+        lines = [f"确定性核心指标（{len(analysis_pack.metrics)} 项，必须全部写入关键指标表）："]
+        lines.extend("- " + _fmt_metric(metric) for metric in analysis_pack.metrics)
+        return "\n".join(lines)
 
     def _append_facts_section(
         self,
@@ -336,6 +397,15 @@ class WriterContextBuilder:
         if research_pack is None or not output:
             return 0
         return sum(1 for line in output.splitlines() if line.startswith("- [src_"))
+
+    @staticmethod
+    def _metric_count(analysis_pack: FinancialAnalysisPack | None, output: str) -> int:
+        """统计实际写入上下文的指标代码数。"""
+        if analysis_pack is None or not output:
+            return 0
+        return sum(
+            1 for metric in analysis_pack.metrics if f"`{metric.metric_name}`" in output
+        )
 
 
 def _source_citation_key(source: Any) -> str:

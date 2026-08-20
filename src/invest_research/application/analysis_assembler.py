@@ -29,11 +29,14 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from invest_research.application.analysis_metrics import compute_deterministic_metrics
 from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import (
+    AnalysisCompleteness,
     AnalysisSelectionDraft,
     FinancialAnalysisPack,
     FinancialFact,
+    MetricStatus,
 )
 
 # fact_ref 稳定前缀（保留可读性；完整引用在 ref 中唯一）
@@ -143,6 +146,7 @@ class AnalysisPackAssembler:
         source_facts: list[FinancialFact],
         *,
         company_identity_hint: str | None = None,
+        job_id: str = "analysis",
     ) -> FinancialAnalysisPack:
         """把选择草稿 + 原始事实组装为最终 FinancialAnalysisPack。"""
         self._index = _make_fact_index(source_facts)
@@ -187,19 +191,107 @@ class AnalysisPackAssembler:
                 fact_ref=unresolved[0],
             )
 
-        # 按 draft 语义组装最终 pack（facts 全部来自原始事实）。
-        pack = FinancialAnalysisPack(
-            version="analysis_pack_v2",
-            schema_version="analysis_pack_v2",
+        # 指标不能依赖 LLM 是否恰好调用了 FinancialCalculator。LLM 只选事实，
+        # 10 项核心指标统一由本地 Decimal 公式从完整可信 source_facts 计算。
+        return _build_deterministic_pack(
             period_end=draft.period_end,
             facts=resolved,
-            metrics=list(draft.metric_results),
+            source_facts=source_facts,
             analysis_notes=draft.analysis_notes,
             limitations=list(draft.limitations),
-            completeness=draft.completeness,
             unavailable_reason=draft.unavailable_reason,
+            requested_completeness=draft.completeness,
+            job_id=job_id,
         )
-        return pack
+
+
+def canonicalize_analysis_pack(
+    pack: FinancialAnalysisPack,
+    source_facts: list[FinancialFact],
+    *,
+    job_id: str = "analysis",
+) -> FinancialAnalysisPack:
+    """让原生 Pydantic（如 Qwen）路径也使用相同的确定性指标计算。"""
+    return _build_deterministic_pack(
+        period_end=pack.period_end,
+        facts=list(pack.facts),
+        source_facts=source_facts,
+        analysis_notes=pack.analysis_notes,
+        limitations=list(pack.limitations),
+        unavailable_reason=pack.unavailable_reason,
+        requested_completeness=pack.completeness,
+        job_id=job_id,
+    )
+
+
+def _build_deterministic_pack(
+    *,
+    period_end: date,
+    facts: list[FinancialFact],
+    source_facts: list[FinancialFact],
+    analysis_notes: str | None,
+    limitations: list[str],
+    unavailable_reason: str | None,
+    requested_completeness: AnalysisCompleteness,
+    job_id: str,
+) -> FinancialAnalysisPack:
+    bundle = compute_deterministic_metrics(source_facts, job_id=job_id, as_of=period_end)
+    computed_count = sum(
+        metric.status == MetricStatus.COMPUTED for metric in bundle.metrics
+    )
+    # 删除旧版本由工具 Schema 缺陷产生的失真限制；真实缺数限制由确定性计算器重建。
+    placeholder_limitations = {
+        "部分数据不可用；请在此说明缺失项及原因",
+    }
+    cleaned = [
+        item
+        for item in limitations
+        if item.strip() not in placeholder_limitations
+        and "FinancialCalculator" not in item
+        and "Pydantic date type" not in item
+        and "date type not fully defined" not in item
+    ]
+    merged_limitations = list(dict.fromkeys([*cleaned, *bundle.limitations]))
+
+    if computed_count == len(bundle.metrics):
+        completeness = AnalysisCompleteness.COMPLETE
+        unavailable = None
+    elif requested_completeness == AnalysisCompleteness.COMPLETE and facts:
+        # 保留既有契约：complete 表示已有关键 facts 或 metrics，并不要求十项
+        # 指标全部可计算；不可计算项仍通过 limitations 如实披露。
+        completeness = AnalysisCompleteness.COMPLETE
+        unavailable = None
+    elif requested_completeness == AnalysisCompleteness.PARTIAL:
+        completeness = AnalysisCompleteness.PARTIAL
+        unavailable = None
+        if not merged_limitations:
+            merged_limitations.append("部分核心指标缺少可比期间或必要 SEC 财务事实")
+    elif computed_count > 0 or facts:
+        completeness = AnalysisCompleteness.PARTIAL
+        unavailable = None
+        if not merged_limitations:
+            merged_limitations.append("部分核心指标缺少可比期间或必要 SEC 财务事实")
+    else:
+        # unavailable 的严格契约要求 facts/metrics 均为空，不能把 10 个
+        # NOT_COMPUTABLE 占位指标伪装成可用分析。
+        completeness = AnalysisCompleteness.UNAVAILABLE
+        unavailable = unavailable_reason or "缺少可用于确定性财务计算的 SEC 事实"
+
+    return FinancialAnalysisPack(
+            version="analysis_pack_v2",
+            schema_version="analysis_pack_v2",
+            period_end=period_end,
+            facts=facts if completeness != AnalysisCompleteness.UNAVAILABLE else [],
+            metrics=(
+                list(bundle.metrics)
+                if completeness != AnalysisCompleteness.UNAVAILABLE
+                else []
+            ),
+            analysis_notes=analysis_notes,
+            limitations=merged_limitations,
+            completeness=completeness,
+            unavailable_reason=unavailable,
+        )
 
 
 def parse_fact_records(records: list[dict[str, Any]]) -> list[FinancialFact]:

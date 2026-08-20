@@ -124,7 +124,11 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     )
     assert cache.get(sub_key) is not None
     assert cache.get(cache.key("web_search", {"query": "MSFT", "as_of": as_of})) is not None
-    assert cache.get(cache.key("sec_company_facts", {"cik": _CIK, "as_of_date": as_of})) is not None
+    facts_key = cache.key(
+        "sec_company_facts",
+        {"cik": _CIK, "as_of_date": as_of, "requested_forms": "10-K,10-Q"},
+    )
+    assert cache.get(facts_key) is not None
 
 
 def test_prefetch_skips_fetch_on_cache_hit() -> None:
@@ -142,7 +146,10 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     cache.put(sub_key, "cached-submissions")
     cache.put(cache.key("web_search", {"query": "MSFT", "as_of": as_of}), "cached-search")
     cache.put(
-        cache.key("sec_company_facts", {"cik": _CIK, "as_of_date": as_of}),
+        cache.key(
+            "sec_company_facts",
+            {"cik": _CIK, "as_of_date": as_of, "requested_forms": "10-K,10-Q"},
+        ),
         "cached-facts",
     )
 

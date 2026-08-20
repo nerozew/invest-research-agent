@@ -48,7 +48,9 @@ _SYSTEM_PROMPT = (
     "3. 必须包含用户消息中列出的必需章节；\n"
     "4. 禁止给出买入/卖出建议、目标价、持仓比例或确定性收益承诺；必须保留非投资建议声明；\n"
     "5. 只使用用户消息中提供的财务事实与来源，绝不引入新事实；\n"
-    "6. 数据不完整（partial/unavailable）时在数据限制章节如实说明，不得编造。"
+    "6. 数据不完整（partial/unavailable）时在数据限制章节如实说明，不得编造；\n"
+    "7. 关键指标表必须逐项覆盖‘确定性核心指标’中的全部指标，并原样保留每个"
+    "反引号指标代码；不可计算项也必须写明状态与原因，禁止静默省略。"
 )
 
 
@@ -147,10 +149,18 @@ class DirectLlmWriterDispatch:
 
         input_tokens: int | None = None
         output_tokens: int | None = None
+        cached_input_tokens: int | None = None
         usage = getattr(response, "usage", None)
         if usage is not None:
             input_tokens = _int_or_none(getattr(usage, "prompt_tokens", None))
             output_tokens = _int_or_none(getattr(usage, "completion_tokens", None))
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if isinstance(prompt_details, dict):
+                cached_input_tokens = _int_or_none(prompt_details.get("cached_tokens"))
+            elif prompt_details is not None:
+                cached_input_tokens = _int_or_none(
+                    getattr(prompt_details, "cached_tokens", None)
+                )
         # 审计：记录 finish_reason 与正文长度（不记录正文）。
         self.requests[-1]["finish_reason"] = finish_reason
         self.requests[-1]["output_chars"] = len(content)
@@ -159,6 +169,7 @@ class DirectLlmWriterDispatch:
             finish_reason=finish_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
             duration_s=duration_s,
         )
 
