@@ -94,3 +94,6 @@ artifacts/
 *.db
 *.sqlite
 *.sqlite3
+# 基准运行输出（可复现产物，不入库；数据集定义 evals/*.json 保留）
+evals/live_runs/
+evals/runs/
