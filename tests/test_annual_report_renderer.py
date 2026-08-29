@@ -406,12 +406,25 @@ def test_render_citation_numbers_assigns_sequence_and_dedups():
     assert mapping == {"src_a1b2c3d4e5f6": 1, "fr_0123456789ab": 2}
 
 
-def test_render_citation_numbers_keeps_unknown_and_locator():
+def test_render_citation_numbers_marks_unknown_and_keeps_locator():
     body = "未知 [src_ffffffffffff] locator=offset:42 残留 [fr_0123456789ab]。"
     out, mapping = render_citation_numbers(body, _registry(_fact_entry()))
-    assert "[src_ffffffffffff]" in out
+    # 未知 key → [?]（不向用户暴露内部 hash）；locator 由 strip_locator_markers 单独处理。
+    assert "[src_ffffffffffff]" not in out
+    assert "[?]" in out
     assert "locator=offset:42" in out
     assert mapping == {"fr_0123456789ab": 1}
+
+
+def test_strip_locator_markers_removes_offset():
+    from invest_research.reporting.annual_report_renderer import strip_locator_markers
+
+    body = "正文 [1] locator=offset:33037 更多 locator=offset:99 结尾"
+    assert strip_locator_markers(body) == "正文 [1] 更多 结尾"
+    # 官方声明摘录 / MD&A 指引的定位标记一并移除。
+    assert strip_locator_markers("**独立审计意见**（定位：offset:186435）") == "**独立审计意见**"
+    expected = "完整原文见 SEC 申报。"
+    assert strip_locator_markers("完整原文见 SEC 申报，定位 offset:116608。") == expected
 
 
 def test_build_reference_list_links_sources_and_labels_facts():

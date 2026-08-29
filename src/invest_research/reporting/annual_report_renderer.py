@@ -155,8 +155,8 @@ def render_citation_numbers(
     """把正文 ``[src_<hash>]``/``[fr_<hash>]`` 替换为论文式编号 ``[1]``/``[2]``。
 
     - 编号按 key 在正文**首次出现顺序**分配（确定性）；同一 key 多处出现用同一编号；
-    - source 与 fact 引用都编号（统一论文式）；不在注册表的 key 原样保留；
-    - 只替换 key token，不修改 `` locator=offset:..`` 残留与杂散括号；
+    - source 与 fact 引用都编号（统一论文式）；
+    - **不在注册表的 key 替换为 ``[?]``**（未解析引用），绝不向用户暴露内部 hash；
     - 调用方必须保证它在引用 key 门禁/提取之后执行。
     """
     by_key = {entry.citation_key: entry for entry in registry.entries}
@@ -168,9 +168,25 @@ def render_citation_numbers(
             if key not in key_to_number:
                 key_to_number[key] = len(key_to_number) + 1
             return f"[{key_to_number[key]}]"
-        return match.group(0)
+        return "[?]"
 
     return _CITATION_TOKEN_RE.sub(_replace, markdown), key_to_number
+
+
+_LOCATOR_MARKER_RE = re.compile(
+    r"\s*locator\s*=\s*offset:\d+"  # 正文 LLM 标记：locator=offset:N
+    r"|（定位：offset:\d+）"  # 官方声明摘录：定位：offset:N
+    r"|，定位\s+offset:\d+"  # MD&A 指引：见 SEC 申报，定位 offset:N
+)
+
+
+def strip_locator_markers(markdown: str) -> str:
+    """从正文移除各类 ``offset:N`` 定位标记（追溯由文末引用列表的 URL 承担）。
+
+    覆盖：LLM 正文 ``locator=offset:N``、官方声明摘录 ``（定位：offset:N）``、
+    MD&A 指引 ``定位 offset:N``——避免向用户暴露内部偏移数字。
+    """
+    return _LOCATOR_MARKER_RE.sub("", markdown)
 
 
 def build_reference_list(
@@ -492,4 +508,5 @@ __all__ = [
     "link_label",
     "render_citation_links",
     "render_citation_numbers",
+    "strip_locator_markers",
 ]

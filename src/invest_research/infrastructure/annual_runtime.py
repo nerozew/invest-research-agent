@@ -85,6 +85,7 @@ from invest_research.reporting.annual_report_renderer import (
     extract_official_statements,
     human_kind,
     render_citation_numbers,
+    strip_locator_markers,
 )
 from invest_research.reporting.annual_statements_renderer import render_statements
 from invest_research.tools.artifact_store import ArtifactStore
@@ -1035,10 +1036,11 @@ class AnnualResearchRuntime:
         # 引用提取用原始正文（[src_xxx]）；编号化是发布层展示转换，必须在其后执行，
         # 否则 [src_xxx] 文本消失会导致 citation_keys 变空（引用门禁/提取被破坏）。
         citations = [key for key in registry.keys() if f"[{key}]" in final_markdown]
-        # 论文式：正文 [src_xxx]/[fr_xxx] → [1][2]…，文末追加可点击的编号引用列表。
+        # 论文式：正文 [src_xxx]/[fr_xxx] → [1][2]…，未知 key → [?]；移除 locator 标记。
         presentation_markdown, key_to_number = render_citation_numbers(
             final_markdown, registry
         )
+        presentation_markdown = strip_locator_markers(presentation_markdown)
         reference_list = build_reference_list(registry, key_to_number)
         if reference_list:
             presentation_markdown = presentation_markdown.rstrip() + "\n\n" + reference_list
