@@ -63,7 +63,7 @@ _OFFICIAL_TRANSLATE_MAX_CHARS = 1_500
 _MDA_SUMMARIZE_MAX_CHARS = 4_000
 # Item/MD&A 标题块命中后连带纳入的后续正文块数量（捕获长段落如管理层讨论）。
 _BLOCK_SPAN = 5
-_MAX_OUTPUT_TOKENS = 3_000
+_MAX_OUTPUT_TOKENS = 8_000
 _CITATION_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
 _FORBIDDEN_ADVICE_RE = re.compile(
     r"(?:建议买入|建议卖出|目标价|建仓|加仓|减仓|持仓比例|guaranteed return)", re.I
@@ -485,7 +485,7 @@ class AnnualSectionExecutor:
                 f"# 数据限制\n{_lines(finalization.limitations)}\n\n"
                 "输出必须包含 `## 执行摘要`，并保留原有章节标题与全部引用。"
             ),
-            max_tokens=5_000,
+            max_tokens=10_000,
         )
         keys = self._validate_output(result, allowed, require_heading=False)
         if set(keys) != set(allowed):
@@ -569,7 +569,7 @@ class AnnualSectionExecutor:
                     "【302 认证】标记分段，只输出中文翻译。"
                 ),
                 user_prompt=f"# 需翻译的英文官方声明\n{labeled_source}",
-                max_tokens=3_000,
+                max_tokens=4_000,
             )
         except AnnualLlmCallError:
             return statements
@@ -607,7 +607,7 @@ class AnnualSectionExecutor:
                 "的事实和数字，不得编造、不得补充外部信息、不得给出投资建议。只输出中文。"
             ),
             user_prompt=f"# 管理层讨论与分析原文节选\n{source_text}",
-            max_tokens=1_500,
+            max_tokens=2_000,
         )
         return (result.markdown or "").strip()
 

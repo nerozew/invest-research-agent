@@ -180,6 +180,11 @@ def test_three_independent_tasks_start_before_fan_in() -> None:
     assert len(started) == 3
     assert result.coverage_ledger.readiness is AnnualReadiness.FULL_READY
     assert len(result.evidence_artifacts) == 5
+    # WS3：工具调用统计落盘（2 份 10-K 下载 + 1 Company Facts；无 web pipeline 时不计数）。
+    assert result.invocation_summary == {
+        "filing_downloader_calls": 2,
+        "sec_company_facts_calls": 1,
+    }
 
 
 def test_comparator_failure_allows_financial_only_and_missing_facts_blocks() -> None:

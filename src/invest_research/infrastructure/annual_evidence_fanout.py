@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from invest_research.domain.annual_filing_selector import AnnualFilingSelection
 from invest_research.domain.annual_pipeline import (
@@ -60,6 +60,9 @@ class AnnualEvidenceBundle(BaseModel):
     web_search: WebSearchArtifactResult | None = None
     evidence_artifacts: tuple[EvidenceArtifact, ...] = ()
     coverage_ledger: CoverageLedger
+    # WS3：工具调用统计（filing_downloader_calls / sec_company_facts_calls / web_search_calls），
+    # 供 run_manifest.evidence.invocation_summary 消费 → job_tool_calls_total 指标。
+    invocation_summary: dict[str, int] = Field(default_factory=dict)
 
 
 class FilingArtifactPipeline(Protocol):
@@ -121,6 +124,12 @@ class AnnualEvidenceFanoutPipeline:
             )
 
         comparator_year = selection.comparator_fiscal_year or selection.target_fiscal_year - 1
+        # WS3：工具调用统计（供 manifest.evidence.invocation_summary / job_tool_calls_total）。
+        invocation: dict[str, int] = {}
+        invocation["filing_downloader_calls"] = 1 + (1 if comparator is not None else 0)
+        invocation["sec_company_facts_calls"] = 1
+        if self._web_search_pipeline is not None and company:
+            invocation["web_search_calls"] = 1
         with ThreadPoolExecutor(max_workers=4) as executor:
             target_future = executor.submit(
                 self._document_pipeline.run, job_id=job_id, filing=target
@@ -182,6 +191,7 @@ class AnnualEvidenceFanoutPipeline:
             web_search=web_result,
             evidence_artifacts=tuple(evidence),
             coverage_ledger=ledger,
+            invocation_summary=invocation,
         )
 
     @staticmethod

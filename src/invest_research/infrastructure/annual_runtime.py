@@ -1069,6 +1069,11 @@ class AnnualResearchRuntime:
                 "finalization_status": finalization_status,
                 "annual_llm_prompt_version": "annual_llm_writing_v1",
                 "performance": llm_performance,
+                "evidence": (
+                    {"invocation_summary": evidence.invocation_summary}
+                    if evidence.invocation_summary
+                    else None
+                ),
             },
         )
 
