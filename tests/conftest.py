@@ -20,6 +20,14 @@ from typing import Any
 
 import appdirs
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from invest_research.infrastructure.db.base import Base
 
 # 会影响 Settings 默认值/必需字段的环境变量（真实 .env 可能注入）
 _POLLUTING_ENV: tuple[str, ...] = (
@@ -33,11 +41,15 @@ _POLLUTING_ENV: tuple[str, ...] = (
     "LLM_TEMPERATURE",
     "LLM_TIMEOUT",
     "LLM_ENABLE_THINKING",
+    "LLM_RESEARCH_ENABLE_THINKING",
+    "LLM_ANALYSIS_ENABLE_THINKING",
+    "LLM_WRITER_ENABLE_THINKING",
     "SEC_USER_AGENT_CONTACT",
     "SERPER_API_KEY",
     "SERPER_ENDPOINT",
     "FLOW_MODE",
     "RESEARCH_PROFILE",
+    "DIAGNOSTIC_CAPTURE_MODE",
     "PROJECT_NAME",
     "ENVIRONMENT",
     "LOG_LEVEL",
@@ -100,13 +112,80 @@ def pg_container() -> Iterator[str]:
     """
     external_url = os.environ.get("TEST_DATABASE_URL")
     if external_url:
-        yield external_url
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv(
+                "DATABASE_URL", external_url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
+            )
+            yield external_url
         return
 
     from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer("postgres:16-alpine") as postgres:
-        yield postgres.get_connection_url()
+        url = postgres.get_connection_url()
+        # Alembic env 优先读 DATABASE_URL；旧迁移测试也必须指向此临时容器，
+        # 不能被开发环境 .env 或 CI 的 SQLite 默认值覆盖。
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("DATABASE_URL", url.replace("postgresql+psycopg2://", "postgresql+psycopg://"))
+            yield url
+
+
+@pytest.fixture
+def isolated_pg_url(pg_container: str) -> Iterator[str]:
+    """每个用例独占新库；只删除本 fixture 在测试服务器上创建的随机库。"""
+    admin_url = make_url(pg_container).set(drivername="postgresql+psycopg")
+    database_name = f"p07_test_{uuid.uuid4().hex}"
+    admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+        try:
+            yield admin_url.set(database=database_name).render_as_string(hide_password=False)
+        finally:
+            with admin.connect() as connection:
+                connection.exec_driver_sql(f'DROP DATABASE "{database_name}"')
+    finally:
+        admin.dispose()
+
+
+@pytest.fixture
+def pg_session_factory(
+    isolated_pg_url: str, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[sessionmaker[Session]]:
+    """使用真实迁移和 Worker 的事务配置；禁止环境变量把迁移导向其他库。"""
+    monkeypatch.setenv("DATABASE_URL", isolated_pg_url)
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.set_main_option("sqlalchemy.url", isolated_pg_url)
+    # 不让 Alembic 的 fileConfig 禁用 pytest 正在捕获的应用日志。
+    config.config_file_name = None
+    command.upgrade(config, "head")
+    engine = create_engine(isolated_pg_url)
+    try:
+        yield sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(params=["sqlite", "postgresql"])
+def sql_session_factory(request: pytest.FixtureRequest) -> Iterator[sessionmaker[Session]]:
+    """同一份状态/接口回归同时覆盖 SQLite 与经迁移的 PostgreSQL。"""
+    if request.param == "postgresql":
+        if not db_integration_enabled():
+            pytest.skip("PostgreSQL 集成测试未启用")
+        yield request.getfixturevalue("pg_session_factory")
+        return
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    try:
+        yield sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
+    finally:
+        engine.dispose()
 
 
 # 在 conftest 加载期替换 appdirs.user_data_dir：CrewAI 通过模块引用调用，

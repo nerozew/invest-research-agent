@@ -20,7 +20,7 @@ from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError
 from invest_research.frontend.models import ArtifactInfo
-from invest_research.frontend.render import load_viewable_json_artifacts
+from invest_research.frontend.render import artifact_category, load_viewable_json_artifacts
 from invest_research.frontend.state import load_job_id
 
 st.set_page_config(page_title="报告与工件", page_icon="📄", layout="wide")
@@ -121,11 +121,13 @@ def _render_artifact_table(
     - 下载失败只显示 ``st.warning``，不中断整页（与最终报告区域一致）。
     """
     st.subheader("已登记工件")
+    st.caption("年度任务按证据、财务比较、章节产物和运行状态分类；原始 SEC 文件不会自动读取。")
     # 只展示 key/type/size，不展示 storage_uri（服务器内部路径）
     st.table(
         [
             {
                 "key": a.artifact_key,
+                "类别": artifact_category(a.artifact_key, a.artifact_type),
                 "类型": a.artifact_type,
                 "大小 (字节)": a.byte_size,
             }

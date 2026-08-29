@@ -18,11 +18,14 @@ from datetime import date
 
 import streamlit as st
 
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.frontend.client import ResearchApiClient
 from invest_research.frontend.config import get_api_base_url, get_api_timeout
 from invest_research.frontend.errors import ApiClientError, HttpStatusError
 from invest_research.frontend.idempotency import IdempotencyKeyManager
+from invest_research.frontend.render import research_mode_badge
+from invest_research.frontend.research_mode import request_options_for_mode
 from invest_research.frontend.state import save_job_id
 
 st.set_page_config(page_title="创建投研任务", page_icon="➕", layout="wide")
@@ -50,11 +53,14 @@ def _render_profile_badge(research_profile: str) -> str:
     return {"fast": "⚡ 快速", "deep": "🔬 深度"}.get(research_profile, research_profile)
 
 
-def _render_success_nav(job_id: str, company: str, research_profile: str) -> None:
+def _render_success_nav(
+    job_id: str, company: str, research_profile: str, research_mode: ResearchMode
+) -> None:
     """创建成功后的连贯导航：复制 / 详情 / 报告 / 返回。"""
     st.success("任务创建成功！")
     st.info(
         f"**公司**：{company} ｜ **job_id**：`{job_id}` ｜ "
+        f"**模式**：{research_mode_badge(research_mode)} ｜ "
         f"**档位**：{_render_profile_badge(research_profile)} ｜ **状态**：⏳ 等待中"
     )
     st.code(job_id, language=None)
@@ -87,36 +93,62 @@ def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) 
             "数据截止日 (as of date)", value=date.today(), max_value=date.today()
         )
         language = st.selectbox("报告语言", options=["zh-CN", "en"])
-        requested_forms = st.multiselect(
-            "请求的 SEC 表单类型",
-            options=["10-K", "10-Q", "10-K/A", "10-Q/A"],
-            default=["10-K", "10-Q"],
+        research_mode = ResearchMode(
+            st.radio(
+                "研究模式",
+                options=[ResearchMode.LEGACY.value, ResearchMode.ANNUAL_DEEP.value],
+                index=0,
+                format_func=lambda value: research_mode_badge(ResearchMode(value)),
+                key="create_research_mode",
+            )
         )
-        # P06-06A：每任务研究档位选择。UI 默认 fast（推荐）；显式传值给后端 ResearchRequest。
-        research_profile = st.radio(
-            "研究档位",
-            options=["fast", "deep"],
-            index=0,
-            format_func=lambda v: (
-                "快速模式（推荐）：耗时和费用较低，适合初步研究与演示"
-                if v == "fast"
-                else "深度模式：研究更充分，但耗时和费用更高"
-            ),
-            key="create_research_profile",
-        )
+        if research_mode is ResearchMode.ANNUAL_DEEP:
+            st.info(
+                "年度深度研究固定使用 deep 档位与 10-K：后端按截至日期选择目标/上年财年，"
+                "并补充 Company Facts 进行确定性财务比较。"
+            )
+            st.text_input("请求的 SEC 表单类型", value="10-K（年度模式固定）", disabled=True)
+            st.text_input("研究档位", value="deep（年度模式固定）", disabled=True)
+            requested_forms = ("10-K",)
+            research_profile = "deep"
+        else:
+            requested_forms = tuple(
+                st.multiselect(
+                    "请求的 SEC 表单类型",
+                    options=["10-K", "10-Q", "10-K/A", "10-Q/A"],
+                    default=["10-K", "10-Q"],
+                )
+            )
+            # P06-06A：每任务研究档位选择。UI 默认 fast（推荐）；显式传值给后端 ResearchRequest。
+            research_profile = st.radio(
+                "研究档位",
+                options=["fast", "deep"],
+                index=0,
+                format_func=lambda v: (
+                    "快速模式（推荐）：耗时和费用较低，适合初步研究与演示"
+                    if v == "fast"
+                    else "深度模式：研究更充分，但耗时和费用更高"
+                ),
+                key="create_research_profile",
+            )
         submitted = st.form_submit_button("创建任务", type="primary")
 
     if not submitted:
         return
 
     try:
+        effective_forms, effective_profile = request_options_for_mode(
+            research_mode,
+            requested_forms=tuple(requested_forms),
+            research_profile=research_profile,
+        )
         request = ResearchRequest(
             input_company=input_company,
             as_of_date=as_of_date,
             language=language,
-            requested_forms=tuple(requested_forms),
-            # P06-06A：前端显式传递用户所选档位（不依赖领域默认 deep）
-            research_profile=research_profile,
+            requested_forms=effective_forms,
+            research_profile=effective_profile,
+            research_mode=research_mode,
         )
     except Exception as exc:  # ValidationError 是输入错误，展示给用户修正
         st.error(f"输入不合法：{exc}")
@@ -141,7 +173,7 @@ def _render_form(client: ResearchApiClient, key_manager: IdempotencyKeyManager) 
     job_id = str(result.job_id)
     # P04-UI-08：创建成功后持久化 job_id 到 session + URL，自动进入任务上下文
     save_job_id(job_id)
-    _render_success_nav(job_id, input_company, research_profile)
+    _render_success_nav(job_id, input_company, effective_profile, research_mode)
 
 
 def main() -> None:

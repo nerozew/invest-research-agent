@@ -43,6 +43,18 @@ _ARTIFACT_TYPES: dict[str, str] = {
     "09_report.pdf": "final_report_pdf",
 }
 
+# 年度运行时的诊断/验收工件。只登记结构化、脱敏的派生产物；不暴露 SEC 原始正文。
+_ANNUAL_ARTIFACT_TYPES: dict[str, str] = {
+    "annual/runtime_state.json": "annual_runtime_state",
+    "annual/company-facts/selected.json": "annual_fact_set",
+    "annual/company-facts/manifest.json": "annual_fact_manifest",
+    "annual/comparison.json": "annual_comparison",
+    "annual/sections/financial_performance.json": "annual_section",
+    "annual/sections/business_overview.json": "annual_section",
+    "annual/sections/risk_factors.json": "annual_section",
+    "annual/sections/material_events.json": "annual_section",
+}
+
 # 兼容迁移：旧版 live runner 写到 company_as_of 目录的键（不含 08/09）
 _LEGACY_ARTIFACT_TYPES: dict[str, str] = {
     "00_request.json": "request",
@@ -86,7 +98,8 @@ def derive_steps(state: ResearchFlowState) -> list[dict[str, object]]:
         step: dict[str, object] = {
             "step_name": name,
             "sequence_no": seq,
-            "status": "succeeded" if ok else "failed",
+            # StepStatus 无字面 "failed"，用终态失败值，避免 API 读取 500。
+            "status": "succeeded" if ok else "failed_terminal",
             "attempt_count": 1,
             "input_json": {},
             "output_json": {},
@@ -156,7 +169,7 @@ def merge_artifacts_to_job_dir(
     elif not dst.is_dir():
         return []
 
-    return _scan_job_dir(dst, _ARTIFACT_TYPES)
+    return _scan_job_dir(dst, {**_ARTIFACT_TYPES, **_ANNUAL_ARTIFACT_TYPES})
 
 
 class ExecutionRecorder:

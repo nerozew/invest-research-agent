@@ -22,6 +22,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 # P06-09C-fix：必须在任何可能触发 prometheus_client/metrics 导入的代码之前设置，
@@ -35,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from invest_research.application.execution import ExecuteResearchJobService
 from invest_research.application.progress import ProgressSink, StepRecordError
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus
 from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
@@ -80,6 +82,35 @@ def _build_session_factory() -> SessionFactory:
         return Session(bind=engine, autoflush=False)
 
     return factory
+
+
+def _build_annual_web_search_pipeline(
+    settings: Any, client: Any, artifact_root: Path
+) -> Any | None:
+    """Serper Key 存在时构造年度网页搜索管道；缺失或失败时返回 None（搜索增强降级关闭）。
+
+    网页搜索是年度叙事章节的可选增强：Key 缺失/构造失败不阻塞核心 SEC 证据流程。
+    复用 Worker 已创建的共享 httpx.Client（由调用方在 finally 中统一关闭）。
+    """
+    if getattr(settings, "serper_api_key", None) is None:
+        return None
+    from invest_research.infrastructure.annual_web_search_pipeline import (
+        WebSearchEvidencePipeline,
+    )
+    from invest_research.tools.google_search import GoogleSearchTool
+    from invest_research.tools.serper_adapter import SerperAdapter, SerperConfig
+
+    try:
+        serper = SerperAdapter(
+            client,
+            SerperConfig(
+                api_key=settings.serper_api_key,
+                endpoint=getattr(settings, "serper_endpoint", None),
+            ),
+        )
+        return WebSearchEvidencePipeline(artifact_root, GoogleSearchTool(provider=serper))
+    except Exception:  # noqa: BLE001 - 搜索增强尽力而为，失败不阻塞年度核心流程
+        return None
 
 
 def _build_live_research_tools(settings: Any, stats: dict[str, int] | None = None) -> list[Any]:
@@ -346,6 +377,96 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
     # P06-06B：实时步骤进度端口（SQL 实现，短事务；写入失败不影响任务）
     progress: ProgressSink = SqlProgressSink(session_factory)
 
+    def _annual_runner(job_id: uuid.UUID, request: ResearchRequest) -> Any:
+        """年度路径只使用 P07 节点表，不初始化 legacy workflow_steps。"""
+        from invest_research.agents.llm_factory import LLMConfig
+        from invest_research.application.annual_node_progress import AnnualNodeProgressService
+        from invest_research.infrastructure.annual_company_facts_pipeline import (
+            AnnualCompanyFactsArtifactPipeline,
+        )
+        from invest_research.infrastructure.annual_comparison_builder import AnnualComparisonBuilder
+        from invest_research.infrastructure.annual_document_pipeline import (
+            AnnualDocumentArtifactPipeline,
+        )
+        from invest_research.infrastructure.annual_evidence_fanout import (
+            AnnualEvidenceFanoutPipeline,
+        )
+        from invest_research.infrastructure.annual_llm_writing import (
+            AnnualLlmDispatcher,
+            AnnualSectionExecutor,
+        )
+        from invest_research.infrastructure.annual_runtime import (
+            AnnualResearchRuntime,
+            AnnualRuntimeComponents,
+        )
+        from invest_research.infrastructure.db.annual_node_store import SqlAnnualNodeStore
+        from invest_research.infrastructure.http.client import build_http_client
+        from invest_research.infrastructure.real_tools import build_research_toolkit
+        from invest_research.settings import get_settings
+
+        settings = get_settings()
+        client = build_http_client(
+            connect_timeout=settings.http_connect_timeout,
+            read_timeout=settings.http_read_timeout,
+            user_agent=settings.http_user_agent
+            or f"invest-research/0.1 (+{settings.sec_user_agent_contact})",
+        )
+        # 年度链路只使用 SEC 身份、submissions、facts 和 filing 下载器；网页搜索作为
+        # 可选的叙事增强注入（Serper Key 缺失时优雅降级，不阻塞年度核心流程）。
+        toolkit = build_research_toolkit(client=client, serper=None)
+        artifact_root = Path(os.environ.get("ARTIFACT_ROOT", "artifacts"))
+        document_pipeline = AnnualDocumentArtifactPipeline(artifact_root, toolkit.downloader)
+        facts_pipeline = AnnualCompanyFactsArtifactPipeline(artifact_root, toolkit.facts)
+        web_pipeline = _build_annual_web_search_pipeline(settings, client, artifact_root)
+        # WS2.4：主动研究 Agent 生产注入（默认关闭；开启需 Serper Key，增加网页下载 I/O）。
+        active_research = None
+        if getattr(settings, "annual_active_research_enabled", False) and getattr(
+            settings, "serper_api_key", None
+        ):
+            from invest_research.infrastructure.annual_active_research import ActiveResearchAgent
+            from invest_research.tools.google_search import GoogleSearchTool
+            from invest_research.tools.serper_adapter import SerperAdapter, SerperConfig
+
+            try:
+                serper = SerperAdapter(
+                    client,
+                    SerperConfig(
+                        api_key=settings.serper_api_key,
+                        endpoint=getattr(settings, "serper_endpoint", None),
+                    ),
+                )
+                active_research = ActiveResearchAgent(
+                    artifact_root=artifact_root,
+                    completion=AnnualLlmDispatcher(LLMConfig.from_settings(settings)),
+                    search_tool=GoogleSearchTool(provider=serper),
+                    downloader=toolkit.downloader,
+                )
+            except Exception:  # noqa: BLE001 - 主动研究增强尽力而为，失败不阻塞核心流程
+                active_research = None
+        try:
+            runtime = AnnualResearchRuntime(
+                AnnualRuntimeComponents(
+                    resolver=toolkit.resolver,
+                    filings_fetcher=toolkit.submissions,
+                    evidence_fanout=AnnualEvidenceFanoutPipeline(
+                        document_pipeline,
+                        facts_pipeline,
+                        web_search_pipeline=web_pipeline,
+                        artifact_root=artifact_root,
+                    ),
+                    comparison_builder=AnnualComparisonBuilder(artifact_root),
+                    artifact_root=artifact_root,
+                    progress=AnnualNodeProgressService(SqlAnnualNodeStore(session_factory)),
+                    section_executor=AnnualSectionExecutor(
+                        artifact_root, AnnualLlmDispatcher(LLMConfig.from_settings(settings))
+                    ),
+                    active_research=active_research,
+                )
+            )
+            return runtime.run(job_id=job_id, request=request)
+        finally:
+            client.close()
+
     class _RepoLoader:
         def load(self, job_id: uuid.UUID) -> ResearchRequest | None:
             job = repo.get(job_id)
@@ -358,18 +479,21 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             # P06-06B 收口：请求加载成功后立即把 00_request 标记 succeeded，
             # 再开始 01_company_resolve（保证"00 在 01 前 succeeded"的不变量；
             # 重复标记对已成功步骤是安全无操作）。
-            try:
-                progress.mark_step_succeeded(job_id, "00_request")
-            except StepRecordError as exc:
-                _progress_logger().warning("标记 00_request 成功失败 job=%s: %s", job_id, exc)
-            return ResearchRequest(
+            request = ResearchRequest(
                 input_company=job.input_company,
                 as_of_date=job.as_of_date,
                 language=job.language,
                 requested_forms=tuple(job.requested_forms),
                 # P06-06A：把每个 Job 持久化的研究档位传给 FlowRunner
                 research_profile=job.research_profile,
+                research_mode=ResearchMode(job.research_mode),
             )
+            if request.research_mode is ResearchMode.LEGACY:
+                try:
+                    progress.mark_step_succeeded(job_id, "00_request")
+                except StepRecordError as exc:
+                    _progress_logger().warning("标记 00_request 成功失败 job=%s: %s", job_id, exc)
+            return request
 
     class _RepoWriter:
         def mark_running(self, job_id: uuid.UUID) -> bool:
@@ -379,15 +503,17 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 if row is None or row.status != JobStatus.PENDING.value:
                     return False
                 profile = row.research_profile or "deep"
+                research_mode = ResearchMode(row.research_mode)
                 row.status = JobStatus.RUNNING.value
                 row.started_at = datetime.now(timezone.utc)
                 session.commit()
             # P06-06B：幂等创建 00-07 步骤并标记 00_request running（重复投递不重复插入）
-            try:
-                progress.initialize_steps(job_id)
-                progress.mark_step_running(job_id, "00_request")
-            except StepRecordError as exc:
-                _progress_logger().warning("进度初始化失败 job=%s: %s", job_id, exc)
+            if research_mode is ResearchMode.LEGACY:
+                try:
+                    progress.initialize_steps(job_id)
+                    progress.mark_step_running(job_id, "00_request")
+                except StepRecordError as exc:
+                    _progress_logger().warning("进度初始化失败 job=%s: %s", job_id, exc)
             # P06-06C：条件转换成功（返回 True）才计数 running（重复投递不会重复计数）
             from invest_research.infrastructure.observability.metrics_events import (
                 count_research_job,
@@ -442,6 +568,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 if row is None:
                     return
                 profile = row.research_profile or "deep"
+                is_legacy = row.research_mode == ResearchMode.LEGACY.value
                 started_at = row.started_at
                 row.status = JobStatus.FAILED.value
                 row.completed_at = datetime.now(timezone.utc)
@@ -451,14 +578,15 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                 row.failure_stage = failure_stage
                 session.commit()
             # P06-06B：收口所有仍为 running 的步骤为 failed_terminal（不留虚假 running）
-            try:
-                progress.fail_all_running_steps(
-                    job_id,
-                    error_code=error_code,
-                    error_message=sanitized_message or "任务执行失败，流程异常终止",
-                )
-            except StepRecordError as exc:
-                _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
+            if is_legacy:
+                try:
+                    progress.fail_all_running_steps(
+                        job_id,
+                        error_code=error_code,
+                        error_message=sanitized_message or "任务执行失败，流程异常终止",
+                    )
+                except StepRecordError as exc:
+                    _progress_logger().warning("收口 running 步骤失败 job=%s: %s", job_id, exc)
             # P06-06C：真实到达终态才计数 failed（重复执行不会重复计数）
             from invest_research.infrastructure.observability.metrics_events import (
                 count_failure,
@@ -477,7 +605,25 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
             set_research_job_in_progress(profile, -1)
             count_failure(failure_stage or "unknown", error_code)
 
-    runner = flow_runner if flow_runner is not None else _default_flow_runner()
+    legacy_runner = flow_runner if flow_runner is not None else _default_flow_runner()
+
+    class _ModeDispatchingRunner:
+        progress: Any | None = None
+        job_id: uuid.UUID | None = None
+        last_state: Any | None = None
+
+        def run(self, request: ResearchRequest) -> Any:
+            if request.research_mode is ResearchMode.ANNUAL_DEEP:
+                if self.job_id is None:
+                    raise RuntimeError("annual_deep 运行缺少 job_id")
+                self.last_state = _annual_runner(self.job_id, request)
+                return self.last_state
+            legacy_runner.progress = self.progress
+            legacy_runner.job_id = self.job_id
+            self.last_state = legacy_runner.run(request)
+            return self.last_state
+
+    runner = _ModeDispatchingRunner()
     # P06-07 前置修复：Worker 成功获得 Flow state 后发布最终报告
     # （fake/live 共用确定性服务；发布失败 → mark_failed，不误报完整发布成功）。
     artifact_root = os.environ.get("ARTIFACT_ROOT", "artifacts")
@@ -495,10 +641,53 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
     def _record_execution(job_id: uuid.UUID) -> None:
         try:
             recorder.record(job_id, getattr(runner, "last_state", None))
+            _record_job_perf_metrics(getattr(runner, "last_state", None))
         except Exception as exc:  # noqa: BLE001 - 记录失败不影响任务结果
             _progress_logger().warning("执行记录落库失败 job=%s: %s", job_id, exc)
 
     return ResearchJobExecutionHandler(service, recorder=_record_execution)
+
+
+def _record_job_perf_metrics(state: Any) -> None:
+    """WS3：把已发布任务的 token/工具调用/成本写入聚合指标（best-effort，终态一次）。
+
+    只读 state.run_manifest；缺失 token 不伪造 0；成本按 PRICING_FILE 估算（未配置不计算）。
+    """
+    if state is None or getattr(state, "run_manifest", None) is None:
+        return
+    from invest_research.infrastructure.observability.metrics_events import record_job_performance
+
+    manifest = state.run_manifest
+    perf = manifest.get("performance") or {}
+    usage = perf.get("token_usage") or {}
+    inv = (manifest.get("evidence") or {}).get("invocation_summary") or {}
+    request = getattr(state, "request", None)
+    profile = getattr(request, "research_profile", None) or "deep"
+    mode = str(manifest.get("research_mode") or "legacy")
+    status = str(manifest.get("finalization_status") or "published")
+    tool_calls = sum(int(v) for v in inv.values() if isinstance(v, (int, float)))
+    cost = None
+    pricing_file = os.environ.get("PRICING_FILE")
+    if pricing_file:
+        import invest_research.application.costing as costing
+
+        pricing = costing.load_pricing(pricing_file)
+        entry = costing.pricing_entry_for(pricing, profile)
+        cost = costing.estimate_job_cost(
+            input_tokens=usage.get("prompt_tokens"),
+            output_tokens=usage.get("completion_tokens"),
+            pricing_entry=entry,
+        )
+    record_job_performance(
+        profile=str(profile),
+        mode=mode,
+        status=status,
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        tool_calls=tool_calls,
+        cost_usd=cost,
+    )
 
 
 def _setup_otel_from_env() -> None:
@@ -538,6 +727,9 @@ def _run_stale_job_recovery() -> None:
                 .scalars()
                 .all()
             )
+            # session.commit() 默认会 expire ORM 实例；后续步骤收口只能使用
+            # 已提取的稳定标识，不能再访问 detached ``ResearchJob`` 属性。
+            stale_job_ids = [job.id for job in stale]
             now = datetime.now(timezone.utc)
             for job in stale:
                 job.status = JobStatus.FAILED.value
@@ -551,17 +743,17 @@ def _run_stale_job_recovery() -> None:
             count_stale_recovery,
         )
 
-        count_stale_recovery("recovered" if stale else "none")
+        count_stale_recovery("recovered" if stale_job_ids else "none")
         progress = SqlProgressSink(_build_session_factory())
-        for job in stale:
+        for job_id in stale_job_ids:
             try:
                 progress.fail_all_running_steps(
-                    job.id,
+                    job_id,
                     error_code="STALE_RUNNING_RECOVERED",
                     error_message="任务在 Worker 重启时仍处于 running，已由启动恢复收口为 failed",
                 )
             except StepRecordError as exc:
-                _progress_logger().warning("启动恢复收口步骤失败 job=%s: %s", job.id, exc)
+                _progress_logger().warning("启动恢复收口步骤失败 job=%s: %s", job_id, exc)
     except Exception:  # noqa: BLE001 - 恢复尽力而为，不阻塞 worker 启动
         _progress_logger().warning("启动 stale running Job 恢复失败（继续启动）", exc_info=True)
 

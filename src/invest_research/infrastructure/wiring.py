@@ -22,6 +22,7 @@ from invest_research.api.health import (
     build_health_checker,
     dispose_dependency_resources,
 )
+from invest_research.application.costing import load_pricing
 from invest_research.application.outbox import OutboxRelayCounter, OutboxRelayService
 from invest_research.infrastructure.db.application_stores import (
     SqlArtifactCatalogStore,
@@ -32,6 +33,7 @@ from invest_research.infrastructure.db.application_stores import (
     SqlJobQueryStore,
     SqlJobStore,
     SqlOutboxStore,
+    _manifest_performance_loader,
 )
 from invest_research.infrastructure.db.base import (
     create_db_engine,
@@ -112,7 +114,13 @@ def create_production_app(
     checker = build_health_checker(resolved)
 
     job_store = SqlJobStore(session_factory)
-    job_query_store = SqlJobQueryStore(session_factory)
+    job_query_store = SqlJobQueryStore(
+        session_factory,
+        performance_loader=_manifest_performance_loader(
+            resolved.artifact_root,
+            load_pricing(resolved.pricing_file),
+        ),
+    )
     job_list_store = SqlJobListStore(session_factory)
     idempotency_store = SqlIdempotencyStore(session_factory)
     cancel_status_writer = SqlCancelStatusWriter(session_factory)

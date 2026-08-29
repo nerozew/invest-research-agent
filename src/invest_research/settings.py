@@ -185,8 +185,9 @@ class Settings(BaseSettings):
     #   LLM_RESEARCH_VENDOR / LLM_RESEARCH_BASE_URL / LLM_RESEARCH_API_KEY /
     #   LLM_RESEARCH_MODEL / LLM_RESEARCH_TEMPERATURE / LLM_RESEARCH_TIMEOUT /
     #   LLM_RESEARCH_ENABLE_THINKING（其余角色同理）。
-    # 任一角色覆盖块提供"vendor 与 api_key"二者之一即视为启用；此时缺省字段
-    # （base_url/model/temperature/timeout/enable_thinking）回退全局默认值。
+    # 任一角色字段被显式配置即启用覆盖块；未配置的字段回退全局默认值。
+    # 因此只写 LLM_<ROLE>_ENABLE_THINKING 就能为三个角色独立控制思考模式，
+    # 无需重复 vendor/base_url/api_key/model。
     llm_research_vendor: Literal["qwen", "deepseek", "generic"] | None = None
     llm_research_base_url: str | None = None
     llm_research_api_key: SecretStr | None = None
@@ -234,6 +235,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     # Celery broker（P04-10A：API→Worker 投递；生产红 Redis，测试 memory://）
     broker_url: str = "redis://localhost:6379/0"
+    # 定价 JSON（{"as_of", "models": {<profile|default>: {"input_per_1m", "output_per_1m"}}}）；
+    # 提供时用于任务详情成本估算；缺失则不计算（不硬编码模型价格）。
+    pricing_file: str | None = None
+    # 年度主动研究 Agent（下载全文 + 丢弃编造 URL + 网页快照溯源）生产注入开关。
+    # 默认关闭：保留现有行为、不破坏离线测试；开启需 Serper Key 且会增加网页下载 I/O。
+    annual_active_research_enabled: bool = False
 
     # ---- Readiness 探测超时（P04-01）----
     # /readiness 对依赖的探测必须设置显式超时，避免请求被卡在无响应的依赖上；
@@ -399,8 +406,20 @@ class Settings(BaseSettings):
         timeout = getattr(self, f"{prefix}timeout")
         enable_thinking = getattr(self, f"{prefix}enable_thinking")
 
-        # 未显式配置 vendor 也没有 api_key → 未启用覆盖块。
-        if vendor is None and api_key is None:
+        # 所有字段均未配置才视为没有覆盖块。布尔 False 是有效的显式配置，
+        # 不能用 truthiness 判断，否则 *_ENABLE_THINKING=false 会被忽略。
+        if all(
+            value is None
+            for value in (
+                vendor,
+                base_url,
+                api_key,
+                model,
+                temperature,
+                timeout,
+                enable_thinking,
+            )
+        ):
             return None
         return RoleLLMOverride(
             enabled=True,

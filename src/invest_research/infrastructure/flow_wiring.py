@@ -897,11 +897,33 @@ class LiveResearchFlowRunner:
                         prefetch_result = None
         ctx.prefetch_result = prefetch_result
         self._prefetch_result = prefetch_result
+        # Company identity is a hard prerequisite, not a best-effort Research concern.
+        # Resolve from prefetch or the bundled SEC snapshot before constructing/kicking
+        # off any Crew so unsupported/ambiguous input consumes zero LLM tokens.
+        if self._resolved_identity(request, ctx) is None:
+            self._mark("01_company_resolve", "failed")
+            raise LiveFlowExecutionError(
+                "本地 SEC 公司索引无法确定唯一公司身份；已在 Research/LLM 调用前终止，"
+                "禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.COMPANY_NOT_FOUND.value,
+                failure_stage="01_company_resolve",
+            )
         # P06-11C：把预取 financial_facts_summary（JSON 文本）还原为原始可信
         # FinancialFact 集合，供选择草稿现场组装（见 _extract_packs）。
         ctx.analysis_facts = self._parse_prefetched_facts(prefetch_result)
         self._analysis_facts = ctx.analysis_facts
         self._mark("01_company_resolve", "succeeded")
+
+        # A confirmed empty SEC submissions result cannot be repaired by asking the
+        # Research LLM to invent/select a URL. Stop before Crew kickoff so the failure
+        # consumes no model tokens and remains explicitly attributable to SEC evidence.
+        if prefetch_result is not None and prefetch_result.submission_count == 0:
+            raise LiveFlowExecutionError(
+                "截止日前未找到请求的 SEC 10-K/10-Q 申报；已在 Research/LLM 调用前终止，"
+                "禁止生成伪造 ResearchPack",
+                error_code=ErrorCode.SEC_PREFETCH_UNAVAILABLE.value,
+                failure_stage="02_research",
+            )
 
         # 0.5 组装 Crew 输入：ResearchRequest + 预取结果显式注入（禁止 Agent 猜公司/日期）
         inputs = self._build_crew_inputs(request, prefetch_result)
@@ -1127,6 +1149,7 @@ class LiveResearchFlowRunner:
         finalizer = DeepSeekJsonObjectFinalizer(
             ctx.effective_config,
             diagnostic_callback=self._finalizer_diagnostic_callback("02_research"),
+            usage_observer=ctx.recorder.add_token_usage,
         )
         try:
             draft = finalizer.finalize(raw, ResearchSelectionDraft, role="research")
@@ -1205,6 +1228,7 @@ class LiveResearchFlowRunner:
         finalizer = DeepSeekJsonObjectFinalizer(
             ctx.effective_config,
             diagnostic_callback=self._finalizer_diagnostic_callback("04_analysis"),
+            usage_observer=ctx.recorder.add_token_usage,
         )
         try:
             draft = finalizer.finalize(raw, AnalysisSelectionDraft, role="analysis")
@@ -1365,7 +1389,9 @@ class LiveResearchFlowRunner:
         if self._direct_writer_factory is not None:
             dispatch = self._direct_writer_factory(ctx.effective_config)
         else:
-            dispatch = DirectLlmWriterDispatch(ctx.effective_config)
+            dispatch = DirectLlmWriterDispatch(
+                ctx.effective_config, usage_observer=ctx.recorder.add_token_usage
+            )
 
         # 3. 第一次无工具调用。
         first_result = self._dispatch_direct_writer(
