@@ -8,6 +8,9 @@
 # 本地可选构建：docker compose build（会用仓库 Dockerfile 构建同名镜像，作为未设置变量时的回退）
 # 启用观测组件：docker compose --profile observability up -d（不影响基础服务行为）
 
+# 固定 Compose 项目名，避免不同终端因目录名/历史 -p 参数创建两套容器并争抢端口。
+name: agent
+
 x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
   REDIS_URL: redis://redis:6379/0
@@ -28,6 +31,11 @@ x-app-env: &app-env
   # P05.5：fast/deep 档位与思考模式开关（否则容器退回 deep + 思考模式开启，Qwen3.5 会慢到超时）
   RESEARCH_PROFILE: ${RESEARCH_PROFILE:-deep}
   LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-false}
+  LLM_RESEARCH_ENABLE_THINKING: ${LLM_RESEARCH_ENABLE_THINKING:-false}
+  LLM_ANALYSIS_ENABLE_THINKING: ${LLM_ANALYSIS_ENABLE_THINKING:-false}
+  LLM_WRITER_ENABLE_THINKING: ${LLM_WRITER_ENABLE_THINKING:-false}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+  LLM_TIMEOUT: ${LLM_TIMEOUT:-120.0}
   SERPER_API_KEY: ${SERPER_API_KEY:-your-serper-api-key-placeholder}
   SERPER_ENDPOINT: ${SERPER_ENDPOINT:-https://google.serper.dev/search}
   # 后端 API 地址（Streamlit 通过服务名访问）
@@ -124,6 +132,11 @@ services:
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: invest-research-worker
+      # 多进程 Prometheus 指标目录：作为真实容器 env 传递（进程启动即在 os.environ），
+      # 避免仅靠 worker.py 的 os.environ.setdefault 在 Celery fork 下不可靠（P06-06C 事故）。
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_metrics
+      # WS3 成本估算单价文件（worker 容器内路径，见下方 volume 挂载）。
+      PRICING_FILE: /app/pricing.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +146,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - artifacts_data:/app/artifacts
+      - ./deploy/pricing.json:/app/pricing.json:ro
 
   streamlit:
     image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase5}
