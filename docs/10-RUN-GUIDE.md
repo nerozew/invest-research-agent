@@ -59,8 +59,12 @@ docker compose up -d
 | 服务 | 地址 | 说明 |
 |---|---|---|
 | Streamlit 前端 | http://localhost:8501 | 创建任务 → 展示 job_id → 轮询状态 → 工件 |
-| FastAPI | http://localhost:8000 | API；`/health`、`/readiness`、`/docs`(Swagger) |
+| FastAPI | http://localhost:8000 | API；`/health`、`/readiness`、`/docs`(Swagger)。若 `:8000` 被其他服务占用，可用 `compose.port8001.yml` 覆盖映射到 `:8001` |
 | PostgreSQL / Redis | 容器内部互连 | 未对外暴露端口（安全默认） |
+| Prometheus | http://localhost:9090 | 指标查询/PromQL（targets：`api:8000` 与 `worker:9101`） |
+| Grafana | http://localhost:3000 | admin/admin；预置 8 行看板（含 WS3"成本与用量"） |
+| Jaeger | http://localhost:16686 | API→Worker→LLM 链路追踪 |
+| OTel Collector | localhost:4318 | 应用 OTLP HTTP 导出端点 |
 
 ## 4. 验证一条命令跑通
 
@@ -72,11 +76,18 @@ docker compose ps
 curl http://localhost:8000/health
 curl http://localhost:8000/readiness
 
-# 创建任务（真实落库）
+# 创建任务（真实落库，legacy 路径）
 curl -X POST http://localhost:8000/v1/research-jobs \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-1" \
   -d '{"input_company":"Apple Inc.","as_of_date":"2024-12-31","language":"zh-CN","requested_forms":["10-K"]}'
+
+# 创建年度双期间任务（P07 annual_deep：目标/上年 10-K + Company Facts，真实 SEC/DeepSeek）
+curl -X POST http://localhost:8000/v1/research-jobs \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-amzn-annual" \
+  -d '{"input_company":"AMZN","as_of_date":"2025-10-31","language":"zh-CN",
+       "requested_forms":["10-K"],"research_profile":"deep","research_mode":"annual_deep"}'
 
 # 查询任务状态（pending/succeeded 等）
 curl http://localhost:8000/v1/research-jobs/<返回的job_id>
@@ -94,10 +105,9 @@ curl http://localhost:8000/v1/research-jobs?limit=5
 
 ## 6. 已知限制（Phase 5）
 
-- 数据库提交成功但 Celery 投递失败之间存在窗口（无 transactional outbox，计划 P05-03 处理）。
-- Worker 默认用 fake Flow（`FLOW_MODE=fake`，`ResearchFlowRunner`，P03 全链离线演练），不调用真实付费模型；
-  配置 `FLOW_MODE=live` + 真实 `LLM_API_KEY`/`SERPER_API_KEY` 后，Worker 走真实 Crew（P05-12B 生产组装），
-  但 live 运行需要在部署机 `.env` 提供密钥，且不写入镜像/日志/Git。
+- ~~数据库提交与 Celery 投递之间无 outbox~~ —— 已由 **Transactional Outbox**（P05-03B）解决：Job 创建与事件同事务，投递失败持久化重试，重启恢复，防重复投递。
+- Worker 执行模式由 `.env` 的 `FLOW_MODE` 控制：`live`（默认，真实 SEC/Serper/DeepSeek，走 `annual_deep` 或 legacy Crew）或 `fake`（全链离线演练，不调真实模型）。
+  live 运行需要在部署机 `.env` 提供真实 `LLM_API_KEY`/`SERPER_API_KEY`，且不写入镜像/日志/Git。
 - CLI 演示：`python -m invest_research.cli --api-base http://localhost:8000 status <job_id>`
 
 ### 6.1 单用户边界（P04-UI-06~10 起）
@@ -150,9 +160,34 @@ docker compose --profile observability up -d
 | 服务 | 地址 | 说明 |
 |---|---|---|
 | Prometheus | http://localhost:9090 | targets：api:8000 与 worker:9101（白名单指标） |
-| Grafana | http://localhost:3000 | admin/admin；预置 `invest-research-red` dashboard（7 Row） |
+| Grafana | http://localhost:3000 | admin/admin；预置 8 行看板（含 WS3"成本与用量"行） |
 | Jaeger | http://localhost:16686 | 本地 trace 查看（内存存储，重启丢失） |
 | OTel Collector | localhost:4318 | 应用 OTLP HTTP 导出端点 |
+
+### 8.1b Worker 多进程指标（P06-06C + 真实环境修复）
+
+- API（单进程）与 Worker（Celery prefork 多进程）独立采集：`api:8000` 用默认 REGISTRY，`worker:9101` 用 `MultiProcessCollector` 聚合所有子进程写出的 mmap `.db` 文件。
+- **必须把 `PROMETHEUS_MULTIPROC_DIR` 作为真实容器环境变量传入**（compose worker 已配 `PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_metrics`）。仅靠 `worker.py` 内 `os.environ.setdefault` 在 Celery fork 下不可靠，会导致子进程指标不落盘（见 docs/30 事故复盘）。
+- WS3 聚合指标：`job_tokens_total` / `job_tool_calls_total` / `job_cost_usd_total`（按 profile/mode 低基数 label）。
+
+### 8.1c WS3 成本估算配置（PRICING_FILE）
+
+每次任务的 token/估算成本落盘依赖单价文件：
+
+```bash
+# 1) 单价表（美元每百万 token）已提供
+cat deploy/pricing.json
+#   {"as_of": "...", "models": {"default": {"input_per_1m": 0.14, "output_per_1m": 0.28}, ...}}
+
+# 2) compose worker 已挂载 + 透传（compose.yml）
+#   volumes:      ./deploy/pricing.json:/app/pricing.json:ro
+#   environment:  PRICING_FILE: /app/pricing.json
+
+# 3) 本地 CLI 用 .env 指向（worker 容器内由 compose 覆盖为 /app/pricing.json）
+#   .env: PRICING_FILE=deploy/pricing.json
+```
+
+未配置 `PRICING_FILE` 时成本不估算（`job_cost_usd_total` 为空），token 指标不受影响。Prometheus 打点原理与排障见 [docs/29-PROMETHEUS-GUIDE.md](29-PROMETHEUS-GUIDE.md)。
 
 ### 8.2 隔离 fake 栈 observability smoke（P06-09C，可重复）
 

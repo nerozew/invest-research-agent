@@ -253,6 +253,30 @@ P04-01 → P04-02 → P04-03 → P04-04 → P04-05
 | P06-13 | 编写事故复盘与恢复演示 | postmortem/runbook | 至少一个故障注入→发现→恢复闭环 | production thinking |
 | P06-14 | 生成简历项目描述 v1 | `docs/RESUME-BULLETS.md` | 只使用已测量数字 | 量化表达 |
 
+## Phase 7：年度双期间并行投研流水线
+
+> 说明：本阶段是对既有固定顺序流程的受控升级。保留 legacy 路径；任何 P07 运行时
+> 改动必须在独立契约、fixture、恢复与基准测试通过后才允许成为默认路径。业务与 ADR
+> 基线见 `docs/24-P07-ANNUAL-PIPELINE-ADR.md`。
+
+| ID | 小任务 | 产物 | 验收 | 学习点 |
+|---|---|---|---|---|
+| P07-00 ✅ | 固化年度双期间并行投研 ADR/PRD/路线 | docs 01/02/05/24 | 明确 FY Y/Y-1、`annual_deep`、ReAct 边界、证据路由与无主 Agent 决策；不改运行逻辑 | 业务边界、ADR、关键路径 |
+| P07-01 ✅ | 定义 DAG 与证据类型契约 | typed `ResearchNode`/`NodeDependency`/`EvidenceArtifact`/`CoverageLedger` | Pydantic 边界、版本和状态机单测 | 领域建模 |
+| P07-02 ✅ | 实现年度 filing 选择器 | FY Y/Y-1 10-K selector | 财年≠提交年、10-K/A、截止日和不可得结果正确 | point-in-time data |
+| P07-03 ✅ | 实现单文档工件流水线 | job 工件目录中的 source/parsed/manifest | 每份 filing 可独立失败、重试、恢复和审计 | idempotent artifacts |
+| P07-04 ✅ | 实现年度证据 fan-out/fan-in | 10-K×2 + Company Facts 工件 fan-out/fan-in | 独立 I/O 并发；未齐时不解锁同比结论 | dependency scheduling |
+| P07-05 ✅ | 组装年度比较与确定性指标 | `AnnualComparisonPack` | 数字/单位/期间/引用全可追溯；LLM 不算术 | deterministic finance |
+| P07-06 ✅ | 实现受控 ReAct 补证 | `ResearchDecision` + deterministic policy | 覆盖、预算、次数、无增益停止条件可测；无网络/LLM/状态写入 | bounded ReAct |
+| P07-07 ✅ | 实现证据路由 | financial/narrative/risk/event bundles | Writer 不读取未验证证据；财务结论经过 Analysis；无 Agent/Flow 接线 | least-privilege context |
+| P07-08 ✅ | 分章节分析与增量写作 | section packs/drafts | 四类章节独立就绪；财务先经 Analysis；无 LLM/Flow 接线 | incremental synthesis |
+| P07-09 ✅ | 最终汇总与有界反思 | finalization pack + quality path | 核心章节、引用和限制门禁；一次定向修订；无 LLM/Flow 接线 | controlled reflection |
+| P07-10 ✅ | 节点级恢复与可观测性 | 独立节点表、追加事件账本、metrics/traces/diagnostics | 可解释等待、失败、重试、关键路径与预算；尚未接入运行时 | workflow observability |
+| P07-10A ✅ | 年度运行时集成 | `annual_deep` API/Worker 分流、年度协调器与正式发布 | legacy 隔离；年度节点、工件恢复、受控降级后发布 | runtime integration |
+| P07-10B ✅ | 年度章节 Agent 与受限 Final Writer | 最小权限 LLM 上下文、章节工件、并发章节执行与最终编辑 | LLM 不计算/搜索；引用与限制门禁；最终编辑不读取原始 SEC 工件 | safe agent synthesis |
+| P07-11 | 对照基准（工具已完成，真实 canary 未执行） | `annual-paired` benchmark + docs 25 | 同样本/配置下测量 E2E、关键路径、Token、质量与失败率；2 公司×2 次仅作 canary，不标记 ✅ | performance evidence |
+| P07-12 ✅ | 前端展示升级 | 年度模式入口、节点/等待诊断与年度工件分类 | annual_deep 固定 deep+10-K；不将年度任务误渲染为 legacy 步骤；原始 SEC 文件不自动读取 | product transparency |
+
 ## 3. 建议里程碑
 
 - M1（P00 + P01）：骨架、领域模型和数据库可用。

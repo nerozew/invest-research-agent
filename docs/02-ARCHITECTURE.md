@@ -81,9 +81,9 @@ flowchart LR
 | 重试 | Tenacity + 自定义错误分类 | 指数退避、抖动和可测试策略 |
 | 文档 | BeautifulSoup/lxml、Docling、PyMuPDF | SEC HTML 优先，PDF 多级降级 |
 | 数值 | `decimal.Decimal`、pandas | 金额/比例计算避免二进制浮点误差 |
-| 报告 | Jinja2 Markdown；WeasyPrint（P1） | 本地工件可控，便于引用和差异比较 |
+| 报告 | legacy 走 Jinja2 Markdown；**年度走自包含 raw 发布**（`annual_report_renderer.py`） | 年度报告含官方声明中英对照、MD&A 中文摘译、正文引用纯文本、来源清单可点击，直接发布不重复套模板 |
 | 测试 | pytest、pytest-asyncio、respx、testcontainers | 外部 API 可录制/Mock，数据库可集成测试 |
-| 可观测性 | structlog、Prometheus、Grafana、OpenTelemetry | 补齐路线第 5 周能力并支撑成功率证明 |
+| 可观测性 | structlog、Prometheus、Grafana、OpenTelemetry | API 单进程 + Worker 多进程（`PROMETHEUS_MULTIPROC_DIR` 真实 env）；WS3 成本指标（token/工具/成本）+ Grafana 8 行看板 + Jaeger 链路 |
 | 部署 | Docker Compose | 免费、本地可复现，适合作品集演示 |
 
 具体依赖版本在项目初始化当天通过官方兼容矩阵选择并锁定到 `uv.lock`。文档只约束主版本和能力，不把未来已经过期的小版本写死。
@@ -192,6 +192,19 @@ SEC 主文档通常为 HTML/iXBRL，更容易保留表格、链接和结构；PD
 Streamlit 不是独立业务层，只是 FastAPI 的 HTTP 客户端。所有数据访问都经后端 API，
 前端不直接访问 PostgreSQL/Redis、不直接调用 CrewAI Flow、不读取工件文件系统——
 保证唯一入口、统一鉴权与脱敏、可复用后端的缓存/限流/错误分类。
+
+### ADR-007：P07 保留三 Agent，改由确定性 DAG Scheduler 管理年度证据流水线
+
+P07 不增加可自由调度其他 Agent 的“主 Agent”。Scheduler 是确定性控制面：负责年度
+filing 节点的 fan-out/fan-in、依赖、事件、预算、恢复和持久化；Research Agent 只在
+Coverage Ledger 指出缺口时进行有界 ReAct；Analysis Agent 解释可信财务事实而不算术；
+Writer 消费按证据类型路由的已验证上下文。首版年度任务图由代码模板生成，不引入
+Planner LLM。详见 `docs/24-P07-ANNUAL-PIPELINE-ADR.md`。
+
+展示层补充：年度最终报告由 `reporting/annual_report_renderer.py` **确定性渲染并自包含
+raw 发布**（不走 legacy Jinja 模板，避免标题/来源/限制/声明重复）；LLM 仅做 best-effort
+的官方声明翻译与 MD&A 摘译（失败降级英文，不阻塞发布），正文引用保留来源名纯文本、
+末尾来源清单可点击。
 
 ## 11. 前端边界（Streamlit 轻量操作界面）
 
