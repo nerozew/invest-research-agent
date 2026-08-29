@@ -177,6 +177,7 @@ _LOCATOR_MARKER_RE = re.compile(
     r"\s*locator\s*=\s*offset:\d+"  # 正文 LLM 标记：locator=offset:N
     r"|（定位：offset:\d+）"  # 官方声明摘录：定位：offset:N
     r"|，定位\s+offset:\d+"  # MD&A 指引：见 SEC 申报，定位 offset:N
+    r"|\s+offset:\d+"  # 裸 offset:N（LLM 直接写 [13] offset:xxx）
 )
 
 

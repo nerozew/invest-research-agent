@@ -421,10 +421,11 @@ def test_strip_locator_markers_removes_offset():
 
     body = "正文 [1] locator=offset:33037 更多 locator=offset:99 结尾"
     assert strip_locator_markers(body) == "正文 [1] 更多 结尾"
-    # 官方声明摘录 / MD&A 指引的定位标记一并移除。
+    # 官方声明摘录 / MD&A 指引 / 裸 offset（LLM 直接写 [13] offset:xxx）一并移除。
     assert strip_locator_markers("**独立审计意见**（定位：offset:186435）") == "**独立审计意见**"
     expected = "完整原文见 SEC 申报。"
     assert strip_locator_markers("完整原文见 SEC 申报，定位 offset:116608。") == expected
+    assert strip_locator_markers("业务转型 [13] offset:40087。") == "业务转型 [13]。"
 
 
 def test_build_reference_list_links_sources_and_labels_facts():
