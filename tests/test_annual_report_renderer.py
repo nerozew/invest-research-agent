@@ -24,11 +24,13 @@ from invest_research.reporting.annual_report_renderer import (
     build_annual_cover,
     build_mda_section,
     build_mda_summary_section,
+    build_reference_list,
     extract_document_title,
     extract_mda,
     extract_official_statements,
     human_kind,
     render_citation_links,
+    render_citation_numbers,
 )
 
 SRC_URL = "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm"
@@ -395,3 +397,34 @@ def test_extract_mda_skips_long_cross_reference_block():
     assert mda.locator == "offset:110839"  # 定位到真正的 Item 7，而非风险交叉引用
     assert "forward-looking statements" in mda.text
     assert "fierce competition" not in mda.text  # 不摘风险内容
+
+
+def test_render_citation_numbers_assigns_sequence_and_dedups():
+    body = "先引 [src_a1b2c3d4e5f6] 再引 [fr_0123456789ab] 再引 [src_a1b2c3d4e5f6]。"
+    out, mapping = render_citation_numbers(body, _registry(_src_entry(), _fact_entry()))
+    assert out == "先引 [1] 再引 [2] 再引 [1]。"
+    assert mapping == {"src_a1b2c3d4e5f6": 1, "fr_0123456789ab": 2}
+
+
+def test_render_citation_numbers_keeps_unknown_and_locator():
+    body = "未知 [src_ffffffffffff] locator=offset:42 残留 [fr_0123456789ab]。"
+    out, mapping = render_citation_numbers(body, _registry(_fact_entry()))
+    assert "[src_ffffffffffff]" in out
+    assert "locator=offset:42" in out
+    assert mapping == {"fr_0123456789ab": 1}
+
+
+def test_build_reference_list_links_sources_and_labels_facts():
+    registry = _registry(_src_entry(), _fact_entry(title="营业收入"))
+    mapping = {"src_a1b2c3d4e5f6": 1, "fr_0123456789ab": 2}
+    out = build_reference_list(registry, mapping)
+    assert f"[1] [Apple Inc. 10-K]({SRC_URL})" in out
+    assert "[2] 营业收入（SEC XBRL 事实）" in out
+
+
+def test_build_reference_list_sorted_by_number_and_empty():
+    registry = _registry(_src_entry(), _fact_entry())
+    out = build_reference_list(registry, {"fr_0123456789ab": 2, "src_a1b2c3d4e5f6": 1})
+    # 按编号顺序（[1] 在 [2] 前），不按 dict 插入顺序。
+    assert out.index("[1] [Apple Inc. 10-K]") < out.index("[2] 营业收入（SEC XBRL 事实）")
+    assert build_reference_list(registry, {}) == ""

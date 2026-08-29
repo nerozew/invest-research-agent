@@ -149,6 +149,54 @@ def render_citation_links(markdown: str, registry: CitationRegistry) -> str:
     return _CITATION_TOKEN_RE.sub(_replace, markdown)
 
 
+def render_citation_numbers(
+    markdown: str, registry: CitationRegistry
+) -> tuple[str, dict[str, int]]:
+    """把正文 ``[src_<hash>]``/``[fr_<hash>]`` 替换为论文式编号 ``[1]``/``[2]``。
+
+    - 编号按 key 在正文**首次出现顺序**分配（确定性）；同一 key 多处出现用同一编号；
+    - source 与 fact 引用都编号（统一论文式）；不在注册表的 key 原样保留；
+    - 只替换 key token，不修改 `` locator=offset:..`` 残留与杂散括号；
+    - 调用方必须保证它在引用 key 门禁/提取之后执行。
+    """
+    by_key = {entry.citation_key: entry for entry in registry.entries}
+    key_to_number: dict[str, int] = {}
+
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in by_key:
+            if key not in key_to_number:
+                key_to_number[key] = len(key_to_number) + 1
+            return f"[{key_to_number[key]}]"
+        return match.group(0)
+
+    return _CITATION_TOKEN_RE.sub(_replace, markdown), key_to_number
+
+
+def build_reference_list(
+    registry: CitationRegistry, key_to_number: dict[str, int]
+) -> str:
+    """生成论文式文末引用列表：``[1] [标题](url)``（可点击）。
+
+    - 按编号顺序列出；source 有 ``canonical_url`` → ``[n] [标题](url)``；
+    - fact 无 URL → ``[n] <标题>（SEC XBRL 事实）``（不伪装链接）；
+    - 空映射返回空串（调用方据此省略该节）。
+    """
+    if not key_to_number:
+        return ""
+    by_key = {entry.citation_key: entry for entry in registry.entries}
+    lines = ["## 引用", ""]
+    for key, num in sorted(key_to_number.items(), key=lambda kv: kv[1]):
+        entry = by_key.get(key)
+        label = link_label(entry.title) if entry is not None else "来源"
+        if entry is not None and entry.canonical_url:
+            lines.append(f"[{num}] [{label}]({entry.canonical_url})")
+        else:
+            lines.append(f"[{num}] {label}（SEC XBRL 事实）")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _find_block(
     blocks: Iterable[AnnualParsedTextBlock],
     keywords: tuple[str, ...],
@@ -436,10 +484,12 @@ __all__ = [
     "build_annual_cover",
     "build_mda_section",
     "build_mda_summary_section",
+    "build_reference_list",
     "extract_document_title",
     "extract_mda",
     "extract_official_statements",
     "human_kind",
     "link_label",
     "render_citation_links",
+    "render_citation_numbers",
 ]

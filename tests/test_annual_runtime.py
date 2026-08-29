@@ -370,15 +370,15 @@ def test_annual_cover_official_statements_degrade_gracefully(harness):
 
 
 def test_report_source_list_uses_human_titles(harness):
-    """来源清单是 [标题](url) 链接而非 `- [src_<hash>] url`；SEC 标题回退为稳定短标签。"""
+    """论文式引用列表：`[n] [标题](url)` 可点击；SEC 标题回退为稳定短标签。"""
     h = harness()
     state = _run(h)
     h.publisher.publish(h.job_id, state)
     report = (h.root / "08_report.md").read_text(encoding="utf-8")
-    source_section = report.split("## 来源清单", 1)[1]
-    assert "- [src_" not in source_section
-    assert "[目标年度 10-K](" in source_section  # SEC 工件标题回退（human_kind）
-    assert "](https://" in source_section
+    ref_section = report.split("## 引用", 1)[1]
+    assert "- [src_" not in ref_section
+    assert "[目标年度 10-K](" in ref_section  # SEC 工件标题回退（human_kind）
+    assert "](https://" in ref_section
 
 
 def test_web_sources_are_marked_as_web_type(harness):
@@ -515,29 +515,18 @@ def test_annual_report_raw_publish_single_structure(harness):
     assert "数据限制（结构化）" not in report
     assert "引用键：" not in report
     # 年度自包含结构保留。
-    assert "## 来源清单" in report
+    assert "## 引用" in report
     assert "## 数据限制" in report
     assert "## 非投资建议声明" in report
 
 
-def test_source_list_dedupes_same_url(harness, monkeypatch):
-    """P2：来源清单同 URL 只列一次（Company Facts 等同一来源多次出现时）。"""
+def test_reference_list_urls_are_unique(harness):
+    """论文式引用列表同 URL 只列一条（src_key=URL hash，同 URL 天然去重）。"""
     h = harness(web=True)
-    executor = h.runtime._components.section_executor
-    original = executor.source_entries_with_titles
-
-    def _with_duplicate(artifacts, *, store=None):
-        out = original(artifacts, store=store)
-        if out:
-            first = out[0]
-            out = out + ((first[0], first[1], first[2]),)  # 追加第一条同 URL
-        return out
-
-    monkeypatch.setattr(executor, "source_entries_with_titles", _with_duplicate)
     state = _run(h)
     h.publisher.publish(h.job_id, state)
     report = (h.root / "08_report.md").read_text(encoding="utf-8")
-    source_section = report.split("## 来源清单", 1)[1].split("\n\n## ", 1)[0]
-    urls = re.findall(r"\]\((https?://[^)]+)\)", source_section)
-    assert urls, "来源清单应有可点击链接"
+    ref_section = report.split("## 引用", 1)[1].split("\n\n## ", 1)[0]
+    urls = re.findall(r"\]\((https?://[^)]+)\)", ref_section)
+    assert urls, "引用列表应有可点击链接"
     assert len(urls) == len(set(urls)), f"同 URL 应去重: {urls}"

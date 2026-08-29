@@ -80,11 +80,11 @@ from invest_research.reporting.annual_report_renderer import (
     build_annual_cover,
     build_mda_section,
     build_mda_summary_section,
+    build_reference_list,
     extract_mda,
     extract_official_statements,
     human_kind,
-    link_label,
-    render_citation_links,
+    render_citation_numbers,
 )
 from invest_research.reporting.annual_statements_renderer import render_statements
 from invest_research.tools.artifact_store import ArtifactStore
@@ -782,16 +782,6 @@ class AnnualResearchRuntime:
             if executor
             else ()
         )
-        # 来源清单：同 URL 只列一次（Company Facts 等同一来源可能出现多次）。
-        sources: list[str] = []
-        sources_seen: set[str] = set()
-        for key, title, url in titled:
-            if key not in edited or url in sources_seen:
-                continue
-            sources_seen.add(url)
-            sources.append(
-                f"- [{link_label(title or human_kind(kind_by_url.get(url, url)))}]({url})"
-            )
         title_by_url = {
             url: (title or human_kind(kind_by_url.get(url, url))) for _key, title, url in titled
         }
@@ -817,7 +807,7 @@ class AnnualResearchRuntime:
         return (
             f"# {identity.legal_name} 年度投资研究报告\n\n{cover}\n\n{body}\n\n"
             f"## 数据限制\n{limitations}\n\n"
-            f"## 来源清单\n{chr(10).join(sources) or '- 引用已在各章节标注。'}\n\n"
+            # 来源清单已由 _build_state 的论文式"## 引用"编号列表承担（可点击链接 + 编号对应）。
             "## 非投资建议声明\n本报告仅基于已验证公开资料整理，不构成投资建议。",
             title_by_url,
         )
@@ -1042,10 +1032,16 @@ class AnnualResearchRuntime:
             coverage_notes="年度双期间 SEC 证据链",
         )
         registry = build_citation_registry(research_pack, analysis_pack)
-        # 引用提取用原始正文（[src_xxx]）；链接化是发布层展示转换，必须在其后执行，
+        # 引用提取用原始正文（[src_xxx]）；编号化是发布层展示转换，必须在其后执行，
         # 否则 [src_xxx] 文本消失会导致 citation_keys 变空（引用门禁/提取被破坏）。
         citations = [key for key in registry.keys() if f"[{key}]" in final_markdown]
-        presentation_markdown = render_citation_links(final_markdown, registry)
+        # 论文式：正文 [src_xxx]/[fr_xxx] → [1][2]…，文末追加可点击的编号引用列表。
+        presentation_markdown, key_to_number = render_citation_numbers(
+            final_markdown, registry
+        )
+        reference_list = build_reference_list(registry, key_to_number)
+        if reference_list:
+            presentation_markdown = presentation_markdown.rstrip() + "\n\n" + reference_list
         return ResearchFlowState(
             request=request,
             company_identity=identity,
