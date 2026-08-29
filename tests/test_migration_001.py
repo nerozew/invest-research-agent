@@ -10,6 +10,7 @@ import os
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from conftest import db_integration_enabled
 from sqlalchemy import inspect, text
 
@@ -68,7 +69,7 @@ def test_upgrade_downgrade_upgrade(pg_container: str) -> None:
 
 
 def test_migration_version_table(pg_container: str) -> None:
-    """Alembic version 表存在且记录当前 head（0008）。"""
+    """数据库版本必须等于仓库唯一 head，新增迁移后无需手动改版本常量。"""
     cfg = _alembic_cfg(pg_container)
     command.upgrade(cfg, "head")
 
@@ -77,4 +78,4 @@ def test_migration_version_table(pg_container: str) -> None:
     engine = create_engine(_normalize_psycopg(pg_container))
     with engine.connect() as conn:
         version_num = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert version_num == "0008"
+    assert version_num == ScriptDirectory.from_config(cfg).get_current_head()

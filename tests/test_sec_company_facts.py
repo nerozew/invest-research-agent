@@ -67,6 +67,8 @@ def test_parses_facts_with_fidelity(msft_facts: dict[str, Any]) -> None:
     assert revenue_fy.fiscal_year == 2024
     assert revenue_fy.fiscal_period == "FY"
     assert revenue_fy.fact_version == "v1"
+    assert result.value.source_content == json.dumps(msft_facts).encode()
+    assert result.value.source_checksum is not None
 
 
 def test_instant_fact_uses_instant_date(msft_facts: dict[str, Any]) -> None:

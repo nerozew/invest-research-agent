@@ -24,6 +24,7 @@ from invest_research.application.job_listing import (
     JobListEntry,
     JobListStore,
 )
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.status import JobStatus
 from invest_research.settings import Settings
 
@@ -113,6 +114,17 @@ def test_list_empty_database() -> None:
     body = response.json()
     assert body["items"] == []
     assert body["next_cursor"] is None
+
+
+def test_list_includes_research_mode_and_legacy_default() -> None:
+    annual = _entry(idx=0)
+    annual.research_mode = ResearchMode.ANNUAL_DEEP
+    client = _client(FakeJobListStore([annual]))
+
+    response = client.get("/v1/research-jobs")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["research_mode"] == "annual_deep"
 
 
 def test_list_default_limit_20_desc() -> None:

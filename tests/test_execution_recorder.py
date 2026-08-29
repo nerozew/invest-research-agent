@@ -115,9 +115,10 @@ def test_derive_steps_marks_gate_and_manifest_failed_on_reject() -> None:
     )
     state.run_manifest = {"status": "rejected"}
     steps = {s["step_name"]: s for s in derive_steps(state)}
-    assert steps["06_quality_gate"]["status"] == "failed"
+    # StepStatus 无字面 "failed"，写入端用终态失败值（避免 API 读取 500）。
+    assert steps["06_quality_gate"]["status"] == "failed_terminal"
     assert steps["06_quality_gate"]["error_json"] == {"recommendation": "rejected"}
-    assert steps["07_manifest"]["status"] == "failed"
+    assert steps["07_manifest"]["status"] == "failed_terminal"
 
 
 def test_merge_artifacts_to_job_dir(tmp_path) -> None:
@@ -141,6 +142,24 @@ def test_merge_artifacts_to_job_dir(tmp_path) -> None:
         assert a["content_checksum"]
         assert a["byte_size"] > 0
         assert a["storage_uri"] == f"{job_id}/{a['artifact_key']}"
+
+
+def test_merge_artifacts_registers_annual_derivatives_but_not_raw_sec_source(tmp_path) -> None:
+    root = tmp_path / "artifacts"
+    job_id = uuid.uuid4()
+    job_dir = root / str(job_id)
+    (job_dir / "annual/company-facts").mkdir(parents=True)
+    (job_dir / "annual/target").mkdir(parents=True)
+    (job_dir / "annual/runtime_state.json").write_text("{}", encoding="utf-8")
+    (job_dir / "annual/company-facts/selected.json").write_text("{}", encoding="utf-8")
+    (job_dir / "annual/target/parsed.json").write_text("raw filing derivative", encoding="utf-8")
+
+    artifacts = merge_artifacts_to_job_dir(str(root), job_id, _request())
+
+    assert {item["artifact_key"] for item in artifacts} == {
+        "annual/runtime_state.json",
+        "annual/company-facts/selected.json",
+    }
 
 
 def test_execution_recorder_inserts_steps_and_artifacts(tmp_path) -> None:
@@ -190,3 +209,48 @@ def test_execution_recorder_inserts_steps_and_artifacts(tmp_path) -> None:
         artifacts = session.query(Artifact).filter_by(job_id=job_id).all()
         assert len(artifacts) == 6
         assert (root / str(job_id) / "07_manifest.json").is_file()
+
+
+def test_legacy_failed_step_status_is_readable_via_query_store(tmp_path) -> None:
+    """回归：历史 execution_recorder 把失败步骤写成字面 ``"failed"``，而
+    ``StepStatus`` 只有 ``failed_retryable``/``failed_terminal``，直接读取会
+    ValueError 导致 API GET 500。SqlJobQueryStore 必须兼容映射为终态失败。"""
+    from invest_research.domain.status import StepStatus
+    from invest_research.infrastructure.db.application_stores import SqlJobQueryStore
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+    job_id = uuid.uuid4()
+    with factory() as session:
+        job = ResearchJob(
+            id=job_id,
+            input_company="AAPL",
+            as_of_date=_AS_OF,
+            language="zh-CN",
+            requested_forms=["10-K", "10-Q"],
+            status="succeeded",
+            config_snapshot={},
+        )
+        session.add(job)
+        session.flush()
+        session.add(
+            WorkflowStep(
+                job_id=job_id,
+                sequence_no=3,
+                step_name="03_documents",
+                status="failed",  # 历史遗留非法字面值
+                attempt_count=1,
+            )
+        )
+        session.commit()
+
+    snapshot = SqlJobQueryStore(factory).get(job_id)
+    assert snapshot is not None
+    step = next(s for s in snapshot.steps if s.step_name == "03_documents")
+    assert step.status == StepStatus.FAILED_TERMINAL

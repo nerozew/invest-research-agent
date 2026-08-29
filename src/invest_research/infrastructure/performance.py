@@ -87,10 +87,32 @@ class PerformanceRecorder:
         with self._lock:
             self._cache_hits[tool_name] = self._cache_hits.get(tool_name, 0) + 1
 
+    _TOKEN_SUM_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_prompt_tokens")
+
     def set_token_usage(self, usage: dict[str, int] | None) -> None:
-        """写入安全的 token usage 汇总（None 表示不可获取）。"""
+        """写入安全的 token usage 汇总（None 表示不可获取）。
+
+        覆盖式写入（兼容 legacy 单次 kickoff 路径）。
+        """
         with self._lock:
-            self._token_usage = usage
+            self._token_usage = dict(usage) if usage is not None else None
+
+    def add_token_usage(self, usage: dict[str, int] | None) -> None:
+        """按 Job 累加一次真实 usage（多阶段路径：Research/Analysis/Writer/Finalizer）。
+
+        - 只累加数值计数字段；usage 为 None 时不改动当前汇总；
+        - 已有的非 None 汇总与新 usage 逐字段相加（不重复计数）；
+        - 无任何 usage 时保持 None（绝不从字符数/日志估算）。
+        """
+        if usage is None:
+            return
+        with self._lock:
+            if self._token_usage is None:
+                self._token_usage = {}
+            for key in self._TOKEN_SUM_KEYS:
+                value = usage.get(key)
+                if isinstance(value, (int, float)):
+                    self._token_usage[key] = int(self._token_usage.get(key, 0)) + int(value)
 
     def snapshot(self) -> dict[str, Any]:
         """汇总为 manifest.performance 结构（不包含任何敏感字段）。"""

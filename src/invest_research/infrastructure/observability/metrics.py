@@ -82,6 +82,11 @@ __all__ = [
     "writer_output_chars",
     "report_invalid_total",
     "stage_duration_seconds",
+    # P07-10
+    "annual_node_transitions_total",
+    "annual_node_duration_seconds",
+    "annual_nodes_waiting",
+    "annual_budget_stops_total",
 ]
 
 # 步骤耗时 Histogram 桶（秒）：覆盖本地 fake 运行（秒级）到 live 长任务（分钟级）。
@@ -259,6 +264,23 @@ research_jobs_in_progress = Gauge(
     "research_jobs_in_progress",
     "当前正在执行的研究任务数（按档位）",
     ["profile"],
+)
+
+# WS3：per-job 成本/用量聚合（label 全白名单，始终记录；per-job 明细用 opt-in gauge）。
+job_tokens_total = Counter(
+    "job_tokens_total",
+    "已发布任务累计 token（按档位/模式/类型 input/output/total）",
+    ["profile", "mode", "type"],
+)
+job_tool_calls_total = Counter(
+    "job_tool_calls_total",
+    "已发布任务累计工具调用次数（按档位/模式）",
+    ["profile", "mode"],
+)
+job_cost_usd_total = Counter(
+    "job_cost_usd_total",
+    "已发布任务累计估算成本 USD（按档位/模式/终态）",
+    ["profile", "mode", "status"],
 )
 
 stale_recovery_total = Counter(
@@ -485,4 +507,30 @@ stage_duration_seconds = Histogram(
     "真实阶段 Span 耗时（秒）",
     ["stage", "status"],
     buckets=_AGENT_DURATION_BUCKETS,
+)
+
+# P07-10：年度节点指标只保留稳定、低基数的节点类型/状态/原因码标签。
+annual_node_transitions_total = Counter(
+    "annual_node_transitions_total",
+    "年度 DAG 节点状态转换总数（不含 job_id/node_key/company）",
+    ["node_kind", "from_status", "to_status"],
+)
+
+annual_node_duration_seconds = Histogram(
+    "annual_node_duration_seconds",
+    "年度 DAG 节点已记录执行耗时（按节点类型与终态）",
+    ["node_kind", "status"],
+    buckets=_STEP_DURATION_BUCKETS,
+)
+
+annual_nodes_waiting = Gauge(
+    "annual_nodes_waiting",
+    "年度 DAG 中等待上游节点数（按稳定原因码）",
+    ["reason_code"],
+)
+
+annual_budget_stops_total = Counter(
+    "annual_budget_stops_total",
+    "年度补证因预算或无增益停止的次数（按稳定原因码）",
+    ["reason_code"],
 )

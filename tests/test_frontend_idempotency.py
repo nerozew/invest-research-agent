@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.frontend.idempotency import IdempotencyKeyManager, request_fingerprint
 
@@ -64,3 +65,13 @@ def test_fingerprint_stable_across_equal_requests() -> None:
     a = _make_request()
     b = _make_request()
     assert request_fingerprint(a) == request_fingerprint(b)
+
+
+def test_legacy_fingerprint_omits_new_default_mode_but_annual_deep_isolated() -> None:
+    """P07-01：旧请求指纹兼容；新模式不会与旧模式共用重试键。"""
+    legacy = _make_request()
+    annual = legacy.model_copy(update={"research_mode": ResearchMode.ANNUAL_DEEP})
+
+    assert '"research_mode"' not in request_fingerprint(legacy)
+    assert '"research_mode":"annual_deep"' in request_fingerprint(annual)
+    assert request_fingerprint(legacy) != request_fingerprint(annual)

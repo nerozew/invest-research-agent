@@ -511,3 +511,36 @@ def test_no_high_cardinality_labels_p06_09c() -> None:
             assert "company" not in label, f"{metric._name} label {label} company"
             assert "error_message" not in label, f"{metric._name} label {label} error_message"
             assert "url" not in label, f"{metric._name} label {label} url"
+
+
+def test_record_job_performance_aggregate_metrics() -> None:
+    """WS3：聚合 token/工具调用/成本指标可安全写入（缺失 token 不伪造 0）。"""
+    from invest_research.infrastructure.observability.metrics_events import record_job_performance
+
+    # 缺 token 不抛异常（内部 try/except 吞掉，不伪造）。
+    record_job_performance(
+        profile="deep", mode="annual_deep", status="published",
+        input_tokens=None, output_tokens=None, total_tokens=None,
+        tool_calls=0, cost_usd=None,
+    )
+    # 有 token/成本时正常计数。
+    record_job_performance(
+        profile="deep", mode="annual_deep", status="published",
+        input_tokens=1000, output_tokens=2000, total_tokens=3000,
+        tool_calls=5, cost_usd=0.012,
+    )
+    sample = metrics.job_tokens_total.labels("deep", "annual_deep", "total")
+    assert sample._value.get() >= 3000  # noqa: SLF001 - 读取计数器值
+
+
+def test_ws3_aggregate_metrics_no_high_cardinality_labels() -> None:
+    """WS3 聚合指标 label 全白名单（无 job_id/company）。"""
+    ws3_metrics = (
+        metrics.job_tokens_total,
+        metrics.job_tool_calls_total,
+        metrics.job_cost_usd_total,
+    )
+    for metric in ws3_metrics:
+        for label in metric._labelnames:  # noqa: SLF001
+            assert "job_id" not in label
+            assert "company" not in label

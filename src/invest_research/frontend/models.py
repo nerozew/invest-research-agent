@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from invest_research.domain.annual_node_runtime import AnnualNodeGraphSnapshot
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus, StepStatus
 
@@ -92,6 +94,21 @@ class StepSnapshot(BaseModel):
     duration_seconds: float | None = None
 
 
+class PerformanceSnapshot(BaseModel):
+    """per-job 性能/成本快照（镜像后端 PerformanceSnapshot；缺失字段为 None）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    llm_calls: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    total_tokens: int | None = None
+    tool_calls_total: int | None = None
+    estimated_cost_usd: float | None = None
+    pricing_as_of: str | None = None
+
+
 class JobSnapshot(BaseModel):
     """GET /v1/research-jobs/{id} 的响应体（任务状态快照）。"""
 
@@ -102,6 +119,8 @@ class JobSnapshot(BaseModel):
     current_step: str | None = None
     # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
     research_profile: str = "deep"
+    research_mode: ResearchMode = ResearchMode.LEGACY
+    annual_nodes: AnnualNodeGraphSnapshot | None = None
     error_code: str | None = None
     error_message: str | None = None
     # P06-11K-4：失败阶段（如 05_writer），由后端稳定错误分类写入。
@@ -110,6 +129,8 @@ class JobSnapshot(BaseModel):
     completed_at: datetime | None = None
     duration_seconds: float | None = None
     steps: tuple[StepSnapshot, ...] = Field(default_factory=tuple)
+    # WS3：per-job 性能/成本（读 07_manifest.json；缺失为 None）
+    performance: PerformanceSnapshot | None = None
 
 
 class JobListEntry(BaseModel):
@@ -125,6 +146,7 @@ class JobListEntry(BaseModel):
     current_step: str | None = None
     # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
     research_profile: str = "deep"
+    research_mode: ResearchMode = ResearchMode.LEGACY
     error_code: str | None = None
     created_at: datetime
     started_at: datetime | None = None

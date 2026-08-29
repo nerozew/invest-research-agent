@@ -229,19 +229,19 @@ class LLMConfig(BaseModel):
         )
         if override is None:
             return base
-        # RoleLLMOverride 不携带 provider（始终 openai_compatible，全局唯一）；
-        # 角色覆盖只替换 vendor/base_url/api_key/model/temperature/timeout/enable_thinking。
-        return base.model_copy(
-            update={
-                "vendor": override.vendor,
-                "base_url": override.base_url,
-                "api_key": override.api_key,
-                "model": override.model,
-                "temperature": override.temperature,
-                "timeout": override.timeout,
-                "enable_thinking": override.enable_thinking,
-            }
-        )
+        # RoleLLMOverride 不携带 provider（始终 openai_compatible，全局唯一）。
+        # 只替换显式配置的非 None 字段，其余继续继承全局默认；布尔 False 会保留。
+        values = {
+            "vendor": override.vendor,
+            "base_url": override.base_url,
+            "api_key": override.api_key,
+            "model": override.model,
+            "temperature": override.temperature,
+            "timeout": override.timeout,
+            "enable_thinking": override.enable_thinking,
+        }
+        updates = {key: value for key, value in values.items() if value is not None}
+        return base.model_copy(update=updates)
 
     def model_for(self, role: LLMRole) -> str:
         """按角色返回模型名（业务只表达角色，不写死供应商/模型名）。
@@ -249,8 +249,7 @@ class LLMConfig(BaseModel):
         角色覆盖了 model 时返回覆盖值；否则返回全局 model_research/analysis/writer。
         """
         override = self.role_overrides.get(role.value)
-        if override is not None:
-            assert isinstance(override.model, str)
+        if override is not None and isinstance(override.model, str):
             return override.model
         match role:
             case LLMRole.RESEARCH:

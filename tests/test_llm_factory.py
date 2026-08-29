@@ -84,6 +84,34 @@ def test_role_models_resolve_correctly() -> None:
     assert config.model_for(LLMRole.WRITER) == "qwen-max"
 
 
+def test_role_thinking_only_overrides_inherit_global_llm_fields() -> None:
+    """三个独立开关无需重复 vendor/key/model，False 也必须被识别为显式覆盖。"""
+    config = _config(
+        llm_vendor="deepseek",
+        llm_base_url="https://api.deepseek.com",
+        llm_model_research="deepseek-v4-flash",
+        llm_model_analysis="deepseek-v4-flash",
+        llm_model_writer="deepseek-v4-flash",
+        llm_enable_thinking=True,
+        llm_research_enable_thinking=False,
+        llm_analysis_enable_thinking=True,
+        llm_writer_enable_thinking=False,
+    )
+
+    research = config.config_for(LLMRole.RESEARCH)
+    analysis = config.config_for(LLMRole.ANALYSIS)
+    writer = config.config_for(LLMRole.WRITER)
+
+    assert research.enable_thinking is False
+    assert analysis.enable_thinking is True
+    assert writer.enable_thinking is False
+    for role_config in (research, analysis, writer):
+        assert role_config.vendor == "deepseek"
+        assert role_config.base_url == "https://api.deepseek.com"
+        assert role_config.model == "deepseek-v4-flash"
+        assert role_config.api_key.get_secret_value() == SECRET
+
+
 # ---- 4. 三个角色可配置不同模型 ----
 def test_roles_can_use_different_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_MODEL_RESEARCH", "qwen-plus")

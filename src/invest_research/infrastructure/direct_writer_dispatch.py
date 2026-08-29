@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 from invest_research.agents.llm_factory import LLMConfig, LLMRole
 from invest_research.application.writer_context_builder import BuiltWriterContext
@@ -34,7 +34,7 @@ from invest_research.application.writer_direct_dispatch import (
 )
 
 # Writer 报告正文预算（token）。报告比结构化草稿长得多；过小会掩盖截断。
-_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_MAX_TOKENS = 8192
 
 # 系统提示词（固定、稳定，便于测试断言；不含任何公司/密钥信息）。
 _SYSTEM_PROMPT = (
@@ -67,12 +67,15 @@ class DirectLlmWriterDispatch:
         *,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: Any | None = None,
+        usage_observer: Callable[[dict[str, int]], None] | None = None,
     ) -> None:
         self._config = config
         self._max_tokens = int(max_tokens)
         # 可注入 client（测试用 mock / MockTransport）；None 时惰性构造真实 openai.Client。
         self._client: Any | None = client
         self._client_built = client is not None
+        # Job-local token usage 观察者（flow_wiring 传入 recorder.add_token_usage）
+        self._usage_observer = usage_observer
         # 审计：每次请求的脱敏结构（不含 prompt 正文 / 报告正文 / API Key）。
         self.requests: list[dict[str, Any]] = []
 
@@ -106,8 +109,7 @@ class DirectLlmWriterDispatch:
             ],
             "max_tokens": self._max_tokens,
         }
-        # P06-11G：thinking 按 Writer 角色配置（deepseek=thinking.type；
-        # 与 build_real_llm / DeepSeekJsonObjectFinalizer 同一决策源）。
+        # P06-11G：thinking 按 Writer 角色配置（deepseek=thinking.type；同 build_real_llm）。
         if role_cfg.enable_thinking is not None and role_cfg.vendor == "deepseek":
             request_kwargs["extra_body"] = {
                 "thinking": {"type": "enabled" if role_cfg.enable_thinking else "disabled"}
@@ -150,6 +152,7 @@ class DirectLlmWriterDispatch:
         input_tokens: int | None = None
         output_tokens: int | None = None
         cached_input_tokens: int | None = None
+        total_tokens: int | None = None
         usage = getattr(response, "usage", None)
         if usage is not None:
             input_tokens = _int_or_none(getattr(usage, "prompt_tokens", None))
@@ -161,6 +164,20 @@ class DirectLlmWriterDispatch:
                 cached_input_tokens = _int_or_none(
                     getattr(prompt_details, "cached_tokens", None)
                 )
+            total_tokens = _int_or_none(getattr(usage, "total_tokens", None))
+            # P06-11 Token 汇总：把真实响应 usage 交给 Job-local observer（只读计数）。
+            if self._usage_observer is not None:
+                try:
+                    self._usage_observer(
+                        {
+                            "prompt_tokens": input_tokens or 0,
+                            "completion_tokens": output_tokens or 0,
+                            "cached_prompt_tokens": cached_input_tokens or 0,
+                            "total_tokens": total_tokens or 0,
+                        }
+                    )
+                except Exception:  # noqa: BLE001 - 观测必须尽力而为
+                    pass
         # 审计：记录 finish_reason 与正文长度（不记录正文）。
         self.requests[-1]["finish_reason"] = finish_reason
         self.requests[-1]["output_chars"] = len(content)

@@ -68,6 +68,7 @@ class SearchResult(BaseModel):
     title: str = Field(min_length=1)
     url: str = Field(min_length=1)
     publisher: str | None = None
+    snippet: str | None = None
     published_at: date
     accessed_at: datetime
 

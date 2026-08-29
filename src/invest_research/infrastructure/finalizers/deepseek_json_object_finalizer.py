@@ -52,7 +52,7 @@ from invest_research.application.structured_finalizer import (
 
 # Finalizer 小型草稿预算（毫 token token）：AnalysisSelectionDraft 等草稿很小。
 # 与 Agent 工具循环的长输出分离；过大预算会掩盖截断问题。
-_DEFAULT_MAX_TOKENS = 2000
+_DEFAULT_MAX_TOKENS = 4096
 
 # 角色映射表：稳定角色名 → LLMRole
 _ROLE_MAP: dict[RoleName, LLMRole] = {
@@ -176,6 +176,7 @@ class DeepSeekJsonObjectFinalizer:
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: Any | None = None,
         diagnostic_callback: Callable[[dict[str, Any]], None] | None = None,
+        usage_observer: Callable[[dict[str, int]], None] | None = None,
     ) -> None:
         self._config = config
         self._canonicalizer = canonicalizer or BoundaryCanonicalizer()
@@ -186,6 +187,8 @@ class DeepSeekJsonObjectFinalizer:
         self._client: Any | None = client
         self._client_built = client is not None
         self._diagnostic_callback = diagnostic_callback
+        # Job-local token usage 观察者（flow_wiring 传入 recorder.add_token_usage）
+        self._usage_observer = usage_observer
         # 测试/审计：记录每次请求体（不含响应内容，避免敏感数据）
         self.requests: list[dict[str, Any]] = []
 
@@ -404,9 +407,9 @@ class DeepSeekJsonObjectFinalizer:
         # - None → 不传（供应商默认）。
         # 与 build_real_llm 的 _build_thinking_extra_body 保持同一决策源。
         role_cfg = self._config.config_for(llm_role)
-        if role_cfg.enable_thinking is not None and role_cfg.vendor == "deepseek":
+        if role_cfg.vendor == "deepseek":
             request_kwargs["extra_body"] = {
-                "thinking": {"type": "enabled" if role_cfg.enable_thinking else "disabled"}
+                "thinking": {"type": "disabled"}
             }
 
         # 记录请求体（脱敏：不含 api_key）
@@ -435,6 +438,41 @@ class DeepSeekJsonObjectFinalizer:
         choice = response.choices[0] if getattr(response, "choices", None) else None
         if choice is None:
             return "", "stop"
+        # P06-11 Token 汇总：把真实响应 usage 交给 Job-local observer（只读计数）。
+        usage = getattr(response, "usage", None)
+        if usage is not None and self._usage_observer is not None:
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            cached = (
+                getattr(prompt_details, "cached_tokens", None)
+                if prompt_details is not None
+                else None
+            )
+            if isinstance(cached, dict):
+                cached = cached.get("cached_tokens")
+            cached_int = (
+                int(cached) if isinstance(cached, (int, float)) and int(cached) > 0 else 0
+            )
+            prompt_raw = getattr(usage, "prompt_tokens", None)
+            prompt_int = (
+                int(prompt_raw) if isinstance(prompt_raw, (int, float)) else 0
+            )
+            completion_raw = getattr(usage, "completion_tokens", None)
+            completion_int = (
+                int(completion_raw) if isinstance(completion_raw, (int, float)) else 0
+            )
+            total_raw = getattr(usage, "total_tokens", None)
+            total_int = int(total_raw) if isinstance(total_raw, (int, float)) else 0
+            try:
+                self._usage_observer(
+                    {
+                        "prompt_tokens": prompt_int,
+                        "completion_tokens": completion_int,
+                        "cached_prompt_tokens": cached_int,
+                        "total_tokens": total_int,
+                    }
+                )
+            except Exception:  # noqa: BLE001 - 观测必须尽力而为
+                pass
         finish_reason = str(getattr(choice, "finish_reason", "stop") or "stop")
         content = getattr(choice.message, "content", None)
         text = content if isinstance(content, str) else ""

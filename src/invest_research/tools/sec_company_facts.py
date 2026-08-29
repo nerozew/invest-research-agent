@@ -7,6 +7,7 @@ unit/period 下的原始数值解析为 domain.FinancialFact（不计算、不�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from decimal import Decimal
@@ -50,6 +51,10 @@ class FetchFactsResponse(BaseModel):
     model_config = {"frozen": True}
 
     facts: list[FinancialFact]
+    # P07-04：保留 SEC 的原始响应，供独立工件流水线审计与恢复；默认值保持
+    # 既有 fixture/调用方只传 ``facts`` 时的构造兼容性。
+    source_content: bytes = b""
+    source_checksum: str | None = None
 
 
 def build_company_facts_url(cik: str) -> str:
@@ -179,11 +184,18 @@ class SECCompanyFactsTool:
                 )
             )
 
-        payload = json.loads(response.text)
+        source_content = response.content
+        payload = json.loads(source_content)
         facts = parse_company_facts(
             payload,
             request.cik,
             request.taxonomy,
             request.as_of_date,
         )
-        return ToolSuccess(value=FetchFactsResponse(facts=facts))
+        return ToolSuccess(
+            value=FetchFactsResponse(
+                facts=facts,
+                source_content=source_content,
+                source_checksum=hashlib.sha256(source_content).hexdigest(),
+            )
+        )

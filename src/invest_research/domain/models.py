@@ -19,6 +19,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from invest_research.domain.annual_pipeline import AnnualComparisonStatus, ResearchMode
 from invest_research.domain.quality import QualityRecommendation
 
 _CIK_PATTERN = re.compile(r"^\d{10}$")
@@ -58,6 +59,10 @@ class ResearchRequest(BaseModel):
     # P06-06A：每任务研究档位（fast/deep）。默认 deep 保证旧请求兼容；
     # Pydantic 自动校验非法值（API 422）。
     research_profile: str = Field(default=ResearchProfileMode.DEEP.value)
+
+    # P07-01：显式年度深度研究模式。当前运行时只支持 legacy；annual_deep 的
+    # fail-fast 门禁位于 application 创建任务边界，避免它被旧串行流程静默执行。
+    research_mode: ResearchMode = Field(default=ResearchMode.LEGACY)
 
     @field_validator("input_company")
     @classmethod
@@ -101,6 +106,15 @@ class ResearchRequest(BaseModel):
         except ValueError as exc:
             raise ValueError("research_profile 仅支持 fast 或 deep") from exc
         return value
+
+    def idempotency_fingerprint(self) -> str:
+        """返回向后兼容的请求幂等指纹。
+
+        P07 新增的默认 ``legacy`` 不参与指纹，使升级前后完全相同的旧请求继续
+        复用已有 Idempotency-Key；显式 ``annual_deep`` 则必须参与隔离。
+        """
+        exclude = {"research_mode"} if self.research_mode is ResearchMode.LEGACY else None
+        return self.model_dump_json(exclude=exclude)
 
 
 class CompanyIdentity(BaseModel):
@@ -327,6 +341,47 @@ class MetricResult(BaseModel):
             raise ValueError("status=computed 时 value 不能为空")
         if self.status != MetricStatus.COMPUTED and self.value is not None:
             raise ValueError(f"status={self.status.value} 时 value 必须为空")
+        return self
+
+
+class AnnualComparisonInputFingerprint(BaseModel):
+    """P07-05 比较包可安全复用所需的所有输入版本。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    company_facts_artifact_key: str | None = None
+    company_facts_checksum: str | None = None
+    target_document_checksum: str | None = None
+    comparator_document_checksum: str | None = None
+    target_accession_number: str | None = None
+    comparator_accession_number: str | None = None
+    concept_mapping_version: str = Field(min_length=1)
+
+
+class AnnualComparisonPack(BaseModel):
+    """可信年度财务比较结果；只含确定性数据与限制。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: str = "annual_comparison_pack_v1"
+    status: AnnualComparisonStatus
+    target_fiscal_year: int | None = Field(default=None, ge=1900, le=9999)
+    comparator_fiscal_year: int | None = Field(default=None, ge=1900, le=9999)
+    target_accession_number: str | None = None
+    comparator_accession_number: str | None = None
+    concept_mapping_version: str = Field(min_length=1)
+    input_fingerprint: AnnualComparisonInputFingerprint
+    facts: tuple[FinancialFact, ...] = ()
+    metrics: tuple[MetricResult, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "AnnualComparisonPack":
+        if self.status is AnnualComparisonStatus.BLOCKED:
+            if self.facts or self.metrics or not self.limitations:
+                raise ValueError("blocked 比较包不得包含事实或指标，且必须说明限制")
+        elif self.target_fiscal_year is None or self.comparator_fiscal_year is None:
+            raise ValueError("可计算的比较包必须包含两个财年")
         return self
 
 

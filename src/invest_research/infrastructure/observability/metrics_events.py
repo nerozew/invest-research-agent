@@ -27,6 +27,9 @@ from invest_research.infrastructure.observability.metrics import (
     http_request_duration_seconds,
     http_requests_in_progress,
     http_requests_total,
+    job_cost_usd_total,
+    job_tokens_total,
+    job_tool_calls_total,
     llm_request_duration_seconds,
     llm_requests_total,
     llm_response_kind_total,
@@ -116,13 +119,21 @@ def _safe_inc(
     counter: Any,
     *,
     label_values: tuple[str, ...] | None = None,
+    value: int | float | None = None,
 ) -> None:
     """安全计数：任何异常只记录脱敏日志（不改变业务结果）。"""
     try:
         if label_values is None:
-            counter.inc()
+            if value is None:
+                counter.inc()
+            else:
+                counter.inc(value)
         else:
-            counter.labels(*label_values).inc()
+            labeled = counter.labels(*label_values)
+            if value is None:
+                labeled.inc()
+            else:
+                labeled.inc(value)
     except Exception:  # noqa: BLE001 - 监控写入尽力而为，绝不中断业务
         _LOGGER.warning("metrics_inc_failed metric=%s", getattr(counter, "_name", "unknown"))
 
@@ -553,3 +564,33 @@ def count_report_invalid(reason: str) -> None:
 def observe_stage_duration(stage: str, status: str, duration_s: float) -> None:
     """真实阶段 Span 耗时（秒；stage/status，不记录 job_id/company）。"""
     _safe_obs(stage_duration_seconds, (stage, status), duration_s)
+
+
+def record_job_performance(
+    *,
+    profile: str,
+    mode: str,
+    status: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    tool_calls: int,
+    cost_usd: float | None,
+) -> None:
+    """WS3：已发布任务的 token/工具调用/成本聚合（低基数 label；缺失 token 不伪造 0）。
+
+    - 只在真实终态记录一次（避免重复 Celery 投递重复计数）；
+    - cost 由调用方按 pricing 估算，缺失传 None 不计数。
+    """
+    mode = mode or "legacy"
+    status = status or "unknown"
+    if total_tokens is not None and total_tokens >= 0:
+        _safe_inc(job_tokens_total, label_values=(profile, mode, "total"), value=total_tokens)
+    if input_tokens is not None and input_tokens >= 0:
+        _safe_inc(job_tokens_total, label_values=(profile, mode, "input"), value=input_tokens)
+    if output_tokens is not None and output_tokens >= 0:
+        _safe_inc(job_tokens_total, label_values=(profile, mode, "output"), value=output_tokens)
+    if tool_calls and tool_calls > 0:
+        _safe_inc(job_tool_calls_total, label_values=(profile, mode), value=tool_calls)
+    if cost_usd is not None and cost_usd >= 0:
+        _safe_inc(job_cost_usd_total, label_values=(profile, mode, status), value=cost_usd)

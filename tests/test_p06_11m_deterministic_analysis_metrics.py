@@ -60,6 +60,54 @@ def _instant(concept: str, value: str, when: date, *, fiscal_year: int) -> Finan
     )
 
 
+def _quarter(
+    concept: str,
+    value: str,
+    start: date,
+    end: date,
+    *,
+    fiscal_year: int,
+    fiscal_period: str = "Q1",
+) -> FinancialFact:
+    return FinancialFact(
+        company_id="0000000001",
+        source_id="sec-companyfacts-0000000001",
+        taxonomy="us-gaap",
+        concept=concept,
+        value=Decimal(value),
+        unit="USD",
+        period_start=start,
+        period_end=end,
+        fiscal_year=fiscal_year,
+        fiscal_period=fiscal_period,
+        form_type="10-Q",
+        accession_number=f"{fiscal_year}-{fiscal_period.lower()}",
+    )
+
+
+def _quarter_instant(
+    concept: str,
+    value: str,
+    when: date,
+    *,
+    fiscal_year: int,
+    fiscal_period: str = "Q1",
+) -> FinancialFact:
+    return FinancialFact(
+        company_id="0000000001",
+        source_id="sec-companyfacts-0000000001",
+        taxonomy="us-gaap",
+        concept=concept,
+        value=Decimal(value),
+        unit="USD",
+        instant_date=when,
+        fiscal_year=fiscal_year,
+        fiscal_period=fiscal_period,
+        form_type="10-Q",
+        accession_number=f"{fiscal_year}-{fiscal_period.lower()}",
+    )
+
+
 def _two_year_facts() -> list[FinancialFact]:
     current_start, current_end = date(2024, 1, 1), date(2024, 12, 31)
     prior_start, prior_end = date(2023, 1, 1), date(2023, 12, 31)
@@ -145,6 +193,180 @@ def test_ten_k_serialization_keeps_two_annual_periods_not_later_quarter() -> Non
     )
     revenues = [item for item in payload["facts"] if item["metric_name"] == "revenue"]
     assert [item["period_end"] for item in revenues] == ["2024-12-31", "2023-12-31"]
+
+
+def test_mixed_forms_keep_annual_pair_without_losing_latest_interim() -> None:
+    """同时请求 10-K/10-Q 时，年度对与最新中期事实必须同时保留。"""
+    facts = [
+        _duration(
+            "Revenues",
+            "120",
+            date(2024, 9, 29),
+            date(2025, 9, 27),
+            fiscal_year=2025,
+        ),
+        FinancialFact(
+            company_id="0000000001",
+            source_id="sec-companyfacts-0000000001",
+            taxonomy="us-gaap",
+            concept="Revenues",
+            value=Decimal("90"),
+            unit="USD",
+            period_start=date(2024, 9, 29),
+            period_end=date(2025, 6, 28),
+            fiscal_year=2025,
+            fiscal_period="Q3",
+            form_type="10-Q",
+            accession_number="2025-q3",
+        ),
+        _duration(
+            "Revenues",
+            "100",
+            date(2023, 10, 1),
+            date(2024, 9, 28),
+            fiscal_year=2024,
+        ),
+    ]
+    result = SimpleNamespace(kind="success", value=SimpleNamespace(facts=facts))
+
+    import json
+
+    payload = json.loads(
+        _serialize_facts(result, "2025-10-31", requested_forms=("10-K", "10-Q"))
+    )
+    revenues = [item for item in payload["facts"] if item["metric_name"] == "revenue"]
+    assert [item["period_end"] for item in revenues] == [
+        "2025-09-27",
+        "2024-09-28",
+        "2025-06-28",
+    ]
+
+
+def test_microsoft_fiscal_calendar_keeps_fy_pair_after_new_q1_is_filed() -> None:
+    """6 月财年结束且 9 月新 Q1 已发布时，Q1 不能挤掉 10-K 年度事实。"""
+    facts = [
+        _duration("Revenues", "281724", date(2024, 7, 1), date(2025, 6, 30), fiscal_year=2025),
+        _duration("Revenues", "245122", date(2023, 7, 1), date(2024, 6, 30), fiscal_year=2024),
+        _quarter("Revenues", "77673", date(2025, 7, 1), date(2025, 9, 30), fiscal_year=2026),
+        _quarter("Revenues", "65585", date(2024, 7, 1), date(2024, 9, 30), fiscal_year=2025),
+        _instant("Assets", "619003", date(2025, 6, 30), fiscal_year=2025),
+        _instant("Assets", "512163", date(2024, 6, 30), fiscal_year=2024),
+        _quarter_instant("Assets", "636351", date(2025, 9, 30), fiscal_year=2026),
+        _quarter_instant("Assets", "523013", date(2024, 9, 30), fiscal_year=2025),
+    ]
+    result = SimpleNamespace(kind="success", value=SimpleNamespace(facts=facts))
+
+    import json
+
+    payload = json.loads(
+        _serialize_facts(result, "2025-10-31", requested_forms=("10-K", "10-Q"))
+    )
+    revenues = [item for item in payload["facts"] if item["metric_name"] == "revenue"]
+    assets = [item for item in payload["facts"] if item["metric_name"] == "total_assets"]
+
+    assert [(item["form_type"], item["period_end"]) for item in revenues] == [
+        ("10-K", "2025-06-30"),
+        ("10-K", "2024-06-30"),
+        ("10-Q", "2025-09-30"),
+        ("10-Q", "2024-09-30"),
+    ]
+    assert [(item["form_type"], item["instant_date"]) for item in assets] == [
+        ("10-K", "2025-06-30"),
+        ("10-K", "2024-06-30"),
+        ("10-Q", "2025-09-30"),
+        ("10-Q", "2024-09-30"),
+    ]
+
+
+def test_quarter_ytd_selects_same_fiscal_period_from_previous_year() -> None:
+    """截至年中时，最新 Q3 YTD 必须配上一财年 Q3 YTD，而不是本年 Q2。"""
+    facts = [
+        FinancialFact(
+            company_id="0000000001",
+            source_id="sec-companyfacts-0000000001",
+            taxonomy="us-gaap",
+            concept="Revenues",
+            value=Decimal("90"),
+            unit="USD",
+            period_start=date(2024, 9, 29),
+            period_end=date(2025, 6, 28),
+            fiscal_year=2025,
+            fiscal_period="Q3",
+            form_type="10-Q",
+            accession_number="2025-q3",
+        ),
+        FinancialFact(
+            company_id="0000000001",
+            source_id="sec-companyfacts-0000000001",
+            taxonomy="us-gaap",
+            concept="Revenues",
+            value=Decimal("55"),
+            unit="USD",
+            period_start=date(2024, 9, 29),
+            period_end=date(2025, 3, 29),
+            fiscal_year=2025,
+            fiscal_period="Q2",
+            form_type="10-Q",
+            accession_number="2025-q2",
+        ),
+        FinancialFact(
+            company_id="0000000001",
+            source_id="sec-companyfacts-0000000001",
+            taxonomy="us-gaap",
+            concept="Revenues",
+            value=Decimal("80"),
+            unit="USD",
+            period_start=date(2023, 10, 1),
+            period_end=date(2024, 6, 29),
+            fiscal_year=2024,
+            fiscal_period="Q3",
+            form_type="10-Q",
+            accession_number="2024-q3",
+        ),
+    ]
+    result = SimpleNamespace(kind="success", value=SimpleNamespace(facts=facts))
+
+    import json
+
+    payload = json.loads(
+        _serialize_facts(result, "2025-07-01", requested_forms=("10-K", "10-Q"))
+    )
+    revenues = [item for item in payload["facts"] if item["metric_name"] == "revenue"]
+    assert [item["period_end"] for item in revenues] == ["2025-06-28", "2024-06-29"]
+
+
+def test_instant_facts_select_latest_year_end_and_previous_year_end() -> None:
+    """时点指标不能让本年 Q3 挤掉 ROA 所需的上一年度期末资产。"""
+    facts = [
+        _instant("Assets", "220", date(2025, 9, 27), fiscal_year=2025),
+        FinancialFact(
+            company_id="0000000001",
+            source_id="sec-companyfacts-0000000001",
+            taxonomy="us-gaap",
+            concept="Assets",
+            value=Decimal("210"),
+            unit="USD",
+            instant_date=date(2025, 6, 28),
+            fiscal_year=2025,
+            fiscal_period="Q3",
+            form_type="10-Q",
+            accession_number="2025-q3",
+        ),
+        _instant("Assets", "200", date(2024, 9, 28), fiscal_year=2024),
+    ]
+    result = SimpleNamespace(kind="success", value=SimpleNamespace(facts=facts))
+
+    import json
+
+    payload = json.loads(
+        _serialize_facts(result, "2025-10-31", requested_forms=("10-K", "10-Q"))
+    )
+    assets = [item for item in payload["facts"] if item["metric_name"] == "total_assets"]
+    assert [item["instant_date"] for item in assets] == [
+        "2025-09-27",
+        "2024-09-28",
+        "2025-06-28",
+    ]
 
 
 def test_assembler_computes_all_required_metrics_from_trusted_source_facts() -> None:

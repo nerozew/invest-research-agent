@@ -16,9 +16,20 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 from pydantic import BaseModel, ConfigDict
 
+from invest_research.domain.annual_node_runtime import AnnualNodeGraphSnapshot
+from invest_research.domain.annual_pipeline import (
+    ResearchMode,
+    ResearchNodeKind,
+    ResearchNodeStatus,
+)
 from invest_research.domain.status import JobStatus, StepStatus
 from invest_research.frontend.errors import ApiClientError
-from invest_research.frontend.models import ArtifactInfo, JobListEntry, JobSnapshot
+from invest_research.frontend.models import (
+    ArtifactInfo,
+    JobListEntry,
+    JobSnapshot,
+    PerformanceSnapshot,
+)
 
 __all__ = [
     "CURRENT_STAGE_LABELS",
@@ -26,8 +37,14 @@ __all__ = [
     "STATUS_LABELS",
     "STEP_STATUS_ICONS",
     "ArtifactDownloader",
+    "ANNUAL_NODE_KIND_LABELS",
+    "ANNUAL_NODE_STATUS_LABELS",
     "DiagnosticsDownloader",
     "JsonArtifactView",
+    "annual_event_rows",
+    "annual_node_rows",
+    "annual_wait_rows",
+    "artifact_category",
     "current_stage_label",
     "decode_artifact_text",
     "error_suggestion",
@@ -37,6 +54,7 @@ __all__ = [
     "job_list_row",
     "load_viewable_json_artifacts",
     "profile_badge",
+    "research_mode_badge",
     "render_failed_diagnostics",
     "render_job_snapshot",
     "status_label",
@@ -97,6 +115,50 @@ PROFILE_BADGES: dict[str, str] = {
     "deep": "🔬 深度",
 }
 
+# P07-12：年度模式与节点快照只展示稳定、可解释的脱敏字段。
+RESEARCH_MODE_BADGES: dict[str, str] = {
+    "legacy": "🧭 常规研究",
+    "annual_deep": "📅 年度深度研究",
+}
+
+ANNUAL_NODE_KIND_LABELS: dict[str, str] = {
+    ResearchNodeKind.DISCOVER_ANNUAL_FILINGS.value: "发现年度文件",
+    ResearchNodeKind.FETCH_COMPANY_FACTS.value: "获取 Company Facts",
+    ResearchNodeKind.DOWNLOAD_FILING.value: "下载 Filing",
+    ResearchNodeKind.PARSE_FILING.value: "解析 Filing",
+    ResearchNodeKind.VALIDATE_EVIDENCE.value: "校验证据",
+    ResearchNodeKind.BUILD_ANNUAL_COMPARISON.value: "构建年度财务比较",
+    ResearchNodeKind.REQUEST_SUPPLEMENT.value: "受控补证",
+    ResearchNodeKind.ANALYZE_FINANCIALS.value: "财务归因分析",
+    ResearchNodeKind.WRITE_SECTION.value: "撰写章节",
+    ResearchNodeKind.FINALIZE_REPORT.value: "最终门禁与发布",
+}
+
+ANNUAL_NODE_STATUS_LABELS: dict[str, str] = {
+    ResearchNodeStatus.PENDING.value: "⏳ 等待",
+    ResearchNodeStatus.RUNNING.value: "🔄 进行中",
+    ResearchNodeStatus.SUCCEEDED.value: "✅ 完成",
+    ResearchNodeStatus.FAILED_RETRYABLE.value: "🔁 可重试失败",
+    ResearchNodeStatus.FAILED_TERMINAL.value: "❌ 终态失败",
+    ResearchNodeStatus.BLOCKED.value: "🚧 已阻塞",
+    ResearchNodeStatus.CANCELLED.value: "🚫 已取消",
+}
+
+ANNUAL_NODE_KEY_LABELS: dict[str, str] = {
+    "annual_selection": "选择目标/上年 10-K",
+    "annual_evidence_fanout": "并发获取年度证据",
+    "annual_comparison": "确定性财务比较",
+    "annual_route_evidence": "证据权限路由",
+    "annual_section_plan": "生成章节计划",
+    "annual_financial_analysis": "财务归因分析",
+    "annual_write_financial": "撰写财务章节",
+    "annual_write_business": "撰写业务章节",
+    "annual_write_risk": "撰写风险章节",
+    "annual_write_events": "撰写重大事件章节",
+    "annual_finalization": "最终质量门禁",
+    "annual_final_writer": "组装最终报告",
+}
+
 
 def format_cn_time(value: datetime | None) -> str:
     """把后端时间转为中国时区并简化展示（``26-08-16 18:21``）。
@@ -147,6 +209,12 @@ def profile_badge(research_profile: str | None) -> str:
     return PROFILE_BADGES.get(research_profile, research_profile)
 
 
+def research_mode_badge(research_mode: ResearchMode | str | None) -> str:
+    """把运行模式映射为用户可读的徽章；旧响应缺字段时按 legacy 展示。"""
+    key = research_mode.value if isinstance(research_mode, ResearchMode) else research_mode
+    return RESEARCH_MODE_BADGES.get(key or ResearchMode.LEGACY.value, str(key or "legacy"))
+
+
 def current_stage_label(current_step: str | None) -> str | None:
     """把 current_step 名称转成当前阶段中文文案；无 current_step 返回 None。"""
     if not current_step:
@@ -161,7 +229,33 @@ def is_viewable_json_artifact(artifact_key: str) -> bool:
     - ``08_report.md`` / ``09_report.pdf`` 与 ``st.txt`` 等非 JSON
       工件继续保持下载/文本展示逻辑，不进入 JSON 查看（只读、不上传）。
     """
+    normalized = artifact_key.lower()
+    # 年度原始 SEC 文件和全文解析结果可能很大，也不属于前端诊断面板的最小权限范围。
+    # 它们仍可通过受控工件接口按需下载，但页面不会自动请求或展示正文。
+    if normalized.startswith("annual/") and (
+        "/source." in normalized or normalized.endswith("/parsed.json")
+    ):
+        return False
+    # 保持既有契约：仅小写 .json 才允许页内查看。
     return artifact_key.endswith(".json")
+
+
+def artifact_category(artifact_key: str, artifact_type: str) -> str:
+    """按年度工件键给用户可读分类；未知内容安全回退为通用工件。"""
+    key = artifact_key.lower()
+    if artifact_type in {"final_report_markdown", "final_report_pdf"} or key.endswith(
+        ("report.md", "report.pdf")
+    ):
+        return "最终报告"
+    if key == "annual/comparison.json":
+        return "财务比较"
+    if key.startswith("annual/sections/"):
+        return "章节产物"
+    if key == "annual/runtime_state.json":
+        return "年度运行状态"
+    if key.startswith("annual/company-facts/") or key.startswith("annual/"):
+        return "年度证据"
+    return "通用工件"
 
 
 def decode_artifact_text(content: bytes) -> str:
@@ -306,18 +400,160 @@ def _step_status_icon(step_status: StepStatus | str) -> str:
     return STEP_STATUS_ICONS.get(key, key)
 
 
+def _annual_node_label(node_key: str) -> str:
+    return ANNUAL_NODE_KEY_LABELS.get(node_key, node_key)
+
+
+def _annual_node_kind_label(kind: ResearchNodeKind | str) -> str:
+    key = kind.value if isinstance(kind, ResearchNodeKind) else str(kind)
+    return ANNUAL_NODE_KIND_LABELS.get(key, key)
+
+
+def _annual_node_status_label(status: ResearchNodeStatus | str | None) -> str:
+    if status is None:
+        return "—"
+    key = status.value if isinstance(status, ResearchNodeStatus) else str(status)
+    return ANNUAL_NODE_STATUS_LABELS.get(key, key)
+
+
+def annual_node_rows(graph: AnnualNodeGraphSnapshot) -> list[dict[str, str]]:
+    """构造年度节点表，仅投影诊断快照白名单字段。"""
+    return [
+        {
+            "节点": _annual_node_label(node.node_key),
+            "类型": _annual_node_kind_label(node.kind),
+            "状态": _annual_node_status_label(node.status),
+            "尝试": f"{node.attempt_count}/{node.max_attempts}",
+            "产出工件": "、".join(node.output_artifact_keys) or "—",
+            "阻塞/错误": node.blocked_reason or node.error_code or "—",
+        }
+        for node in graph.nodes
+    ]
+
+
+def annual_wait_rows(graph: AnnualNodeGraphSnapshot) -> list[dict[str, str]]:
+    """构造等待原因表，不泄露上游输入、提示词或原始 SEC 内容。"""
+    return [
+        {
+            "等待节点": _annual_node_label(item.node_key),
+            "未完成上游": _annual_node_label(item.upstream_node_key),
+            "上游状态": _annual_node_status_label(item.upstream_status),
+            "原因": item.reason_code,
+        }
+        for item in graph.waiting
+    ]
+
+
+def annual_event_rows(graph: AnnualNodeGraphSnapshot) -> list[dict[str, str]]:
+    """构造最近年度事件表，严格使用事件快照的白名单字段。"""
+    return [
+        {
+            "时间": format_cn_time(event.created_at),
+            "节点": _annual_node_label(event.node_key),
+            "事件": event.event_type.value,
+            "状态": (
+                f"{_annual_node_status_label(event.previous_status)} → "
+                f"{_annual_node_status_label(event.new_status)}"
+                if event.previous_status is not None or event.new_status is not None
+                else "—"
+            ),
+            "原因": event.reason_code or "—",
+            "尝试": str(event.attempt_count),
+            "工件": "、".join(event.artifact_keys) or "—",
+        }
+        for event in graph.recent_events
+    ]
+
+
 def job_list_row(entry: JobListEntry) -> dict[str, str]:
     """把列表条目转成表格行（不含内部路径/密钥）。"""
     return {
         "公司": entry.input_company,
+        "模式": research_mode_badge(entry.research_mode),
         "档位": profile_badge(entry.research_profile),
         "状态": status_label(entry.status),
         "创建时间": format_cn_time(entry.created_at),
         "开始时间": format_cn_time(entry.started_at),
         "结束时间": format_cn_time(entry.completed_at),
         "耗时": _format_duration(entry.duration_seconds),
-        "当前阶段": current_stage_label(entry.current_step) or "—",
+        "当前阶段": (
+            "年度 DAG 执行中"
+            if entry.research_mode is ResearchMode.ANNUAL_DEEP and entry.current_step is None
+            else current_stage_label(entry.current_step) or "—"
+        ),
     }
+
+
+def _render_annual_node_snapshot(graph: AnnualNodeGraphSnapshot | None) -> None:
+    """渲染年度 DAG 的节点、等待和预算诊断，不读取任何工件正文。"""
+    st.subheader("年度执行节点")
+    if graph is None:
+        st.info("年度节点图正在初始化；下次轮询将显示节点、依赖等待原因和关键路径。")
+        return
+
+    by_status = {status: 0 for status in ResearchNodeStatus}
+    for node in graph.nodes:
+        by_status[node.status] += 1
+    col_done, col_active, col_problem, col_path = st.columns(4)
+    with col_done:
+        st.metric("已完成节点", by_status[ResearchNodeStatus.SUCCEEDED])
+    with col_active:
+        st.metric(
+            "等待/执行中",
+            by_status[ResearchNodeStatus.PENDING] + by_status[ResearchNodeStatus.RUNNING],
+        )
+    with col_problem:
+        st.metric(
+            "失败/阻塞",
+            by_status[ResearchNodeStatus.FAILED_RETRYABLE]
+            + by_status[ResearchNodeStatus.FAILED_TERMINAL]
+            + by_status[ResearchNodeStatus.BLOCKED],
+        )
+    with col_path:
+        st.metric("关键路径", _format_duration(graph.critical_path_seconds))
+
+    if graph.critical_path_node_keys:
+        path = " → ".join(_annual_node_label(key) for key in graph.critical_path_node_keys)
+        st.caption(f"关键路径：{path}")
+
+    st.table(annual_node_rows(graph))
+    waits = annual_wait_rows(graph)
+    if waits:
+        st.markdown("**依赖等待原因**")
+        st.table(waits)
+    if graph.budget_stop_reasons:
+        st.warning("补证/预算停止原因：" + "、".join(graph.budget_stop_reasons))
+    events = annual_event_rows(graph)
+    if events:
+        st.markdown("**最近节点事件**")
+        st.table(events)
+
+
+def _fmt_int(value: int | None) -> str:
+    """千分位整数；缺失显示 —（不伪造）。"""
+    return f"{value:,}" if value is not None else "—"
+
+
+def _render_performance_snapshot(performance: PerformanceSnapshot | None) -> None:
+    """WS3：per-job 成本与用量（缺失字段显示 —，不伪造）。"""
+    if performance is None:
+        return
+    st.subheader("成本与用量")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("LLM 调用", _fmt_int(performance.llm_calls))
+    with c2:
+        st.metric("总 Token", _fmt_int(performance.total_tokens))
+    with c3:
+        cost = performance.estimated_cost_usd
+        st.metric("估算成本 (USD)", f"${cost:.4f}" if cost is not None else "—")
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        st.metric("输入 Token", _fmt_int(performance.input_tokens))
+    with c5:
+        st.metric("输出 Token", _fmt_int(performance.output_tokens))
+    with c6:
+        st.metric("工具调用", _fmt_int(performance.tool_calls_total))
 
 
 def render_job_snapshot(snapshot: JobSnapshot) -> None:
@@ -330,7 +566,10 @@ def render_job_snapshot(snapshot: JobSnapshot) -> None:
         st.metric("档位", profile_badge(snapshot.research_profile))
     with col3:
         stage = current_stage_label(snapshot.current_step)
-        st.metric("当前阶段", stage or "—")
+        if snapshot.research_mode is ResearchMode.ANNUAL_DEEP:
+            st.metric("模式", research_mode_badge(snapshot.research_mode))
+        else:
+            st.metric("当前阶段", stage or "—")
 
     col4, col5, col6 = st.columns(3)
     with col4:
@@ -341,7 +580,11 @@ def render_job_snapshot(snapshot: JobSnapshot) -> None:
         st.metric("总耗时", _format_duration(snapshot.duration_seconds))
 
     # P06-06B：当前阶段醒目文字（只显示真实业务阶段，不显示虚假百分比/ETA）
-    if stage is not None and snapshot.status == JobStatus.RUNNING:
+    if (
+        snapshot.research_mode is ResearchMode.LEGACY
+        and stage is not None
+        and snapshot.status == JobStatus.RUNNING
+    ):
         st.markdown(f"### {stage}")
 
     if snapshot.error_code:
@@ -351,6 +594,12 @@ def render_job_snapshot(snapshot: JobSnapshot) -> None:
             st.info(suggestion)
     elif snapshot.status == JobStatus.FAILED:
         st.warning("任务失败，请查看下方错误信息。")
+
+    _render_performance_snapshot(snapshot.performance)
+
+    if snapshot.research_mode is ResearchMode.ANNUAL_DEEP:
+        _render_annual_node_snapshot(snapshot.annual_nodes)
+        return
 
     st.subheader("执行步骤")
     if not snapshot.steps:

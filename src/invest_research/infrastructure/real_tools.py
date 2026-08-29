@@ -28,13 +28,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 from crewai.tools import tool
 
 from invest_research.application.analysis_assembler import build_fact_ref
 from invest_research.domain.errors import ErrorCode
-from invest_research.domain.models import ResearchRequest
+from invest_research.domain.models import FinancialFact, ResearchRequest
 from invest_research.financial.concept_mapping import CONCEPTS_V1_PATH, load_concept_mapping
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.prefetch import PrefetchResult, PrefetchStatus
@@ -61,9 +61,11 @@ __all__ = [
     "build_research_tools",
 ]
 
-# 每个指标保留最近两个可比期，足够计算同比且避免整份 XBRL
-# 进入 LLM context。concept 白名单来自版本化 concepts_v1.json。
-_FACTS_PERIODS_PER_METRIC = 2
+# Company Facts 摘要选择算法版本。必须进入缓存键，避免算法升级后继续命中旧摘要。
+_FACT_SELECTION_VERSION = "comparable_periods_v3"
+# 同期事实的 period_end/instant_date 通常相隔约一年；窗口兼容 52/53 周财年。
+_COMPARABLE_MIN_DAYS = 300
+_COMPARABLE_MAX_DAYS = 430
 # 搜索结果条数上限（Serper 分页已限 page_size ≤ 50；P05.5-fix 收紧到 10）
 _SEARCH_MAX_ITEMS = 10
 
@@ -103,6 +105,170 @@ def _serialize_search_result(result: Any) -> str:
     )
 
 
+def _effective_date(fact: FinancialFact) -> date | None:
+    return fact.period_end or fact.instant_date
+
+
+def _duration_days(fact: FinancialFact) -> int | None:
+    if fact.period_start is None or fact.period_end is None:
+        return None
+    return (fact.period_end - fact.period_start).days
+
+
+def _period_kind(fact: FinancialFact) -> str:
+    """把 duration fact 归一为 annual/ytd/quarter，供同期匹配。"""
+    days = _duration_days(fact)
+    if days is None:
+        return "instant"
+    form = (fact.form_type or "").upper().removesuffix("/A")
+    fiscal_period = (fact.fiscal_period or "").upper()
+    if form == "10-K" or fiscal_period == "FY" or days >= 300:
+        return "annual"
+    if days > 120:
+        return "ytd"
+    return "quarter"
+
+
+def _period_identity(fact: FinancialFact) -> tuple[object, ...]:
+    """同一 concept 下用于去重的期间身份；修订版在组内优先。"""
+    return (
+        fact.period_start,
+        fact.period_end,
+        fact.instant_date,
+        fact.unit,
+        (fact.fiscal_period or "").upper(),
+    )
+
+
+def _deduplicate_periods(facts: list[FinancialFact]) -> list[FinancialFact]:
+    selected: dict[tuple[object, ...], FinancialFact] = {}
+    for fact in facts:
+        key = _period_identity(fact)
+        existing = selected.get(key)
+        is_amended = (fact.form_type or "").upper().endswith("/A")
+        existing_is_amended = bool(
+            existing and (existing.form_type or "").upper().endswith("/A")
+        )
+        if existing is None or (is_amended and not existing_is_amended):
+            selected[key] = fact
+    return list(selected.values())
+
+
+def _comparable_score(current: FinancialFact, candidate: FinancialFact) -> tuple[int, ...]:
+    """同期候选越匹配 fiscal period/year、日期间隔和 duration 长度，分数越低。"""
+    current_date = _effective_date(current)
+    candidate_date = _effective_date(candidate)
+    assert current_date is not None and candidate_date is not None
+    current_fp = (current.fiscal_period or "").upper()
+    candidate_fp = (candidate.fiscal_period or "").upper()
+    fiscal_period_penalty = int(bool(current_fp and candidate_fp and current_fp != candidate_fp))
+    fiscal_year_penalty = int(
+        current.fiscal_year is not None
+        and candidate.fiscal_year is not None
+        and candidate.fiscal_year != current.fiscal_year - 1
+    )
+    current_days = _duration_days(current)
+    candidate_days = _duration_days(candidate)
+    duration_penalty = (
+        abs(current_days - candidate_days)
+        if current_days is not None and candidate_days is not None
+        else 0
+    )
+    return (
+        fiscal_period_penalty,
+        fiscal_year_penalty,
+        abs((current_date - candidate_date).days - 365),
+        duration_penalty,
+    )
+
+
+def _select_comparable_pair(facts: list[FinancialFact]) -> list[FinancialFact]:
+    """选择最新事实及其上年同期，而不是机械选择日期最近的两条。"""
+    unique = _deduplicate_periods(facts)
+    eligible = [fact for fact in unique if _effective_date(fact) is not None]
+    if not eligible:
+        return []
+
+    # 同一截止日既有单季度又有 YTD/年度值时，优先更长 duration。
+    current = max(
+        eligible,
+        key=lambda fact: (
+            _effective_date(fact) or date.min,
+            _duration_days(fact) or 0,
+        ),
+    )
+    current_date = _effective_date(current)
+    assert current_date is not None
+    current_kind = _period_kind(current)
+    comparable = []
+    for candidate in eligible:
+        candidate_date = _effective_date(candidate)
+        assert candidate_date is not None
+        gap_days = (current_date - candidate_date).days
+        if (
+            candidate is not current
+            and _COMPARABLE_MIN_DAYS <= gap_days <= _COMPARABLE_MAX_DAYS
+            and _period_kind(candidate) == current_kind
+        ):
+            comparable.append(candidate)
+    if not comparable:
+        return [current]
+    prior = min(comparable, key=lambda fact: _comparable_score(current, fact))
+    return [current, prior]
+
+
+def _selection_track(fact: FinancialFact) -> str:
+    """把事实分为年度与中期轨道，避免较新的季度挤掉年度事实。
+
+    duration fact 直接复用 annual/ytd/quarter 分类；instant fact 没有 duration，
+    因此使用 SEC form/fiscal period 判断它属于年度期末还是季度期末。
+    """
+    kind = _period_kind(fact)
+    if kind == "annual":
+        return "annual"
+    if kind == "instant":
+        form = (fact.form_type or "").upper().removesuffix("/A")
+        fiscal_period = (fact.fiscal_period or "").upper()
+        if form == "10-K" or fiscal_period == "FY":
+            return "annual"
+    return "interim"
+
+
+def _select_required_periods(
+    facts: list[FinancialFact], concept_candidates: Sequence[str]
+) -> list[FinancialFact]:
+    """分别保留年度与中期可比期间，每个轨道最多两条。
+
+    concept mapping 的候选优先级也必须按轨道应用：同一逻辑指标的年度和
+    季度披露可能使用不同 XBRL concept，不能因季度存在首选 concept 就把年度
+    备用 concept 一并丢弃。
+    """
+    selected: list[FinancialFact] = []
+    for track in ("annual", "interim"):
+        track_facts = [fact for fact in facts if _selection_track(fact) == track]
+        concept = next(
+            (name for name in concept_candidates if any(f.concept == name for f in track_facts)),
+            None,
+        )
+        if concept is None:
+            continue
+        selected.extend(
+            _select_comparable_pair([fact for fact in track_facts if fact.concept == concept])
+        )
+    return selected
+
+
+def _facts_cache_params(
+    *, cik: str, as_of_date: str | None, requested_forms: str
+) -> dict[str, str | None]:
+    return {
+        "cik": cik,
+        "as_of_date": as_of_date,
+        "requested_forms": requested_forms,
+        "selection_version": _FACT_SELECTION_VERSION,
+    }
+
+
 def _serialize_facts(
     result: Any,
     as_of_date: str | None,
@@ -110,9 +276,9 @@ def _serialize_facts(
 ) -> str:
     """序列化有限、可追溯的 SEC XBRL 事实集。
 
-    只选 concepts_v1 中的指标候选，每个指标选实际存在的最高
-    优先级 concept，再保留最近两个期间。值、单位、期间和 SEC
-    accession locator 一起交给 Analysis Agent，禁止只给一串裸数字。
+    只选 concepts_v1 中的指标候选，每个指标按年度/中期轨道选择实际存在的
+    最高优先级 concept，并分别保留最新期间及上年同期。值、单位、期间和
+    SEC accession locator 一起交给 Analysis Agent，禁止只给一串裸数字。
     """
     if getattr(result, "kind", None) == "failure":
         return _unpack(result)
@@ -127,17 +293,9 @@ def _serialize_facts(
         facts = kept
 
     mapping = load_concept_mapping(CONCEPTS_V1_PATH)
-    available = {fact.concept for fact in facts}
     selected: list[tuple[str, Any]] = []
     for entry in mapping.entries:
-        concept = next((name for name in entry.candidates if name in available), None)
-        if concept is None:
-            continue
-        candidates = [fact for fact in facts if fact.concept == concept]
-        candidates.sort(
-            key=lambda fact: fact.period_end or fact.instant_date or date.min,
-            reverse=True,
-        )
+        candidates = [fact for fact in facts if fact.concept in entry.candidates]
         if requested_forms:
             normalized = {form.upper().removesuffix("/A") for form in requested_forms}
             candidates = [
@@ -145,20 +303,8 @@ def _serialize_facts(
                 for fact in candidates
                 if (fact.form_type or "").upper().removesuffix("/A") in normalized
             ]
-        seen_periods: set[tuple[object, ...]] = set()
-        for fact in candidates:
-            period_key = (
-                fact.period_start,
-                fact.period_end,
-                fact.instant_date,
-                fact.unit,
-            )
-            if period_key in seen_periods:
-                continue
-            seen_periods.add(period_key)
+        for fact in _select_required_periods(candidates, entry.candidates):
             selected.append((entry.metric_name, fact))
-            if len(seen_periods) >= _FACTS_PERIODS_PER_METRIC:
-                break
 
     summary = []
     for metric_name, fact in selected:
@@ -713,7 +859,11 @@ def build_research_tools(
             cache,
             recorder,
             "sec_company_facts",
-            {"cik": cik, "as_of_date": as_of_date, "requested_forms": requested_forms},
+            _facts_cache_params(
+                cik=cik,
+                as_of_date=as_of_date,
+                requested_forms=requested_forms,
+            ),
         )
         if cached is not None:
             return cached
@@ -872,6 +1022,36 @@ def _forms_key(request: ResearchRequest) -> str:
     return ",".join(forms) if forms else "10-K,10-Q"
 
 
+def _submissions_summary_from_rows(rows: Sequence[Any]) -> str:
+    """Render the same bounded human summary for typed filings or cached JSON rows."""
+    lines: list[str] = []
+    for row in rows[:_SEARCH_MAX_ITEMS]:
+        if isinstance(row, dict):
+            form_type = row.get("form_type")
+            filing_date = row.get("filing_date")
+            primary_document_url = row.get("primary_document_url")
+        else:
+            form_type = getattr(row, "form_type", None)
+            filing_date = getattr(row, "filing_date", None)
+            primary_document_url = getattr(row, "primary_document_url", None)
+        if isinstance(filing_date, date):
+            filing_date = filing_date.isoformat()
+        lines.append(f"- {form_type} | filed {filing_date} | {primary_document_url}")
+    return "\n".join(lines) or "（无 10-K/10-Q 申报记录）"
+
+
+def _cached_submissions_summary(cached: str) -> tuple[str, int | None]:
+    """Recover a bounded summary and confirmed filing count from the raw cache payload."""
+    try:
+        payload = json.loads(cached)
+    except (TypeError, ValueError):
+        return cached, None
+    rows = payload.get("filings") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return cached, None
+    return _submissions_summary_from_rows(rows), len(rows)
+
+
 def resolve_and_prefetch(
     request: ResearchRequest,
     toolkit: ResearchToolkit,
@@ -910,18 +1090,19 @@ def resolve_and_prefetch(
     as_of = request.as_of_date.isoformat()
     forms_str = _forms_key(request)
     submissions_summary: str | None = None
+    submission_count: int | None = None
     search_summary: str | None = None
     financial_facts_summary: str | None = None
 
     def fetch_submissions() -> None:
-        nonlocal submissions_summary
+        nonlocal submission_count, submissions_summary
         key = cache.key(
             "sec_submissions",
             {"cik": cik, "as_of_date": as_of, "requested_forms": forms_str},
         )
         cached = cache.get(key)
         if cached is not None:
-            submissions_summary = cached
+            submissions_summary, submission_count = _cached_submissions_summary(cached)
             if recorder is not None:
                 recorder.record_cache_hit("sec_submissions")
             return
@@ -939,14 +1120,8 @@ def resolve_and_prefetch(
         if result.kind == "success":
             cache.put(key, _unpack(result))
             filings = result.value.filings
-            submissions_summary = (
-                "\n".join(
-                    f"- {f.form_type} | filed {f.filing_date.isoformat()} | "
-                    f"{f.primary_document_url}"
-                    for f in filings[:_SEARCH_MAX_ITEMS]
-                )
-                or "（无 10-K/10-Q 申报记录）"
-            )
+            submission_count = len(filings)
+            submissions_summary = _submissions_summary_from_rows(filings)
         else:
             _LOGGER.warning("prefetch sec_submissions 失败: %s", result.error.message)
             _count(stats, "sec_submissions_failures")
@@ -982,7 +1157,11 @@ def resolve_and_prefetch(
         nonlocal financial_facts_summary
         key = cache.key(
             "sec_company_facts",
-            {"cik": cik, "as_of_date": as_of, "requested_forms": forms_str},
+            _facts_cache_params(
+                cik=cik,
+                as_of_date=as_of,
+                requested_forms=forms_str,
+            ),
         )
         cached = cache.get(key)
         if cached is not None:
@@ -1022,6 +1201,8 @@ def resolve_and_prefetch(
         "ok"
         if (
             submissions_summary is not None
+            and submission_count is not None
+            and submission_count > 0
             and financial_facts_summary is not None
             and search_summary is not None
         )
@@ -1034,6 +1215,7 @@ def resolve_and_prefetch(
         search_summary=search_summary,
         status=status,
         financial_facts_summary=financial_facts_summary,
+        submission_count=submission_count,
     )
 
 

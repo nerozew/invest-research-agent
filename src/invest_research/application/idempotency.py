@@ -45,7 +45,7 @@ class IdempotencyConflict(ValueError):
 
 def _request_fingerprint(request: ResearchRequest) -> str:
     """请求体规范性指纹：同输入必同指纹，用于判断"是否同一请求"。"""
-    return request.model_dump_json()
+    return request.idempotency_fingerprint()
 
 
 class CreateResearchJobIdempotentService:

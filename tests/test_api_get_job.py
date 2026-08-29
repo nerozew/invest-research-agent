@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
+import pytest
+from conftest import db_integration_enabled
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from invest_research.api.app import create_app
 from invest_research.application.jobs import (
@@ -16,7 +20,18 @@ from invest_research.application.jobs import (
     JobSnapshot,
     StepSnapshot,
 )
+from invest_research.domain.annual_pipeline import (
+    NodeDependency,
+    ResearchMode,
+    ResearchNode,
+    ResearchNodeKind,
+    ResearchNodeStatus,
+)
 from invest_research.domain.status import JobStatus, StepStatus
+from invest_research.infrastructure.db import annual_node_store
+from invest_research.infrastructure.db.annual_node_store import SqlAnnualNodeStore
+from invest_research.infrastructure.db.application_stores import SqlJobQueryStore
+from invest_research.infrastructure.db.models import AnnualResearchNode, ResearchJob
 from invest_research.settings import Settings
 
 
@@ -189,3 +204,136 @@ def test_health_and_create_still_work_after_adding_get_job() -> None:
     )
     # 未注入 job_store，创建接口返回 503（保持模块导入零连接）
     assert resp.status_code == 503
+
+
+def test_get_annual_job_serializes_node_snapshot_with_legacy_naive_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+    sql_session_factory: sessionmaker[Session],
+) -> None:
+    """年度详情不得因旧 SQLite/数据库时间失去时区而返回 500。"""
+    monkeypatch.setattr(
+        annual_node_store, "_utc_now", lambda: datetime(2026, 8, 27, 7, 0, 9, tzinfo=timezone.utc)
+    )
+    factory = sql_session_factory
+    job_id = uuid.uuid4()
+    with factory() as session:
+        session.add(
+            ResearchJob(
+                id=job_id,
+                input_company="Acme",
+                as_of_date=date(2026, 8, 27),
+                requested_forms=["10-K"],
+                research_mode=ResearchMode.ANNUAL_DEEP.value,
+            )
+        )
+        session.commit()
+
+    node_store = SqlAnnualNodeStore(factory)
+    node_store.create_graph(
+        job_id=job_id,
+        nodes=(
+            ResearchNode(
+                node_key="annual_fanout",
+                kind=ResearchNodeKind.DOWNLOAD_FILING,
+            ),
+        ),
+    )
+    node_store.transition(
+        job_id=job_id,
+        node_key="annual_fanout",
+        target=ResearchNodeStatus.RUNNING,
+    )
+    with factory() as session:
+        row = session.execute(select(AnnualResearchNode)).scalar_one()
+        # 模拟旧写入路径：没有 tzinfo 的值仍按 UTC 解释。
+        row.started_at = datetime(2026, 8, 27, 7, 0, 0)
+        session.commit()
+
+    with _client(SqlJobQueryStore(factory)) as client:
+        response = client.get(f"/v1/research-jobs/{job_id}")
+
+    assert response.status_code == 200
+    annual_nodes = response.json()["annual_nodes"]
+    assert annual_nodes["critical_path_node_keys"] == ["annual_fanout"]
+    assert annual_nodes["critical_path_seconds"] == 9.0
+
+
+@pytest.mark.skipif(not db_integration_enabled(), reason="需要 PostgreSQL 集成测试")
+@pytest.mark.parametrize("database_timezone", ["UTC", "Asia/Shanghai"])
+def test_annual_job_detail_handles_postgres_aware_running_and_completed_nodes(
+    pg_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    database_timezone: str,
+) -> None:
+    """PostgreSQL 非 UTC 会话返回偏移时间，任务详情仍保持精确耗时与 UTC 事件。"""
+    now = datetime(2026, 8, 27, 7, 0, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(annual_node_store, "_utc_now", lambda: now)
+    engine = create_engine(
+        pg_session_factory.kw["bind"].url,
+        connect_args={"options": f"-c timezone={database_timezone}"},
+    )
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
+    try:
+        job_id = uuid.uuid4()
+        with factory() as session:
+            session.add(
+                ResearchJob(
+                    id=job_id, input_company="Acme", as_of_date=date(2025, 10, 31),
+                    research_mode="annual_deep", status="running",
+                    started_at=now - timedelta(seconds=9),
+                )
+            )
+            session.commit()
+        store = SqlAnnualNodeStore(factory)
+        store.create_graph(
+            job_id=job_id,
+            nodes=tuple(
+                ResearchNode(node_key=key, kind=ResearchNodeKind.DOWNLOAD_FILING)
+                for key in ("fetch", "write")
+            ),
+            dependencies=(NodeDependency(upstream_node_key="fetch", downstream_node_key="write"),),
+        )
+        for key, status in (
+            ("fetch", ResearchNodeStatus.RUNNING),
+            ("fetch", ResearchNodeStatus.SUCCEEDED),
+            ("write", ResearchNodeStatus.RUNNING),
+        ):
+            store.transition(job_id=job_id, node_key=key, target=status)
+        with factory() as session:
+            for row in session.execute(select(AnnualResearchNode)).scalars():
+                row.started_at = now - timedelta(seconds=9 if row.node_key == "fetch" else 6)
+                row.completed_at = now - timedelta(seconds=6) if row.node_key == "fetch" else None
+            session.commit()
+        with factory() as session:
+            row = session.execute(select(AnnualResearchNode).limit(1)).scalar_one()
+            assert row.started_at is not None
+            assert row.started_at.utcoffset() == timedelta(
+                hours=8 if database_timezone == "Asia/Shanghai" else 0
+            )
+        with _client(SqlJobQueryStore(factory)) as client:
+            for completed in (False, True):
+                if completed:
+                    store.transition(
+                        job_id=job_id, node_key="write", target=ResearchNodeStatus.SUCCEEDED
+                    )
+                    with factory() as session:
+                        job = session.get(ResearchJob, job_id)
+                        assert job is not None
+                        job.status = "succeeded"
+                        job.completed_at = now
+                        session.commit()
+                response = client.get(f"/v1/research-jobs/{job_id}")
+                assert response.status_code == 200
+                body = response.json()
+                assert body["status"] == ("succeeded" if completed else "running")
+                assert body["research_mode"] == "annual_deep"
+                assert body["annual_nodes"]["critical_path_node_keys"] == ["fetch", "write"]
+                assert body["annual_nodes"]["critical_path_seconds"] == 9.0
+                assert all(
+                    datetime.fromisoformat(event["created_at"]).utcoffset() == timedelta(0)
+                    for event in body["annual_nodes"]["recent_events"]
+                )
+                if completed:
+                    assert body["duration_seconds"] == 9.0
+    finally:
+        engine.dispose()

@@ -16,7 +16,7 @@ import pytest
 
 DASHBOARD_PATH = Path("deploy/grafana/provisioning/dashboards/research.json")
 
-# 7 个 Row 分组的固定顺序与标题
+# 8 个 Row 分组的固定顺序与标题（WS3 追加"成本与用量"）
 EXPECTED_ROWS = [
     "系统健康",
     "HTTP RED",
@@ -25,6 +25,7 @@ EXPECTED_ROWS = [
     "PackBoundary",
     "工具与缓存",
     "LLM",
+    "成本与用量（per-job，WS3）",
 ]
 
 # 每个 Histogram 指标都应有一个 P95 面板（查询用 _bucket + histogram_quantile）
@@ -84,7 +85,7 @@ def test_dashboard_is_valid_json(dashboard: dict) -> None:
     assert dashboard["refresh"] == "30s"
 
 
-def test_dashboard_has_seven_rows_in_order(dashboard: dict) -> None:
+def test_dashboard_has_rows_in_order(dashboard: dict) -> None:
     rows = [p for p in dashboard["panels"] if p["type"] == "row"]
     assert [r["title"] for r in rows] == EXPECTED_ROWS
 
@@ -108,6 +109,15 @@ def test_required_metrics_present(dashboard: dict) -> None:
     joined = " ".join(_all_exprs(dashboard))
     for metric in REQUIRED_METRICS:
         assert metric in joined, f"missing metric {metric}"
+
+
+def test_ws3_cost_panels_present(dashboard: dict) -> None:
+    """WS3：per-job 成本/用量面板存在且查询新聚合指标。"""
+    joined = " ".join(_all_exprs(dashboard))
+    for metric in ("job_cost_usd_total", "job_tokens_total", "job_tool_calls_total"):
+        assert metric in joined, f"missing ws3 metric {metric}"
+    titles = [p.get("title") for p in dashboard["panels"] if p["type"] != "row"]
+    assert any("估算成本" in (t or "") for t in titles)
 
 
 def test_no_high_cardinality_labels(dashboard: dict) -> None:

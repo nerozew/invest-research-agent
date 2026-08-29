@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from typing import Callable
 
@@ -80,6 +81,25 @@ def _fact_matches(key_number: str, fact_value: str) -> bool:
         return False
 
 
+def number_is_supported_by_facts(number: str, fact_values: Iterable[str]) -> bool:
+    """公开纯函数：判断数字能否被一组事实值十进制匹配（供评测模块批量对账复用）。
+
+    - ``'200'`` 与 ``'200.00'`` / ``'2.0E2'`` 视为一致；
+    - 非法十进制输入返回 False（不抛异常）。
+    """
+    try:
+        target = Decimal(number)
+    except InvalidOperation:
+        return False
+    for fact_value in fact_values:
+        try:
+            if target == Decimal(fact_value):
+                return True
+        except InvalidOperation:
+            continue
+    return False
+
+
 def verify_claim(
     claim: str,
     key_numbers: list[str],
@@ -103,7 +123,7 @@ def verify_claim(
     # 规则 3：每个关键数字必须被 source.facts 的某个值十进制匹配
     fact_values = [v for v in source.facts.values()]
     for number in key_numbers:
-        if not any(_fact_matches(number, fv) for fv in fact_values):
+        if not number_is_supported_by_facts(number, fact_values):
             failures.append(
                 ChecklistFailure(code="NUMBER_UNSUPPORTED", message=f"数字无法被来源支撑: {number}")
             )

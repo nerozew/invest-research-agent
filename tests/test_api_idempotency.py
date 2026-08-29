@@ -94,12 +94,8 @@ def test_create_without_key_still_returns_202() -> None:
 def test_same_key_same_request_reuses_job() -> None:
     client, job_store = _client(idempotency_store=FakeIdempotencyStore())
 
-    first = client.post(
-        "/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-1"}
-    )
-    second = client.post(
-        "/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-1"}
-    )
+    first = client.post("/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-1"})
+    second = client.post("/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-1"})
 
     assert first.status_code == 202
     assert second.status_code == 200
@@ -110,9 +106,7 @@ def test_same_key_same_request_reuses_job() -> None:
 def test_same_key_different_request_conflicts_409() -> None:
     client, job_store = _client(idempotency_store=FakeIdempotencyStore())
 
-    first = client.post(
-        "/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-2"}
-    )
+    first = client.post("/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-2"})
     second = client.post(
         "/v1/research-jobs",
         json=_body(input_company="Apple"),
@@ -127,9 +121,38 @@ def test_same_key_different_request_conflicts_409() -> None:
 def test_key_without_idempotency_store_falls_back_to_normal() -> None:
     client, job_store = _client(idempotency_store=None)
 
-    resp = client.post(
-        "/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-3"}
-    )
+    resp = client.post("/v1/research-jobs", json=_body(), headers={"Idempotency-Key": "key-3"})
 
     assert resp.status_code == 202
+    assert job_store.calls == 1
+
+
+def test_annual_deep_uses_an_isolated_idempotency_fingerprint() -> None:
+    """年度模式可创建，且其显式模式字段参与幂等隔离。"""
+    client, job_store = _client(idempotency_store=FakeIdempotencyStore())
+
+    response = client.post(
+        "/v1/research-jobs",
+        json=_body(research_mode="annual_deep"),
+        headers={"Idempotency-Key": "annual-deep-key"},
+    )
+
+    assert response.status_code == 202
+    assert job_store.calls == 1
+
+
+def test_annual_deep_conflicts_with_legacy_when_reusing_the_same_key() -> None:
+    """legacy 与 annual_deep 的同名幂等键不得交叉复用。"""
+    client, job_store = _client(idempotency_store=FakeIdempotencyStore())
+    headers = {"Idempotency-Key": "shared-key"}
+
+    legacy = client.post("/v1/research-jobs", json=_body(), headers=headers)
+    annual = client.post(
+        "/v1/research-jobs",
+        json=_body(research_mode="annual_deep"),
+        headers=headers,
+    )
+
+    assert legacy.status_code == 202
+    assert annual.status_code == 409
     assert job_store.calls == 1

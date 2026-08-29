@@ -108,7 +108,7 @@ class SerperAdapter(SearchProvider):
                     title=title,
                     url=link,
                     publisher=str(entry.get("displayLink") or "").strip() or None,
-                    # snippet 保留空格规范；无则空串
+                    snippet=str(entry.get("snippet") or "").strip() or None,
                     published_at=_normalize_date(entry, query),
                     accessed_at=datetime.now(),
                 )

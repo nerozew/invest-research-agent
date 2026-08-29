@@ -17,10 +17,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -29,11 +32,17 @@ from sqlalchemy.sql.elements import ColumnElement
 from invest_research.application.artifacts import ArtifactInfo
 from invest_research.application.idempotency import StoredJob
 from invest_research.application.job_listing import JobListCursor, JobListEntry
-from invest_research.application.jobs import JobSnapshot, StepSnapshot, compute_duration_seconds
+from invest_research.application.jobs import (
+    JobSnapshot,
+    PerformanceSnapshot,
+    StepSnapshot,
+    compute_duration_seconds,
+)
 from invest_research.application.outbox import (
     EVENT_TYPE_JOB_CREATED,
     OutboxEventSnapshot,
 )
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus, StepStatus
 from invest_research.infrastructure.db.models import (
@@ -52,6 +61,65 @@ from invest_research.infrastructure.db.models import (
     WorkflowStep as WorkflowStepORM,
 )
 from invest_research.infrastructure.db.repositories import SessionFactory
+from invest_research.tools.artifact_store import ArtifactStore
+
+# WS3：从 07_manifest.json 读取 per-job 性能/成本；文件缺失/损坏返回 None（不伪造）。
+PerformanceLoader = Callable[[uuid.UUID], PerformanceSnapshot | None]
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    return None
+
+
+def _manifest_performance_loader(
+    artifact_root: str | Path,
+    pricing: dict[str, Any] | None,
+) -> PerformanceLoader:
+    """构造从 07_manifest.json 读性能/成本的 loader（供 SqlJobQueryStore 注入）。"""
+
+    def load(job_id: uuid.UUID) -> PerformanceSnapshot | None:
+        from invest_research.application.costing import (
+            estimate_job_cost,
+            pricing_entry_for,
+        )
+
+        try:
+            content = ArtifactStore(Path(artifact_root) / str(job_id)).read("07_manifest.json")
+        except (KeyError, OSError):
+            return None
+        try:
+            manifest = json.loads(content)
+        except ValueError:
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        perf = manifest.get("performance") or {}
+        usage = perf.get("token_usage") or {}
+        inv = (manifest.get("evidence") or {}).get("invocation_summary") or {}
+        if not isinstance(perf, dict) or not isinstance(usage, dict) or not isinstance(inv, dict):
+            return None
+        cost = estimate_job_cost(
+            input_tokens=_int_or_none(usage.get("prompt_tokens")),
+            output_tokens=_int_or_none(usage.get("completion_tokens")),
+            pricing_entry=pricing_entry_for(
+                pricing, manifest.get("research_profile") or manifest.get("research_mode")
+            ),
+        )
+        return PerformanceSnapshot(
+            llm_calls=_int_or_none(perf.get("llm_calls")),
+            input_tokens=_int_or_none(usage.get("prompt_tokens")),
+            output_tokens=_int_or_none(usage.get("completion_tokens")),
+            cached_input_tokens=_int_or_none(usage.get("cached_prompt_tokens")),
+            total_tokens=_int_or_none(usage.get("total_tokens")),
+            tool_calls_total=sum(int(v) for v in inv.values() if isinstance(v, (int, float))),
+            estimated_cost_usd=cost,
+            pricing_as_of=str((pricing or {}).get("as_of")) if pricing else None,
+        )
+
+    return load
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +159,7 @@ class SqlJobStore:
                 requested_forms=list(request.requested_forms),
                 # P06-06A：每任务研究档位随任务持久化
                 research_profile=request.research_profile,
+                research_mode=request.research_mode.value,
                 status=JobStatus.PENDING.value,
                 config_snapshot={},
             )
@@ -126,11 +195,31 @@ class SqlJobStore:
         count_research_job("pending")
 
 
+def _coerce_step_status(raw: str | None) -> StepStatus:
+    """从数据库字符串构造 ``StepStatus``。
+
+    ``execution_recorder`` 历史版本把失败步骤写成字面 ``"failed"``，而
+    ``StepStatus`` 只有 ``failed_retryable``/``failed_terminal``，直接取值会
+    ``ValueError`` 导致 API 500。此处把遗留 ``"failed"`` 映射为终态失败。
+    """
+    if raw is None:
+        return StepStatus.FAILED_TERMINAL
+    if raw == "failed":
+        return StepStatus.FAILED_TERMINAL
+    return StepStatus(raw)
+
+
 class SqlJobQueryStore:
     """JobQueryStore：读取 Job + steps 转 JobSnapshot。"""
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        performance_loader: PerformanceLoader | None = None,
+    ) -> None:
         self._sf = session_factory
+        self._performance_loader = performance_loader
 
     def get(self, job_id: uuid.UUID) -> JobSnapshot | None:
         with self._sf() as session:
@@ -150,7 +239,7 @@ class SqlJobQueryStore:
             StepSnapshot(
                 step_name=s.step_name,
                 sequence_no=s.sequence_no,
-                status=StepStatus(s.status),
+                status=_coerce_step_status(s.status),
                 attempt_count=s.attempt_count,
                 error_code=s.error_json.get("error_code") if s.error_json else None,
                 error_message=s.error_json.get("error_message") if s.error_json else None,
@@ -159,17 +248,27 @@ class SqlJobQueryStore:
             )
             for s in steps
         )
+        annual_nodes = None
+        if job.research_mode == ResearchMode.ANNUAL_DEEP.value:
+            from invest_research.infrastructure.db.annual_node_store import SqlAnnualNodeStore
+
+            annual_nodes = SqlAnnualNodeStore(self._sf).snapshot(job_id=job_id)
         return JobSnapshot.build(
             job_id=job.id,
             status=JobStatus(job.status),
             current_step=job.current_step,
             research_profile=job.research_profile,
+            research_mode=ResearchMode(job.research_mode),
+            annual_nodes=annual_nodes,
             error_code=job.error_code,
             error_message=job.error_message,
             failure_stage=job.failure_stage,
             started_at=job.started_at,
             completed_at=job.completed_at,
             steps=step_snapshots,
+            performance=(
+                self._performance_loader(job_id) if self._performance_loader is not None else None
+            ),
         )
 
 
@@ -214,6 +313,7 @@ class SqlJobListStore:
                 status=JobStatus(r.status),
                 current_step=r.current_step,
                 research_profile=r.research_profile,
+                research_mode=ResearchMode(r.research_mode),
                 error_code=r.error_code,
                 created_at=r.created_at,
                 started_at=r.started_at,

@@ -1,20 +1,19 @@
-"""CompanyResolverTool（P02-04）：名称/ticker → 10 位 CIK，歧义返回候选。
+"""Deterministic local SEC company resolution (name/ticker/CIK -> identity).
 
-设计目标对齐：
-- docs/05-DEVELOPMENT-ROADMAP.md P02-04：tool + SEC ticker fixture，
-  MSFT → 10 位 CIK；歧义返回候选（不静默猜测）；
-- docs/01-PRD.md FR-002：公司身份解析，歧义时返回候选交给用户；
-- P02-01 Tool 契约：输入/输出均为 Pydantic，成功/失败返回 ToolResult。
-
-范围：本工具只做**本地实体解析**（基于内置 SEC ticker fixture），
-不发起真实 SEC 网络请求（真实 submissions 调用属于 P02-05）。
-外部服务在测试中用 fixture，符合 .clinerules"外部服务必须使用 mock/fixture"。
-
-依赖边界：本模块只依赖 pydantic、domain 层与 tools/base.py 契约；
-禁止导入 CrewAI、FastAPI、httpx 等。
+Production requests read a versioned snapshot of the SEC's official company-ticker
+dataset bundled with the application. Request execution never downloads or refreshes
+that dataset. Exact ticker, exact CIK, normalized legal name, and a small curated alias
+table are supported; fuzzy guessing is intentionally forbidden.
 """
 
 from __future__ import annotations
+
+import json
+import re
+import unicodedata
+from functools import lru_cache
+from importlib import resources
+from typing import Iterable, Mapping
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,16 +21,33 @@ from invest_research.domain.errors import ErrorCode
 from invest_research.domain.models import CompanyIdentity
 from invest_research.tools.base import ToolError, ToolFailure, ToolResult, ToolSuccess
 
-# ---------------------------------------------------------------------------
-# 输入/输出契约
-# ---------------------------------------------------------------------------
+SNAPSHOT_RESOURCE = "sec_company_tickers_snapshot.json"
+SNAPSHOT_SCHEMA_VERSION = 1
+
+# Aliases never create identities: each target must exist in the official snapshot.
+_CURATED_ALIASES: dict[str, str] = {
+    "amazon": "AMZN",
+    "apple": "AAPL",
+    "boeing": "BA",
+    "coca cola": "KO",
+    "exxon": "XOM",
+    "exxon mobil": "XOM",
+    "johnson and johnson": "JNJ",
+    "johnson johnson": "JNJ",
+    "jp morgan": "JPM",
+    "jp morgan chase": "JPM",
+    "jpmorgan": "JPM",
+    "jpmorgan chase": "JPM",
+    "microsoft": "MSFT",
+    "tesla": "TSLA",
+    "walmart": "WMT",
+}
 
 
 class ResolveCompanyRequest(BaseModel):
-    """公司解析请求：接受公司名称或股票代码（均去空白后非空）。"""
+    """Company resolver input: non-empty company name, ticker, or CIK."""
 
     model_config = {"frozen": True}
-
     input_company: str = Field(min_length=1, max_length=200)
 
     @field_validator("input_company")
@@ -44,104 +60,168 @@ class ResolveCompanyRequest(BaseModel):
 
 
 class ResolveCompanyResponse(BaseModel):
-    """公司解析结果。
-
-    - resolved=True：candidates 恰好 1 个（唯一命中）；
-    - resolved=False：candidates 有多个（歧义，交给用户选择）。
-    """
+    """Unique match or ambiguity candidates; empty matches are ToolFailure."""
 
     model_config = {"frozen": True}
-
     resolved: bool
     candidates: list[CompanyIdentity]
 
 
-# ---------------------------------------------------------------------------
-# 本地 SEC ticker fixture（P02-04 演示与契约测试用）
-# ---------------------------------------------------------------------------
-# 格式：(key, CompanyIdentity)，key 为大小写不敏感的 ticker/常用名。
-# 唯一命中样例：MSFT/Microsoft → CIK 0000789019。
-# 歧义样例："Delta" 对应多家公司 —— 演示"歧义返回候选，不静默猜测"。
-
-_SEC_TICKER_FIXTURE: tuple[tuple[str, CompanyIdentity], ...] = (
-    (
-        "msft",
-        CompanyIdentity(
-            cik="0000789019", ticker="MSFT", legal_name="MICROSOFT CORP", exchange="NASDAQ"
-        ),
-    ),
-    (
-        "microsoft",
-        CompanyIdentity(
-            cik="0000789019", ticker="MSFT", legal_name="MICROSOFT CORP", exchange="NASDAQ"
-        ),
-    ),
-    (
-        "aapl",
-        CompanyIdentity(cik="0000320193", ticker="AAPL", legal_name="APPLE INC", exchange="NASDAQ"),
-    ),
-    (
-        "apple",
-        CompanyIdentity(cik="0000320193", ticker="AAPL", legal_name="APPLE INC", exchange="NASDAQ"),
-    ),
-    (
-        "delta",
-        CompanyIdentity(
-            cik="0000027904", ticker="DAL", legal_name="DELTA AIR LINES INC", exchange="NYSE"
-        ),
-    ),
-    (
-        "delta",
-        CompanyIdentity(
-            cik="0000329987", ticker="DLA", legal_name="DELTA APPAREL INC", exchange="NASDAQ"
-        ),
-    ),
-)
+def _normalize_lookup_key(value: str) -> str:
+    """Normalize names without performing fuzzy or prefix matching."""
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    normalized = normalized.replace("&", " and ")
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    return " ".join(normalized.split())
 
 
-# ---------------------------------------------------------------------------
-# 实体解析器
-# ---------------------------------------------------------------------------
+def _ticker_keys(ticker: str) -> set[str]:
+    value = ticker.strip().upper()
+    return {
+        value.casefold(),
+        value.replace(".", "-").casefold(),
+        value.replace("-", ".").casefold(),
+    }
 
 
 class CompanyIndex:
-    """大小写不敏感的公司索引：key（ticker/名称）→ 候选 list[CompanyIdentity]。
+    """Exact in-memory index with deterministic ambiguity handling.
 
-    同一 key 可能映射到多个公司（歧义场景），故值为列表。
+    ``entries`` remains injectable for isolated tests. Snapshot identities are indexed
+    by ticker, 10-digit CIK, and normalized legal name. Multiple ticker classes sharing
+    one CIK are one issuer rather than an ambiguity.
     """
 
-    def __init__(self, entries: tuple[tuple[str, CompanyIdentity], ...]) -> None:
+    def __init__(
+        self,
+        entries: Iterable[tuple[str, CompanyIdentity]],
+        *,
+        aliases: Mapping[str, str] | None = None,
+        source_url: str | None = None,
+        retrieved_at: str | None = None,
+        company_count: int | None = None,
+    ) -> None:
         self._index: dict[str, list[CompanyIdentity]] = {}
+        self.source_url = source_url
+        self.retrieved_at = retrieved_at
+        self.company_count = company_count
+        identities: dict[tuple[str, str | None], CompanyIdentity] = {}
+
         for key, identity in entries:
-            self._index.setdefault(key.lower(), []).append(identity)
+            identities[(identity.cik, identity.ticker)] = identity
+            self._add(key, identity)
+            self._add(identity.cik, identity)
+            self._add(identity.legal_name, identity)
+            if identity.ticker:
+                for ticker_key in _ticker_keys(identity.ticker):
+                    self._add(ticker_key, identity)
+
+        by_ticker: dict[str, CompanyIdentity] = {}
+        for identity in identities.values():
+            if identity.ticker:
+                for ticker_key in _ticker_keys(identity.ticker):
+                    by_ticker[ticker_key] = identity
+        for alias, ticker in (aliases or {}).items():
+            target = by_ticker.get(ticker.casefold())
+            if target is None:
+                raise ValueError(f"公司别名 {alias!r} 指向快照中不存在的 ticker {ticker!r}")
+            self._add(alias, target)
+
+    def _add(self, key: str, identity: CompanyIdentity) -> None:
+        normalized = self._key(key)
+        if not normalized:
+            return
+        candidates = self._index.setdefault(normalized, [])
+        if identity not in candidates:
+            candidates.append(identity)
+
+    @staticmethod
+    def _key(query: str) -> str:
+        stripped = query.strip()
+        if stripped.isdigit() and len(stripped) <= 10:
+            return stripped.zfill(10)
+        return _normalize_lookup_key(stripped)
 
     def lookup(self, query: str) -> list[CompanyIdentity]:
-        """按（去空白+小写后的）查询词返回候选；无匹配返回空列表。"""
-        return list(self._index.get(query.strip().lower(), []))
+        """Return exact candidates and deduplicate share classes by issuer CIK."""
+        candidates = self._index.get(self._key(query), [])
+        by_cik: dict[str, CompanyIdentity] = {}
+        for identity in candidates:
+            by_cik.setdefault(identity.cik, identity)
+        return list(by_cik.values())
+
+
+def _snapshot_payload() -> dict[str, object]:
+    resource = resources.files("invest_research.resources").joinpath(SNAPSHOT_RESOURCE)
+    payload = json.loads(resource.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("SEC 公司索引快照顶层格式无效")
+    return payload
+
+
+@lru_cache(maxsize=1)
+def load_sec_company_index() -> CompanyIndex:
+    """Load and validate the bundled SEC snapshot once per process."""
+    payload = _snapshot_payload()
+    if payload.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+        raise RuntimeError("SEC 公司索引快照 schema_version 不受支持")
+    raw_companies = payload.get("companies")
+    if not isinstance(raw_companies, list):
+        raise RuntimeError("SEC 公司索引快照缺少 companies 数组")
+    declared_count = payload.get("company_count")
+    if not isinstance(declared_count, int) or declared_count != len(raw_companies):
+        raise RuntimeError("SEC 公司索引快照 company_count 与实际条目数不一致")
+    if declared_count < 5_000:
+        raise RuntimeError("SEC 公司索引快照异常偏小，拒绝加载")
+
+    entries: list[tuple[str, CompanyIdentity]] = []
+    for item in raw_companies:
+        if not isinstance(item, dict):
+            raise RuntimeError("SEC 公司索引快照含无效公司条目")
+        try:
+            identity = CompanyIdentity(
+                cik=str(item["cik"]),
+                ticker=str(item["ticker"]),
+                legal_name=str(item["legal_name"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("SEC 公司索引快照含无法解析的公司条目") from exc
+        entries.append((identity.ticker or "", identity))
+
+    return CompanyIndex(
+        entries,
+        aliases=_CURATED_ALIASES,
+        source_url=str(payload.get("source_url") or ""),
+        retrieved_at=str(payload.get("retrieved_at") or ""),
+        company_count=declared_count,
+    )
 
 
 class CompanyResolverTool:
-    """本地公司解析工具：唯一命中→成功；歧义→候选交给用户；无→失败。
-
-    结构上满足 P02-01 的 Tool 契约（name + execute）。
-    """
+    """Resolve locally; ambiguity is explicit and absence fails closed."""
 
     name = "company_resolver"
 
     def __init__(self, index: CompanyIndex | None = None) -> None:
-        self._index = index if index is not None else CompanyIndex(_SEC_TICKER_FIXTURE)
+        self._index = index if index is not None else load_sec_company_index()
 
     def execute(self, request: ResolveCompanyRequest) -> ToolResult[ResolveCompanyResponse]:
         candidates = self._index.lookup(request.input_company)
-
         if not candidates:
+            snapshot_hint = (
+                f"（本地 SEC 快照 retrieved_at={self._index.retrieved_at}）"
+                if self._index.retrieved_at
+                else ""
+            )
             return ToolFailure(
                 error=ToolError(
                     error_code=ErrorCode.INPUT_INVALID,
-                    message=f"未找到公司: {request.input_company}",
+                    message=(
+                        f"本地 SEC 公司索引未找到精确匹配: {request.input_company}"
+                        f"{snapshot_hint}；未执行模糊猜测"
+                    ),
                 )
             )
         if len(candidates) == 1:
             return ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=candidates))
-        # 歧义：不静默猜测，返回所有候选交给用户（对应 PRD FR-002）
         return ToolSuccess(value=ResolveCompanyResponse(resolved=False, candidates=candidates))

@@ -63,6 +63,7 @@ def _job_id() -> str:
 class TestSettingsDiagnostics:
     def test_default_capture_mode_off(self) -> None:
         settings = Settings(
+            _env_file=None,
             llm_api_key=SecretStr("placeholder-key"),
             sec_user_agent_contact="placeholder@example.com",
         )

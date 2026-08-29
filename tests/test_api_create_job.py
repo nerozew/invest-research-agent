@@ -139,6 +139,21 @@ def test_create_job_rejects_empty_forms_with_422() -> None:
     assert response.status_code == 422
 
 
+def test_create_job_accepts_explicit_annual_deep_mode() -> None:
+    """P07-10A：年度模式创建独立任务，绝不静默改写为 legacy。"""
+    store = FakeJobStore()
+    client, store_ref = _client(store)
+
+    response = client.post(
+        "/v1/research-jobs",
+        json={**_valid_body(), "research_mode": "annual_deep"},
+    )
+
+    assert response.status_code == 202
+    assert store_ref.calls == 1
+    assert store_ref.created[0][1].research_mode.value == "annual_deep"
+
+
 def test_create_job_returns_503_when_no_store_injected() -> None:
     """未注入 JobStore 时（模块导入零连接），创建任务接口返回 503。"""
     app = create_app(settings=_settings(), health_checker=FakeChecker())

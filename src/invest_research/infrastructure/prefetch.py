@@ -26,6 +26,7 @@ class PrefetchResult:
     search_summary: str | None  # Serper 搜索摘要（多行文本）
     status: PrefetchStatus  # ok / partial / failed
     financial_facts_summary: str | None = None  # 截止日前 SEC XBRL 事实 JSON
+    submission_count: int | None = None  # None=未确认；0=确认无截止日前目标申报
 
 
 def prefetch_summary_text(result: PrefetchResult | None) -> str:

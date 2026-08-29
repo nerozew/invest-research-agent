@@ -22,6 +22,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.status import JobStatus
 
 __all__ = [
@@ -50,6 +51,8 @@ class JobListEntry(BaseModel):
     current_step: str | None = None
     # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
     research_profile: str = "deep"
+    # P07-12：列表同样必须区分年度 DAG 与 legacy 串行任务；旧响应保持 legacy。
+    research_mode: ResearchMode = ResearchMode.LEGACY
     error_code: str | None = None
     created_at: datetime
     started_at: datetime | None = None

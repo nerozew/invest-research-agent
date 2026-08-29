@@ -534,6 +534,80 @@ def test_runner_injects_prefetch_result_into_crew_inputs(
     assert "100" in inputs["financial_facts"]
 
 
+def test_unknown_company_fails_before_crew_or_llm(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """索引未命中必须在 01 阶段终止，Crew kickoff 永远不能被调用。"""
+    calls = 0
+    failed_prefetch = PrefetchResult(
+        company_identity=None,
+        submissions_summary=None,
+        search_summary=None,
+        status="failed",
+    )
+
+    class _MustNotRunCrew:
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise AssertionError("公司解析失败后不得启动 Crew/LLM")
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("unknown_company_fail_fast")),
+        crew_factory=lambda cfg, rt: _MustNotRunCrew(),  # type: ignore[no-any-return]
+        prefetch=lambda request: failed_prefetch,
+    )
+    request = ResearchRequest(
+        input_company="definitely-not-in-sec-snapshot-xyz",
+        as_of_date=date(2025, 10, 31),
+    )
+
+    with pytest.raises(LiveFlowExecutionError) as exc_info:
+        runner.run(request)
+
+    assert calls == 0
+    assert exc_info.value.error_code == ErrorCode.COMPANY_NOT_FOUND.value
+    assert exc_info.value.failure_stage == "01_company_resolve"
+    assert "Research/LLM 调用前终止" in str(exc_info.value)
+
+
+def test_confirmed_empty_sec_submissions_fails_before_crew_or_llm(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """SEC 已确认零目标申报时不得花费 Token 让 Research 猜测来源。"""
+    calls = 0
+    identity = CompanyIdentity(cik="0000789019", ticker="MSFT", legal_name="MICROSOFT CORP")
+    empty_prefetch = PrefetchResult(
+        company_identity=identity,
+        submissions_summary="（无 10-K/10-Q 申报记录）",
+        search_summary="- Microsoft | https://www.microsoft.com",
+        status="partial",
+        submission_count=0,
+    )
+
+    class _MustNotRunCrew:
+        def kickoff(self, inputs=None):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise AssertionError("SEC 已确认零目标申报后不得启动 Crew/LLM")
+
+    runner = LiveResearchFlowRunner(
+        config=_config(),
+        artifact_root=str(tmp_path_factory.mktemp("empty_submissions_fail_fast")),
+        crew_factory=lambda cfg, rt: _MustNotRunCrew(),  # type: ignore[no-any-return]
+        prefetch=lambda request: empty_prefetch,
+    )
+
+    with pytest.raises(LiveFlowExecutionError) as exc_info:
+        runner.run(ResearchRequest(input_company="MSFT", as_of_date=date(2025, 10, 31)))
+
+    assert calls == 0
+    assert exc_info.value.error_code == ErrorCode.SEC_PREFETCH_UNAVAILABLE.value
+    assert exc_info.value.failure_stage == "02_research"
+    assert "Research/LLM 调用前终止" in str(exc_info.value)
+
+
 def test_action_input_output_not_treated_as_research_pack_without_cache(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:

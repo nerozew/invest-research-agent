@@ -1,0 +1,97 @@
+{
+  "schema_version": "live_dataset_v1",
+  "generated_on": "fixed",
+  "note": "P06-11 live benchmark 固定 10 家公司数据集。所有 as_of_date 固定（无动态 today）；每 case 固定 language=zh-CN、requested_forms=[10-K,10-Q]。无任何密钥。",
+  "cases": [
+    {
+      "case_id": "live-aapl",
+      "ticker": "AAPL",
+      "company": "Apple Inc.",
+      "sector": "technology",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-msft",
+      "ticker": "MSFT",
+      "company": "Microsoft Corporation",
+      "sector": "software",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-amzn",
+      "ticker": "AMZN",
+      "company": "Amazon.com Inc.",
+      "sector": "ecommerce",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-jpm",
+      "ticker": "JPM",
+      "company": "JPMorgan Chase & Co.",
+      "sector": "banking",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-jnj",
+      "ticker": "JNJ",
+      "company": "Johnson & Johnson",
+      "sector": "healthcare",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-wmt",
+      "ticker": "WMT",
+      "company": "Walmart Inc.",
+      "sector": "retail",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-xom",
+      "ticker": "XOM",
+      "company": "Exxon Mobil Corporation",
+      "sector": "energy",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-ba",
+      "ticker": "BA",
+      "company": "The Boeing Company",
+      "sector": "aerospace",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-ko",
+      "ticker": "KO",
+      "company": "The Coca-Cola Company",
+      "sector": "consumer_goods",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "live-tsla",
+      "ticker": "TSLA",
+      "company": "Tesla Inc.",
+      "sector": "automotive",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    }
+  ]
+}

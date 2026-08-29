@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel
+from invest_research.domain.models import ResearchRequest
 
 __all__ = ["IdempotencyKeyManager", "request_fingerprint"]
 
 
-def request_fingerprint(request: BaseModel) -> str:
+def request_fingerprint(request: ResearchRequest) -> str:
     """请求体规范化指纹：同输入必同指纹（与 P04-05 后端口径一致）。"""
-    return request.model_dump_json()
+    return request.idempotency_fingerprint()
 
 
 class IdempotencyKeyManager:
@@ -36,7 +36,7 @@ class IdempotencyKeyManager:
         self._latest_fingerprint: str | None = None
         self._latest_key: str | None = None
 
-    def key_for(self, request: BaseModel) -> str:
+    def key_for(self, request: ResearchRequest) -> str:
         """返回该请求应使用的 Idempotency-Key。"""
         fingerprint = request_fingerprint(request)
         if fingerprint == self._latest_fingerprint and self._latest_key is not None:

@@ -159,9 +159,7 @@ def create_app(
             DiagnosticsBundleStore,
         )
 
-        diagnostics_bundle_store = DiagnosticsBundleStore(
-            _Path(resolved_settings.artifact_root)
-        )
+        diagnostics_bundle_store = DiagnosticsBundleStore(_Path(resolved_settings.artifact_root))
     owns_checker = health_checker is None
     checker = health_checker or build_health_checker(resolved_settings)
     job_service = CreateResearchJobService(store=job_store) if job_store is not None else None

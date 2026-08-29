@@ -10,8 +10,9 @@ from datetime import date
 from decimal import Decimal
 
 from invest_research.domain.errors import ErrorCode
-from invest_research.domain.models import CompanyIdentity, FinancialFact, ResearchRequest
+from invest_research.domain.models import CompanyIdentity, Filing, FinancialFact, ResearchRequest
 from invest_research.infrastructure.real_tools import (
+    _FACT_SELECTION_VERSION,
     ResearchToolkit,
     build_research_tools,
     resolve_and_prefetch,
@@ -80,6 +81,21 @@ def _facts_result() -> object:
     )
 
 
+def _submissions_result() -> ToolSuccess[FetchSubmissionsResponse]:
+    return ToolSuccess(
+        value=FetchSubmissionsResponse(
+            filings=[
+                Filing(
+                    accession_number="0000789019-25-000001",
+                    form_type="10-K",
+                    filing_date=date(2025, 7, 30),
+                    primary_document_url="https://www.sec.gov/Archives/msft-2025.htm",
+                )
+            ]
+        )
+    )
+
+
 def _toolkit(
     resolver: object,
     submissions: object,
@@ -99,7 +115,7 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     resolver = _CountingTool(
         ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
     )
-    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    submissions = _CountingTool(_submissions_result())
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
@@ -110,6 +126,7 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     assert result.status == "ok"
     # 摘要必须随 PrefetchResult 返回（不只预热缓存）
     assert result.submissions_summary is not None
+    assert result.submission_count == 1
     assert result.search_summary is not None
     assert result.financial_facts_summary is not None
     assert "RevenueFromContractWithCustomerExcludingAssessedTax" in (result.financial_facts_summary)
@@ -126,7 +143,12 @@ def test_resolve_and_prefetch_primes_cache_and_returns_result() -> None:
     assert cache.get(cache.key("web_search", {"query": "MSFT", "as_of": as_of})) is not None
     facts_key = cache.key(
         "sec_company_facts",
-        {"cik": _CIK, "as_of_date": as_of, "requested_forms": "10-K,10-Q"},
+        {
+            "cik": _CIK,
+            "as_of_date": as_of,
+            "requested_forms": "10-K,10-Q",
+            "selection_version": _FACT_SELECTION_VERSION,
+        },
     )
     assert cache.get(facts_key) is not None
 
@@ -148,7 +170,12 @@ def test_prefetch_skips_fetch_on_cache_hit() -> None:
     cache.put(
         cache.key(
             "sec_company_facts",
-            {"cik": _CIK, "as_of_date": as_of, "requested_forms": "10-K,10-Q"},
+            {
+                "cik": _CIK,
+                "as_of_date": as_of,
+                "requested_forms": "10-K,10-Q",
+                "selection_version": _FACT_SELECTION_VERSION,
+            },
         ),
         "cached-facts",
     )
@@ -166,7 +193,7 @@ def test_prefetch_failed_status_on_ambiguous_resolution() -> None:
     resolver = _CountingTool(
         ToolSuccess(value=ResolveCompanyResponse(resolved=False, candidates=[_identity()]))
     )
-    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    submissions = _CountingTool(_submissions_result())
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
@@ -178,11 +205,27 @@ def test_prefetch_failed_status_on_ambiguous_resolution() -> None:
     assert search.calls == 0
 
 
+def test_prefetch_confirms_empty_submissions_as_partial() -> None:
+    resolver = _CountingTool(
+        ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
+    )
+    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
+
+    result = resolve_and_prefetch(
+        _request(), _toolkit(resolver, submissions, search), ToolCallCache()
+    )
+
+    assert result.status == "partial"
+    assert result.submission_count == 0
+    assert result.submissions_summary == "（无 10-K/10-Q 申报记录）"
+
+
 def test_prefetch_failed_status_on_resolve_failure() -> None:
     resolver = _CountingTool(
         ToolFailure(error=ToolError(error_code=ErrorCode.INPUT_INVALID, message="未找到公司: MSFT"))
     )
-    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    submissions = _CountingTool(_submissions_result())
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
 
@@ -199,7 +242,7 @@ def test_prefetch_respects_tool_budget() -> None:
     resolver = _CountingTool(
         ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=[_identity()]))
     )
-    submissions = _CountingTool(ToolSuccess(value=FetchSubmissionsResponse(filings=[])))
+    submissions = _CountingTool(_submissions_result())
     search = _CountingTool(ToolSuccess(value=SearchResponse(items=(), total=0, page=1)))
     cache = ToolCallCache()
     budget = ToolBudget(caps={"sec_submissions": 1, "sec_company_facts": 1, "web_search": 1})

@@ -17,6 +17,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from invest_research.domain.annual_node_runtime import AnnualNodeGraphSnapshot
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus, StepStatus
 
@@ -96,6 +98,19 @@ class StepSnapshot(BaseModel):
         )
 
 
+class PerformanceSnapshot(BaseModel):
+    """per-job 性能/成本快照（来自 07_manifest.json；缺失字段为 None，不伪造）。"""
+
+    llm_calls: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    total_tokens: int | None = None
+    tool_calls_total: int | None = None
+    estimated_cost_usd: float | None = None
+    pricing_as_of: str | None = None
+
+
 class JobSnapshot(BaseModel):
     """任务状态快照（FR-013：状态、当前步骤、步骤耗时、重试次数、错误码、耗时）。"""
 
@@ -104,6 +119,8 @@ class JobSnapshot(BaseModel):
     current_step: str | None = None
     # P06-06A：每任务研究档位（fast/deep），默认 deep（旧任务兼容）
     research_profile: str = "deep"
+    research_mode: ResearchMode = ResearchMode.LEGACY
+    annual_nodes: AnnualNodeGraphSnapshot | None = None
     error_code: str | None = None
     error_message: str | None = None
     # P06-09：失败发生阶段（如 04_analysis / 05_writer / report_publish）
@@ -112,6 +129,8 @@ class JobSnapshot(BaseModel):
     completed_at: datetime | None = None
     duration_seconds: float | None = None
     steps: tuple[StepSnapshot, ...] = ()
+    # WS3：per-job 性能/成本（读 07_manifest.json；缺失为 None）
+    performance: PerformanceSnapshot | None = None
 
     @classmethod
     def build(
@@ -121,18 +140,23 @@ class JobSnapshot(BaseModel):
         status: JobStatus,
         current_step: str | None = None,
         research_profile: str = "deep",
+        research_mode: ResearchMode = ResearchMode.LEGACY,
+        annual_nodes: AnnualNodeGraphSnapshot | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         failure_stage: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
         steps: tuple[StepSnapshot, ...] = (),
+        performance: PerformanceSnapshot | None = None,
     ) -> "JobSnapshot":
         return cls(
             job_id=job_id,
             status=status,
             current_step=current_step,
             research_profile=research_profile,
+            research_mode=research_mode,
+            annual_nodes=annual_nodes,
             error_code=error_code,
             error_message=error_message,
             failure_stage=failure_stage,
@@ -140,6 +164,7 @@ class JobSnapshot(BaseModel):
             completed_at=completed_at,
             duration_seconds=compute_duration_seconds(started_at, completed_at),
             steps=steps,
+            performance=performance,
         )
 
 
