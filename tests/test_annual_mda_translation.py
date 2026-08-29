@@ -129,10 +129,23 @@ def test_translate_official_statements_empty_no_call(tmp_path: Path):
 
 
 def test_summarize_mda_returns_chinese_summary(tmp_path: Path):
-    completion = _FakeCompletion("管理层认为收入增长主要由云服务驱动。")
+    completion = _FakeCompletion(
+        "管理层认为收入增长主要由云服务驱动，受益于企业客户持续上云与海外市场扩展。"
+        "同时公司通过优化履约网络和运营杠杆改善经营利润率，并持续投入生成式人工智能"
+        "基础设施以支撑长期增长。管理层预计收入增速将在未来几个季度保持稳健。"
+    )
     executor = AnnualSectionExecutor(tmp_path, completion)
     summary = executor.summarize_mda(_mda_blocks())
-    assert summary == "管理层认为收入增长主要由云服务驱动。"
+    assert len(summary) > 100
+    assert "云服务驱动" in summary
+    assert completion.calls == 1
+
+
+def test_summarize_mda_too_short_returns_empty(tmp_path: Path):
+    """模型只给元说明/偷懒（<100 字）→ 返回空，由调用方回退原文直取。"""
+    completion = _FakeCompletion("该节选自公司年报中管理层讨论与分析。")
+    executor = AnnualSectionExecutor(tmp_path, completion)
+    assert executor.summarize_mda(_mda_blocks()) == ""
     assert completion.calls == 1
 
 

@@ -425,14 +425,17 @@ class AnnualEvidenceFanoutPipeline:
                 continue
             if not section.entries:
                 continue
-            out.append(
-                EvidenceArtifact(
-                    artifact_key=ref.artifact_key,
-                    kind=EvidenceKind(kind_str),
-                    source_url=section.entries[0].url,
-                    content_checksum=ref.content_checksum,
-                    parser_version="annual_web_search_section_v1",
-                    validation_status=EvidenceValidationStatus.VALIDATED,
+            # 每个 entry 都进证据链（LLM 上下文会给全部 entry 的 [src_<hash(url)>]；
+            # 若只登记首条，其余引用 key 不在 registry → 报告出现 [?]）。
+            for entry in section.entries:
+                out.append(
+                    EvidenceArtifact(
+                        artifact_key=ref.artifact_key,
+                        kind=EvidenceKind(kind_str),
+                        source_url=entry.url,
+                        content_checksum=ref.content_checksum,
+                        parser_version="annual_web_search_section_v1",
+                        validation_status=EvidenceValidationStatus.VALIDATED,
+                    )
                 )
-            )
         return out

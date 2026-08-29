@@ -759,11 +759,13 @@ class AnnualResearchRuntime:
         if parsed is not None and executor is not None:
             mda = extract_mda(parsed.blocks)
             summary = executor.summarize_mda(parsed.blocks)
-            mda_section = (
-                build_mda_summary_section(summary, locator=mda.locator if mda else None)
-                if summary
-                else ""
-            )
+            if summary:
+                mda_section = build_mda_summary_section(
+                    summary, locator=mda.locator if mda else None
+                )
+            else:
+                # 摘译过短/失败 → 回退原文直取节选（不显示敷衍的元说明）。
+                mda_section = build_mda_section(parsed.blocks)
         else:
             mda_section = build_mda_section(parsed.blocks) if parsed is not None else ""
         body_parts = [edited]

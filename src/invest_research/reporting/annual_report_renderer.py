@@ -209,7 +209,7 @@ def build_reference_list(
             lines.append(f"[{num}] [{label}]({entry.canonical_url})")
         else:
             lines.append(f"[{num}] {label}（SEC XBRL 事实）")
-    lines.append("")
+        lines.append("")  # 每条之间空行（论文式排版，避免密集）
     return "\n".join(lines)
 
 

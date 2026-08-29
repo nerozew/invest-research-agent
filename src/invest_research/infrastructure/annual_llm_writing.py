@@ -61,6 +61,8 @@ _MAX_CONTEXT_CHARS = 12_000
 _OFFICIAL_TRANSLATE_MAX_CHARS = 1_500
 # MD&A 摘译：喂给 LLM 的原文上限（原文可能几千字，取有界前段挑重点）。
 _MDA_SUMMARIZE_MAX_CHARS = 4_000
+# MD&A 摘译最低字符量：低于此值视为模型只给了元说明/偷懒，回退原文直取。
+_MDA_SUMMARY_MIN_CHARS = 100
 # Item/MD&A 标题块命中后连带纳入的后续正文块数量（捕获长段落如管理层讨论）。
 _BLOCK_SPAN = 5
 _MAX_OUTPUT_TOKENS = 8_000
@@ -590,10 +592,11 @@ class AnnualSectionExecutor:
         )
 
     def summarize_mda(self, blocks: Iterable[Any]) -> str:
-        """LLM 分析 10-K Item 7 管理层讨论挑重点，输出 ≤500 字中文摘译。
+        """LLM 分析 10-K Item 7 管理层讨论挑重点，输出 300-500 字中文摘译。
 
         - 复用 ``extract_mda`` 取有界原文，输入再截到有界长度；
-        - 只输出中文要点；调用方负责渲染与降级（executor 缺失回退原文直取）。
+        - prompt 明确要求**实质要点**（禁止元叙述/开场白）并给**下限字数**，防止模型偷懒；
+        - 输出过短（<100 字，模型只给元说明）返回空串，由调用方回退原文直取节选。
         """
         mda = extract_mda(blocks)
         if mda is None:
@@ -602,14 +605,19 @@ class AnnualSectionExecutor:
         result = self._completion.complete(
             role=LLMRole.ANALYSIS,
             system_prompt=(
-                "你是财报分析师。阅读管理层讨论与分析（MD&A）原文节选，挑选最重要的"
-                "3-5 个要点，用中文写成一段不超过 500 字的摘要说明。只使用原文中出现"
-                "的事实和数字，不得编造、不得补充外部信息、不得给出投资建议。只输出中文。"
+                "你是财报分析师。阅读管理层讨论与分析（MD&A）原文节选，提炼最重要的"
+                "3-5 个业务与财务要点，用中文写出 300-500 字的要点说明。直接给出要点"
+                "内容（可用 `- ` 列表），不要解释“本节是管理层讨论与分析”、不要"
+                "开场白或元叙述。只使用原文中出现的事实和数字，不得编造、不得补充"
+                "外部信息、不得给出投资建议。只输出中文要点。"
             ),
             user_prompt=f"# 管理层讨论与分析原文节选\n{source_text}",
             max_tokens=2_000,
         )
-        return (result.markdown or "").strip()
+        summary = (result.markdown or "").strip()
+        if len(summary) < _MDA_SUMMARY_MIN_CHARS:
+            return ""
+        return summary
 
     def _artifact_title(
         self, artifact: EvidenceArtifact, store: ArtifactStore | None
