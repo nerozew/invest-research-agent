@@ -85,6 +85,19 @@
         "EarningsPerShareBasic",
         "IncomeLossFromContinuingOperationsPerBasicShare"
       ]
+    },
+    {
+      "metric_name": "cost_of_goods_sold",
+      "candidates": [
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold"
+      ]
+    },
+    {
+      "metric_name": "liabilities_and_equity",
+      "candidates": [
+        "LiabilitiesAndStockholdersEquity"
+      ]
     }
   ]
 }

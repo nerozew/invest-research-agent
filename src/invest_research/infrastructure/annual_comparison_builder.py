@@ -22,8 +22,37 @@ from invest_research.financial.concept_mapping import (
     load_concept_mapping,
 )
 from invest_research.infrastructure.annual_company_facts_pipeline import AnnualCompanyFactsSelection
+from invest_research.infrastructure.annual_document_pipeline import AnnualParsedDocument
 from invest_research.infrastructure.annual_evidence_fanout import AnnualEvidenceBundle
+from invest_research.infrastructure.annual_llm_fact_extraction import LLMFactExtractor
 from invest_research.tools.artifact_store import ArtifactRef, ArtifactStore
+
+# L2 指标中文名映射（供 LLM 提取 prompt 使用）。
+_METRIC_LABELS: dict[str, str] = {
+    "gross_margin": "毛利率",
+    "asset_liability_ratio": "资产负债率",
+    "current_ratio": "流动比率",
+    "net_margin": "净利率",
+    "operating_margin": "营业利润率",
+    "return_on_assets": "资产收益率",
+    "operating_cash_flow_ratio": "经营现金流比率",
+    "free_cash_flow": "自由现金流",
+    "revenue_growth": "收入增长率",
+    "net_income_growth": "净利润增长率",
+}
+# L2 指标对应的 10-K 报表行英文名（供 excerpt 验证；不匹配指标名的 metric_name）。
+_METRIC_EN: dict[str, str] = {
+    "gross_margin": "gross profit",
+    "asset_liability_ratio": "total liabilities",
+    "current_ratio": "current liabilities",
+    "net_margin": "net income",
+    "operating_margin": "operating income",
+    "return_on_assets": "total assets",
+    "operating_cash_flow_ratio": "operating activities",
+    "free_cash_flow": "free cash flow",
+    "revenue_growth": "net sales",
+    "net_income_growth": "net income",
+}
 
 
 class AnnualComparisonArtifactResult(BaseModel):
@@ -39,8 +68,14 @@ class AnnualComparisonArtifactResult(BaseModel):
 class AnnualComparisonBuilder:
     """仅从 P07-04 的已验证工件构建财务比较包。"""
 
-    def __init__(self, artifact_root: Path) -> None:
+    def __init__(
+        self,
+        artifact_root: Path,
+        *,
+        fact_extractor: LLMFactExtractor | None = None,
+    ) -> None:
         self._artifact_root = artifact_root
+        self._fact_extractor = fact_extractor
 
     def build(
         self,
@@ -95,9 +130,43 @@ class AnnualComparisonBuilder:
             comparator_accession=comparator.accession_number if comparator else None,
             comparator_report_date=comparator.report_period if comparator else None,
         )
+        metrics = list(calculation.metrics)
+        limitations = list(calculation.limitations)
+        # L2：L1 推导后仍缺失的指标，用 LLM 从 10-K 原文提取（best-effort、强验证、可追溯）。
+        if self._fact_extractor is not None:
+            parsed = self._load_target_parsed(store, selection)
+            if parsed is not None:
+                for index, metric in enumerate(metrics):
+                    if metric.value is not None:
+                        continue
+                    label_cn = _METRIC_LABELS.get(metric.metric_name, metric.metric_name)
+                    label_en = _METRIC_EN.get(metric.metric_name, metric.metric_name)
+                    extracted = self._fact_extractor.extract(
+                        blocks=parsed.blocks,
+                        metric_name=metric.metric_name,
+                        label_cn=label_cn,
+                        label_en=label_en,
+                    )
+                    if extracted is not None:
+                        metrics[index] = metric.model_copy(
+                            update={
+                                "value": extracted.value,
+                                "explanation": (
+                                    f"{metric.explanation or ''}；由 10-K 原文提取，"
+                                    f"locator={extracted.locator}"
+                                ).strip("；"),
+                            }
+                        )
+                        limitations.append(
+                            f"{metric.metric_name}: 由 10-K 原文提取（locator={extracted.locator}）"
+                        )
+                    else:
+                        limitations.append(
+                            f"{metric.metric_name}: LLM_REJECTED 无法从 10-K 原文验证提取"
+                        )
         status = (
             AnnualComparisonStatus.READY
-            if all(metric.value is not None for metric in calculation.metrics)
+            if all(metric.value is not None for metric in metrics)
             else AnnualComparisonStatus.PARTIAL
         )
         pack = AnnualComparisonPack(
@@ -109,10 +178,26 @@ class AnnualComparisonBuilder:
             concept_mapping_version=mapping.version,
             input_fingerprint=fingerprint,
             facts=calculation.facts,
-            metrics=calculation.metrics,
-            limitations=calculation.limitations,
+            metrics=metrics,
+            limitations=limitations,
         )
         return self._write(store, artifact_key, pack)
+
+    def _load_target_parsed(
+        self, store: ArtifactStore, selection: AnnualFilingSelection
+    ) -> AnnualParsedDocument | None:
+        """读 target 10-K 的解析块（供 L2 LLM 提取）；缺失/损坏返回 None。"""
+        target = selection.target_filing
+        if target is None or target.accession_number is None:
+            return None
+        try:
+            content = store.read(f"annual/{target.accession_number}/parsed.json")
+        except KeyError:
+            return None
+        try:
+            return AnnualParsedDocument.model_validate_json(content)
+        except ValueError:
+            return None
 
     @staticmethod
     def _json_bytes(model: BaseModel) -> bytes:

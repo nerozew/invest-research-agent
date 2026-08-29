@@ -260,16 +260,48 @@ def compute_annual_comparison(
             limitations.append(choice.limitation)
 
     gross_profit = one("gross_profit")
+    cost_of_goods_sold = one("cost_of_goods_sold")
     operating_income = one("operating_income")
     current_assets = one("current_assets", instant=True)
     current_liabilities = one("current_liabilities", instant=True)
     total_assets = one("total_assets", instant=True)
     prior_total_assets = one("total_assets", instant=True, comparator=True)
     total_liabilities = one("total_liabilities", instant=True)
+    liabilities_and_equity = one("liabilities_and_equity", instant=True)
+    stockholders_equity = one("stockholders_equity", instant=True)
     operating_cash_flow = one("operating_cash_flow")
     capital_expenditure = one("capital_expenditure")
 
     period_end = target_report_date
+    # 毛利/负债确定性推导：候选 concept 缺失时用勾稽关系（数字仍是 SEC 事实加减，不经 LLM）。
+    gross_profit_value = gross_profit.fact.value if gross_profit.fact else None
+    gross_sources: list[FinancialFact | None] = [revenue.fact, gross_profit.fact]
+    if (
+        gross_profit_value is None
+        and revenue.fact is not None
+        and cost_of_goods_sold.fact is not None
+    ):
+        gross_profit_value = revenue.fact.value - cost_of_goods_sold.fact.value
+        gross_sources = [revenue.fact, cost_of_goods_sold.fact]
+        limitations.append("gross_profit: 由 收入−销售成本 确定性推导")
+        # 推导已解决，移除"未找到"的原始 limitation（避免报告同时显示缺失与推导）。
+        limitations[:] = [
+            lim for lim in limitations if not lim.startswith("gross_profit: 未找到")
+        ]
+
+    total_liabilities_value = total_liabilities.fact.value if total_liabilities.fact else None
+    liab_sources: list[FinancialFact | None] = [total_liabilities.fact, total_assets.fact]
+    if (
+        total_liabilities_value is None
+        and liabilities_and_equity.fact is not None
+        and stockholders_equity.fact is not None
+    ):
+        total_liabilities_value = liabilities_and_equity.fact.value - stockholders_equity.fact.value
+        liab_sources = [liabilities_and_equity.fact, stockholders_equity.fact]
+        limitations.append("total_liabilities: 由 负债和权益−股东权益 确定性推导")
+        limitations[:] = [
+            lim for lim in limitations if not lim.startswith("total_liabilities: 未找到")
+        ]
     metrics = (
         _with_sources(
             compute_revenue_growth(
@@ -283,11 +315,11 @@ def compute_annual_comparison(
         _with_sources(
             compute_gross_margin(
                 revenue.fact.value if revenue.fact else None,
-                gross_profit.fact.value if gross_profit.fact else None,
+                gross_profit_value,
                 job_id=job_id,
                 period_end=period_end,
             ),
-            [revenue.fact, gross_profit.fact],
+            gross_sources,
         ),
         _with_sources(
             compute_operating_margin(
@@ -331,14 +363,14 @@ def compute_annual_comparison(
         ),
         _with_sources(
             compute_asset_liability_ratio(
-                total_liabilities.fact.value if total_liabilities.fact else None,
+                total_liabilities_value,
                 total_assets.fact.value if total_assets.fact else None,
-                unit_liabilities=total_liabilities.fact.unit if total_liabilities.fact else None,
+                unit_liabilities=liab_sources[0].unit if liab_sources[0] else None,
                 unit_assets=total_assets.fact.unit if total_assets.fact else None,
                 job_id=job_id,
                 period_end=period_end,
             ),
-            [total_liabilities.fact, total_assets.fact],
+            liab_sources,
         ),
         _with_sources(
             compute_operating_cash_flow_ratio(

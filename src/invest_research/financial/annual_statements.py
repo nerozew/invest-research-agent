@@ -16,10 +16,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,13 +44,35 @@ class FinancialStatementKind(StrEnum):
     CASH_FLOW = "cash_flow"
 
 
+_DERIVE_FORMULAS: dict[str, Callable[[Decimal, Decimal], Decimal]] = {
+    "add": lambda a, b: a + b,
+    "subtract": lambda a, b: a - b,
+    "multiply": lambda a, b: a * b,
+    "divide": lambda a, b: a / b,
+}
+
+
+class DerivationRule(BaseModel):
+    """行项目的确定性推导规则（候选 concept 缺失时的兜底）。
+
+    ``inputs`` 引用同一 statement mapping 内其他行的 ``label``（如"收入"/"销售成本"），
+    运行时从已算行取值；公式为白名单四则运算（不引入任意函数）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    formula: Literal["add", "subtract", "multiply", "divide"]
+    inputs: tuple[str, ...] = Field(min_length=2, max_length=2)
+
+
 class StatementRowDef(BaseModel):
-    """单个行项目的映射定义（label + concept 候选优先级）。"""
+    """单个行项目的映射定义（label + concept 候选优先级 + 可选推导）。"""
 
     model_config = ConfigDict(frozen=True)
 
     label: str = Field(min_length=1)
     candidates: tuple[str, ...] = Field(min_length=1)
+    derivation: DerivationRule | None = None
 
 
 class StatementDef(BaseModel):
@@ -80,7 +104,11 @@ class BalanceCheckResult(BaseModel):
 
 
 class FinancialStatementRow(BaseModel):
-    """报表单行：label + 命中 concept + target/comparator 值（数字原封不动）。"""
+    """报表单行：label + 命中 concept + target/comparator 值（数字原封不动）。
+
+    ``derivation_source`` 非空表示该值由确定性推导得到（候选 concept 缺失时，
+    用 ``inputs`` 对应行做四则运算），数字仍是代码按 SEC 事实算的，不经 LLM。
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -92,6 +120,7 @@ class FinancialStatementRow(BaseModel):
     accession_number: str | None = None
     value: Decimal | None = None
     comparator_value: Decimal | None = None
+    derivation_source: tuple[str, ...] | None = None
 
 
 class FinancialStatementSet(BaseModel):
@@ -112,6 +141,34 @@ def load_statement_mapping(path: Path = STATEMENTS_V1_PATH) -> StatementMapping:
     """从 JSON 数据文件加载并校验三张表映射（fail-fast）。"""
     raw = json.loads(path.read_text(encoding="utf-8"))
     return StatementMapping.model_validate(raw)
+
+
+def _derive_row_value(
+    derivation: DerivationRule,
+    row_by_label: dict[str, FinancialStatementRow],
+    *,
+    comparator: bool,
+) -> tuple[Decimal | None, bool]:
+    """按推导规则从同表已算行取值；任何输入缺失/运算失败返回 ``(None, False)``。
+
+    确定性：只做白名单四则运算（``_DERIVE_FORMULAS``），数字是 SEC 事实的
+    加减乘除，不引入 LLM 或任意函数。
+    """
+    values: list[Decimal] = []
+    for in_label in derivation.inputs:
+        in_row = row_by_label.get(in_label)
+        if in_row is None:
+            return None, False
+        v = in_row.comparator_value if comparator else in_row.value
+        if v is None:
+            return None, False
+        values.append(v)
+    fn = _DERIVE_FORMULAS[derivation.formula]
+    try:
+        result = fn(*values)
+    except (ZeroDivisionError, InvalidOperation, TypeError):
+        return None, False
+    return Decimal(result), True
 
 
 def extract_statements(
@@ -137,6 +194,8 @@ def extract_statements(
             continue
         instant = definition.period_type is StatementPeriodType.INSTANT
         rows: list[FinancialStatementRow] = []
+        row_by_label: dict[str, FinancialStatementRow] = {}
+        # 第一遍：尝试 concept 候选（现有逻辑）。
         for row_def in definition.rows:
             target = _select_one(
                 facts,
@@ -165,24 +224,50 @@ def extract_statements(
             fact = target.fact if target.fact is not None else (
                 comparator.fact if comparator is not None else None
             )
-            rows.append(
-                FinancialStatementRow(
-                    label=row_def.label,
-                    concept=fact.concept if fact is not None else None,
-                    unit=fact.unit if fact is not None else None,
-                    period_type=definition.period_type,
-                    period_end=(
-                        fact.period_end if fact is not None and fact.period_end is not None
-                        else (fact.instant_date if fact is not None else None)
-                    ),
-                    accession_number=fact.accession_number if fact is not None else None,
-                    value=target.fact.value if target.fact is not None else None,
-                    comparator_value=(
-                        comparator.fact.value
-                        if comparator is not None and comparator.fact is not None
-                        else None
-                    ),
+            row = FinancialStatementRow(
+                label=row_def.label,
+                concept=fact.concept if fact is not None else None,
+                unit=fact.unit if fact is not None else None,
+                period_type=definition.period_type,
+                period_end=(
+                    fact.period_end if fact is not None and fact.period_end is not None
+                    else (fact.instant_date if fact is not None else None)
+                ),
+                accession_number=fact.accession_number if fact is not None else None,
+                value=target.fact.value if target.fact is not None else None,
+                comparator_value=(
+                    comparator.fact.value
+                    if comparator is not None and comparator.fact is not None
+                    else None
+                ),
+            )
+            row_by_label[row_def.label] = row
+            rows.append(row)
+        # 第二遍：候选缺失但有推导规则的行，用同表已算行补算（确定性，不经 LLM）。
+        for index, row_def in enumerate(definition.rows):
+            row = rows[index]
+            if row.value is not None or row_def.derivation is None:
+                continue
+            derived_value, ok = _derive_row_value(
+                row_def.derivation, row_by_label, comparator=False
+            )
+            derived_cmp: Decimal | None = None
+            if comparator_accession is not None and comparator_year is not None:
+                derived_cmp, ok_cmp = _derive_row_value(
+                    row_def.derivation, row_by_label, comparator=True
                 )
+                ok = ok and ok_cmp
+            if not ok:
+                all_limitations.append(
+                    f"{kind.value}.{row_def.label}: NO_DERIVATION 推导输入缺失"
+                )
+                continue
+            rows[index] = row.model_copy(
+                update={
+                    "value": derived_value,
+                    "comparator_value": derived_cmp,
+                    "derivation_source": row_def.derivation.inputs,
+                }
             )
         sets.append(
             FinancialStatementSet(

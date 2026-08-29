@@ -241,6 +241,8 @@ class Settings(BaseSettings):
     # 年度主动研究 Agent（下载全文 + 丢弃编造 URL + 网页快照溯源）生产注入开关。
     # 默认关闭：保留现有行为、不破坏离线测试；开启需 Serper Key 且会增加网页下载 I/O。
     annual_active_research_enabled: bool = False
+    # L2：LLM 从 10-K 原文提取缺失数值（默认关；开时在 L1 确定性推导后触发，有界）。
+    annual_llm_extraction_enabled: bool = False
 
     # ---- Readiness 探测超时（P04-01）----
     # /readiness 对依赖的探测必须设置显式超时，避免请求被卡在无响应的依赖上；

@@ -176,3 +176,91 @@ def test_extract_statements_requires_exact_report_date_for_conflicting_periods()
     balance = next(s for s in sets if s.kind is FinancialStatementKind.BALANCE_SHEET)
     assets = next(row for row in balance.rows if row.label == "资产总计")
     assert assets.value == Decimal("1000")
+
+
+def _facts_for_derivation() -> list[FinancialFact]:
+    """收入/成本/LSE/权益有值；毛利与负债合计**无候选命中**（触发确定性推导）。"""
+    facts: list[FinancialFact] = []
+    for concept, value in {
+        "Revenues": "500",
+        "CostOfGoodsAndServicesSold": "300",
+    }.items():
+        facts.append(_fact(concept, value, year=2026, accession=TARGET_ACC))
+        facts.append(_fact(concept, str(Decimal(value) - 50), year=2025, accession=COMPARATOR_ACC))
+    for concept, value in {
+        "LiabilitiesAndStockholdersEquity": "1000",
+        "StockholdersEquity": "400",
+    }.items():
+        facts.append(_fact(concept, value, year=2026, accession=TARGET_ACC, instant=True))
+        facts.append(
+            _fact(
+                concept,
+                str(Decimal(value) - 100),
+                year=2025,
+                accession=COMPARATOR_ACC,
+                instant=True,
+            )
+        )
+    return facts
+
+
+def test_derives_gross_profit_from_revenue_minus_cost() -> None:
+    """毛利候选 concept 缺失时，用同表 收入−销售成本 确定性推导。"""
+    sets = extract_statements(
+        _facts_for_derivation(),
+        load_statement_mapping(),
+        target_year=2026,
+        target_accession=TARGET_ACC,
+        comparator_year=2025,
+        comparator_accession=COMPARATOR_ACC,
+    )
+    income = next(s for s in sets if s.kind is FinancialStatementKind.INCOME_STATEMENT)
+    gross = next(r for r in income.rows if r.label == "毛利润")
+    assert gross.value == Decimal("200")  # 500 - 300
+    assert gross.comparator_value == Decimal("200")  # 450 - 250
+    assert gross.derivation_source == ("收入", "销售成本")
+
+
+def test_derives_total_liabilities_from_lse_minus_equity() -> None:
+    """负债合计候选 concept 缺失时，用 负债和权益合计−股东权益 推导。"""
+    sets = extract_statements(
+        _facts_for_derivation(),
+        load_statement_mapping(),
+        target_year=2026,
+        target_accession=TARGET_ACC,
+        comparator_year=2025,
+        comparator_accession=COMPARATOR_ACC,
+    )
+    balance = next(s for s in sets if s.kind is FinancialStatementKind.BALANCE_SHEET)
+    liabilities = next(r for r in balance.rows if r.label == "负债合计")
+    assert liabilities.value == Decimal("600")  # 1000 - 400
+    assert liabilities.derivation_source == ("负债和权益合计", "股东权益")
+
+
+def test_derivation_missing_input_marks_no_derivation() -> None:
+    """推导输入缺失（无销售成本）→ value=None + NO_DERIVATION limitation。"""
+    facts = [f for f in _facts_for_derivation() if f.concept != "CostOfGoodsAndServicesSold"]
+    sets = extract_statements(
+        facts,
+        load_statement_mapping(),
+        target_year=2026,
+        target_accession=TARGET_ACC,
+    )
+    income = next(s for s in sets if s.kind is FinancialStatementKind.INCOME_STATEMENT)
+    gross = next(r for r in income.rows if r.label == "毛利润")
+    assert gross.value is None
+    assert any("NO_DERIVATION" in lim for lim in income.limitations)
+
+
+def test_concept_missing_without_derivation_keeps_limitation() -> None:
+    """无候选也无推导的行仍保持原 limitation（CONCEPT_MISSING 文案）。"""
+    sets = extract_statements(
+        _facts_for_derivation(),
+        load_statement_mapping(),
+        target_year=2026,
+        target_accession=TARGET_ACC,
+    )
+    balance = next(s for s in sets if s.kind is FinancialStatementKind.BALANCE_SHEET)
+    cash = next(r for r in balance.rows if r.label == "现金及现金等价物")
+    assert cash.value is None
+    assert any("未找到匹配 canonical filing" in lim for lim in balance.limitations)

@@ -391,6 +391,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
         from invest_research.infrastructure.annual_evidence_fanout import (
             AnnualEvidenceFanoutPipeline,
         )
+        from invest_research.infrastructure.annual_llm_fact_extraction import LLMFactExtractor
         from invest_research.infrastructure.annual_llm_writing import (
             AnnualLlmDispatcher,
             AnnualSectionExecutor,
@@ -454,7 +455,16 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                         web_search_pipeline=web_pipeline,
                         artifact_root=artifact_root,
                     ),
-                    comparison_builder=AnnualComparisonBuilder(artifact_root),
+                    comparison_builder=AnnualComparisonBuilder(
+                        artifact_root,
+                        fact_extractor=(
+                            LLMFactExtractor(
+                                AnnualLlmDispatcher(LLMConfig.from_settings(settings))
+                            )
+                            if getattr(settings, "annual_llm_extraction_enabled", False)
+                            else None
+                        ),
+                    ),
                     artifact_root=artifact_root,
                     progress=AnnualNodeProgressService(SqlAnnualNodeStore(session_factory)),
                     section_executor=AnnualSectionExecutor(
