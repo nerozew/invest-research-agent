@@ -25,6 +25,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.flows.state import ResearchFlowState
 from invest_research.reporting.pdf import MarkdownPdfRenderer
 from invest_research.reporting.renderer import ReportRenderer, build_render_input
@@ -67,7 +68,16 @@ class ReportArtifactPublisher:
                 "缺少 report_draft，无法渲染最终报告；任务不得标记为完整发布成功"
             )
         try:
-            report_md = ReportRenderer().render(rendered)
+            if (state.run_manifest or {}).get("research_mode") == ResearchMode.ANNUAL_DEEP.value:
+                # 年度报告自包含（H1 + 封面 + 章节 + 数据限制 + 来源清单 + 声明），
+                # 直接发布，避免再套 legacy 模板导致标题/来源/限制/声明重复。
+                if state.report_draft is None:
+                    raise ReportArtifactPublishError(
+                        "缺少 report_draft，无法发布年度报告；任务不得标记为完整发布成功"
+                    )
+                report_md = state.report_draft.markdown or ""
+            else:
+                report_md = ReportRenderer().render(rendered)
         except Exception as exc:  # noqa: BLE001 - 渲染失败统一转发布错误
             raise ReportArtifactPublishError(
                 f"Markdown 报告渲染失败: {type(exc).__name__}: {exc}"
