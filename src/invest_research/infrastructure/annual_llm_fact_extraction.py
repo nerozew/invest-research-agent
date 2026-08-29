@@ -37,7 +37,18 @@ _NEIGHBOR_BLOCKS = 5
 # 单块截断字符上限（控制 LLM 输入体积）。
 _BLOCK_CHARS = 300
 # 有界块子集上限（远小于 10-K 数千块）。
-_MAX_BLOCKS = 40
+_MAX_BLOCKS = 60
+# 报表行级关键字：现金流量表/利润表的特定行可能远离标题块（如末尾的"汇率影响"），
+# 需额外把含这些关键字的块选入，否则 LLM 看不到 → 提取失败。
+_ROW_KEYWORDS = (
+    "effect of exchange rate",
+    "exchange rate changes",
+    "net increase (decrease) in cash",
+    "net change in cash",
+    "cash and cash equivalents, end",
+    "operating expenses",
+    "cost of revenue",
+)
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -59,7 +70,9 @@ def _select_financial_blocks(blocks: Iterable[Any]) -> list[tuple[str, str]]:
     for index, block in enumerate(items):
         text = (block.text or "").strip()
         lowered = text.lower()
-        if any(kw in lowered for kw in _FINANCIAL_KEYWORDS):
+        if any(kw in lowered for kw in _FINANCIAL_KEYWORDS) or any(
+            kw in lowered for kw in _ROW_KEYWORDS
+        ):
             start = max(0, index - _NEIGHBOR_BLOCKS)
             end = min(len(items), index + _NEIGHBOR_BLOCKS + 1)
             for neighbor in range(start, end):

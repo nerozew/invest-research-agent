@@ -137,6 +137,8 @@ services:
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_metrics
       # WS3 成本估算单价文件（worker 容器内路径，见下方 volume 挂载）。
       PRICING_FILE: /app/pricing.json
+      # L2：LLM 从 10-K 原文提取缺失数值（报表行/指标兜底；开启后每缺失项一次 LLM 调用）。
+      ANNUAL_LLM_EXTRACTION_ENABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy

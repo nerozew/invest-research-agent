@@ -471,6 +471,11 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                         artifact_root, AnnualLlmDispatcher(LLMConfig.from_settings(settings))
                     ),
                     active_research=active_research,
+                    fact_extractor=(
+                        LLMFactExtractor(AnnualLlmDispatcher(LLMConfig.from_settings(settings)))
+                        if getattr(settings, "annual_llm_extraction_enabled", False)
+                        else None
+                    ),
                 )
             )
             return runtime.run(job_id=job_id, request=request)

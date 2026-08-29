@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Callable, Iterable, Protocol, cast
 from urllib.parse import urlparse
 
 from invest_research.application.annual_finalization_gate import AnnualFinalizationGate
@@ -57,7 +57,11 @@ from invest_research.domain.models import (
     SourceType,
 )
 from invest_research.domain.quality import QualityRecommendation
-from invest_research.financial.annual_statements import extract_statements, load_statement_mapping
+from invest_research.financial.annual_statements import (
+    FinancialStatementSet,
+    extract_statements,
+    load_statement_mapping,
+)
 from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.annual_active_research import (
     _PAGES_PREFIX,
@@ -66,12 +70,16 @@ from invest_research.infrastructure.annual_active_research import (
 )
 from invest_research.infrastructure.annual_company_facts_pipeline import AnnualCompanyFactsSelection
 from invest_research.infrastructure.annual_comparison_builder import AnnualComparisonBuilder
-from invest_research.infrastructure.annual_document_pipeline import AnnualParsedDocument
+from invest_research.infrastructure.annual_document_pipeline import (
+    AnnualParsedDocument,
+    AnnualParsedTextBlock,
+)
 from invest_research.infrastructure.annual_evidence_fanout import (
     AnnualEvidenceBundle,
     AnnualEvidenceFanoutPipeline,
 )
 from invest_research.infrastructure.annual_evidence_router import AnnualEvidenceRouter
+from invest_research.infrastructure.annual_llm_fact_extraction import LLMFactExtractor
 from invest_research.infrastructure.annual_llm_writing import AnnualSectionExecutor
 from invest_research.infrastructure.annual_section_planner import AnnualSectionPlanner
 from invest_research.infrastructure.annual_web_search_pipeline import WebSearchSectionEvidence
@@ -98,6 +106,16 @@ __all__ = [
     "AnnualRuntimeComponents",
     "AnnualResearchRuntime",
 ]
+
+
+# L2：报表行中文 label → 10-K 原文英文行名（供 excerpt 验证，避免驼峰 concept 名不匹配）。
+_STATEMENT_EN_LABELS: dict[str, str] = {
+    "汇率变动影响": "effect of exchange rate",
+    "现金及等价物净变动": "net change in cash",
+    "营业费用": "operating expenses",
+    "毛利润": "gross profit",
+    "负债合计": "total liabilities",
+}
 
 
 # 网页/分析师/评级等叙事证据的 kind（映射为 SourceType.WEB，而非错误地标成 SEC_XBRL）。
@@ -166,6 +184,8 @@ class AnnualRuntimeComponents:
     section_executor: AnnualSectionExecutor | None = None
     # 可选的主动研究 Agent：CONTINUE_SEARCH 时真正执行补证搜索（不注入则保持现状）。
     active_research: Any | None = None
+    # L2：LLM 从 10-K 原文提取缺失数值（报表行兜底；开关开启才注入）。
+    fact_extractor: LLMFactExtractor | None = None
 
 
 @dataclass(frozen=True)
@@ -912,7 +932,44 @@ class AnnualResearchRuntime:
             comparator_accession=comparison.comparator_accession_number,
             comparator_report_date=_year_date(comparison.comparator_fiscal_year),
         )
+        # L2：报表行缺失时，LLM 从 10-K 原文提取补值（best-effort，带 locator/来源）。
+        if self._components.fact_extractor is not None and sets:
+            parsed = self._load_target_parsed(job_id, evidence)
+            if parsed is not None:
+                sets = self._supplement_statement_rows(sets, parsed.blocks)
         return render_statements(sets)
+
+    def _supplement_statement_rows(
+        self,
+        sets: tuple[FinancialStatementSet, ...],
+        blocks: Iterable[AnnualParsedTextBlock],
+    ) -> tuple[FinancialStatementSet, ...]:
+        """对 value 缺失的报表行调 LLMFactExtractor 从 10-K 原文补值（有界、可追溯）。"""
+        extractor = self._components.fact_extractor
+        if extractor is None:
+            return sets
+        supplemented: list[FinancialStatementSet] = []
+        for statement in sets:
+            rows = list(statement.rows)
+            for index, row in enumerate(rows):
+                if row.value is not None:
+                    continue
+                label_en = _STATEMENT_EN_LABELS.get(row.label, row.label)
+                extracted = extractor.extract(
+                    blocks=blocks,
+                    metric_name=row.label,
+                    label_cn=row.label,
+                    label_en=label_en,
+                )
+                if extracted is not None:
+                    rows[index] = row.model_copy(
+                        update={
+                            "value": extracted.value,
+                            "derivation_source": (f"10-K原文提取:{extracted.locator}",),
+                        }
+                    )
+            supplemented.append(statement.model_copy(update={"rows": tuple(rows)}))
+        return tuple(supplemented)
 
     @staticmethod
     def _draft_sections(plan: AnnualSectionPlan) -> tuple[SectionDraft, ...]:
