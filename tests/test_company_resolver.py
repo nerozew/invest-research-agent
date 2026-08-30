@@ -242,3 +242,61 @@ def test_override_exact_ticker_resolves_to_main_entity_uniquely() -> None:
 
     index = load_sec_company_index()
     assert [c.cik for c in index.lookup("XOM")] == ["0000034088"]
+
+
+def test_execute_falls_back_to_online_search_when_local_miss() -> None:
+    """本地索引未命中时，注入的在线搜索兜底：唯一候选 → resolved=True。"""
+    from invest_research.tools.company_resolver import CompanyIndex, CompanyResolverTool
+
+    index = CompanyIndex([])  # 本地空
+    found = [CompanyIdentity(cik="9999999999", ticker="", legal_name="New Company Corp")]
+
+    def online(query: str) -> list[CompanyIdentity]:
+        assert query == "New Company"
+        return found
+
+    tool = CompanyResolverTool(index, online_search=online)
+    result = tool.execute(ResolveCompanyRequest(input_company="New Company"))
+    assert isinstance(result, ToolSuccess)
+    assert result.value.resolved is True
+    assert result.value.candidates[0].cik == "9999999999"
+
+
+def test_execute_online_search_no_result_returns_failure() -> None:
+    """在线兜底也无候选 → ToolFailure（本地未命中，在线搜索亦无结果）。"""
+    from invest_research.domain.errors import ErrorCode
+    from invest_research.tools.company_resolver import CompanyIndex, CompanyResolverTool
+
+    tool = CompanyResolverTool(CompanyIndex([]), online_search=lambda q: [])
+    result = tool.execute(ResolveCompanyRequest(input_company="Unknown"))
+    assert isinstance(result, ToolFailure)
+    assert result.error.error_code == ErrorCode.INPUT_INVALID
+
+
+def test_execute_online_search_multiple_candidates_returns_ambiguity() -> None:
+    """在线兜底返回多个候选 → resolved=False + candidates，不静默猜测。"""
+    from invest_research.tools.company_resolver import CompanyIndex, CompanyResolverTool
+
+    found = [
+        CompanyIdentity(cik="1111111111", ticker="", legal_name="Alpha Co"),
+        CompanyIdentity(cik="2222222222", ticker="", legal_name="Beta Co"),
+    ]
+    tool = CompanyResolverTool(CompanyIndex([]), online_search=lambda q: found)
+    result = tool.execute(ResolveCompanyRequest(input_company="Alpha"))
+    assert isinstance(result, ToolSuccess)
+    assert result.value.resolved is False
+    assert len(result.value.candidates) == 2
+
+
+def test_execute_online_search_raises_returns_failure() -> None:
+    """在线兜底抛异常 → 不崩溃，回退为 ToolFailure（INPUT_INVALID）。"""
+    from invest_research.domain.errors import ErrorCode
+    from invest_research.tools.company_resolver import CompanyIndex, CompanyResolverTool
+
+    def online(query: str) -> list[CompanyIdentity]:
+        raise RuntimeError("network down")
+
+    tool = CompanyResolverTool(CompanyIndex([]), online_search=online)
+    result = tool.execute(ResolveCompanyRequest(input_company="Unknown"))
+    assert isinstance(result, ToolFailure)
+    assert result.error.error_code == ErrorCode.INPUT_INVALID

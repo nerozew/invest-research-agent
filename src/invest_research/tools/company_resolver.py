@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Callable
 from functools import lru_cache
 from importlib import resources
 from typing import Iterable, Mapping
@@ -286,29 +287,54 @@ def load_sec_company_index() -> CompanyIndex:
 
 
 class CompanyResolverTool:
-    """Resolve locally; ambiguity is explicit and absence fails closed."""
+    """Resolve locally, online fallback on miss; ambiguity explicit, absence fails closed."""
 
     name = "company_resolver"
 
-    def __init__(self, index: CompanyIndex | None = None) -> None:
+    def __init__(
+        self,
+        index: CompanyIndex | None = None,
+        online_search: Callable[[str], list[CompanyIdentity]] | None = None,
+    ) -> None:
         self._index = index if index is not None else load_sec_company_index()
+        # 在线搜索兜底（由基础设施层注入；best-effort，仅本地未命中时调用）
+        self._online_search = online_search
 
     def execute(self, request: ResolveCompanyRequest) -> ToolResult[ResolveCompanyResponse]:
         candidates = self._index.lookup(request.input_company)
+        # 本地未命中：有在线兜底时尝试；失败/无候选回退为与本地一致的 fail-closed
+        if not candidates and self._online_search is not None:
+            try:
+                candidates = self._online_search(request.input_company)
+            except Exception:  # noqa: BLE001 - 在线兜底 best-effort，失败等同无候选
+                candidates = []
+            if candidates:
+                return self._to_response(candidates)
         if not candidates:
-            snapshot_hint = (
-                f"（本地 SEC 快照 retrieved_at={self._index.retrieved_at}）"
-                if self._index.retrieved_at
-                else ""
-            )
-            return ToolFailure(
-                error=ToolError(
-                    error_code=ErrorCode.INPUT_INVALID,
-                    message=(
-                        f"本地 SEC 公司索引未找到匹配: {request.input_company}{snapshot_hint}"
-                    ),
-                )
-            )
+            return self._fail_closed(request)
+        return self._to_response(candidates)
+
+    @staticmethod
+    def _to_response(candidates: list[CompanyIdentity]) -> ToolResult[ResolveCompanyResponse]:
+        """候选转响应：唯一 → resolved=True；多个 → resolved=False（显式歧义，不猜测）。"""
         if len(candidates) == 1:
             return ToolSuccess(value=ResolveCompanyResponse(resolved=True, candidates=candidates))
         return ToolSuccess(value=ResolveCompanyResponse(resolved=False, candidates=candidates))
+
+    def _fail_closed(self, request: ResolveCompanyRequest) -> ToolFailure:
+        """本地（及在线兜底）均未命中：fail-closed，不静默猜测（INPUT_INVALID）。"""
+        snapshot_hint = (
+            f"（本地 SEC 快照 retrieved_at={self._index.retrieved_at}）"
+            if self._index.retrieved_at
+            else ""
+        )
+        if self._online_search is not None:
+            message = f"本地未命中，在线搜索亦无结果: {request.input_company}{snapshot_hint}"
+        else:
+            message = f"本地 SEC 公司索引未找到匹配: {request.input_company}{snapshot_hint}"
+        return ToolFailure(
+            error=ToolError(
+                error_code=ErrorCode.INPUT_INVALID,
+                message=message,
+            )
+        )
