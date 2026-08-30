@@ -177,6 +177,32 @@ def test_select_financial_blocks_bounded_with_many_row_hits() -> None:
     assert len(chosen) <= _MAX_BLOCKS
 
 
+def test_select_financial_blocks_row_words_cannot_crowd_out_real_statements() -> None:
+    """MD&A 大量 row 词命中不能挤掉 offset 更靠后的真实报表区域。
+
+    回归：``net income``/``gross profit`` 等通用行词在 10-K 前部叙述章节频繁出现，
+    若按其邻居块按文档顺序填满 ``_MAX_BLOCKS`` 配额，真实报表标题与行（offset 更靠后）
+    会被截掉——正是本分支要修复的 Task-4 根因。报表标题命中须被保证选中，行级关键字
+    命中须限定在标题锚定区域（子配额），使 MD&A 的 row 词无法耗尽配额。
+    """
+    # 前部叙述：200 个 row 词命中块（±5 邻居并集 > _MAX_BLOCKS，会填满配额）。
+    blocks = [
+        _b(
+            f"management discussion: net income improved and gross profit grew in {i}",
+            f"offset:{i}",
+        )
+        for i in range(200)
+    ]
+    # 真实报表区域（Item 8）：标题 + 现金流行，offset 远大于叙述区。
+    blocks.append(_b("Consolidated Statements of Cash Flows", "offset:210"))
+    blocks.append(_b("Change in cash and cash equivalents", "offset:211"))
+    blocks.append(_b("1,309", "offset:212"))
+    chosen = _select_financial_blocks(blocks)
+    locs = [loc for loc, _ in chosen]
+    assert "offset:210" in locs  # 报表标题必须进选中集合
+    assert "offset:211" in locs  # 报表行必须进选中集合
+
+
 def test_excerpt_accepts_english_variants() -> None:
     """措辞验证放宽：label_en 的英文变体命中即通过。"""
     assert _label_matches("net change in cash", "Change in cash and cash equivalents 1,309") is True

@@ -50,6 +50,12 @@ _BLOCK_CHARS = 300
 _MAX_BLOCKS = 200
 # 纯叙述输入（无报表表名/行命中）时的有界上限：沿用旧 60 块，避免叙述引用语无限占配额。
 _MAX_NARRATIVE_BLOCKS = 60
+# 报表区域锚定半径（块数）：以报表标题块为中心，行级关键字命中只在此窗口内收集，
+# 防止 10-K 前部叙述章节（MD&A 等）大量引用通用行词（net income / gross profit）
+# 耗尽配额、挤掉 offset 更靠后的真实报表区域。
+_STATEMENT_REGION_RADIUS = 60
+# 无标题锚点时的行级关键字子配额（纯 row 命中、无报表标题的退化输入）。
+_ROW_KEYWORD_BUDGET = 60
 # 报表行级关键字：现金流量表/利润表的特定行可能远离标题块（如末尾的"汇率影响"），
 # 需额外把含这些关键字的块选入，否则 LLM 看不到 → 提取失败。
 _ROW_KEYWORDS = (
@@ -85,12 +91,14 @@ class ExtractedFact:
 def _select_financial_blocks(blocks: Iterable[Any]) -> list[tuple[str, str]]:
     """选取含财务报表关键字的块及其邻居，报表区域优先、每块截断。
 
-    两阶段选择（根因：10-K 前部叙述章节大量引用 "consolidated financial
-    statements"，若按出现顺序收集会占满 60 块配额，导致 offset 更靠后的真实报表
-    区域进不了 LLM 输入）：
+    三阶段选择（根因：10-K 前部叙述章节大量引用 "consolidated financial
+    statements" 及通用行词 net income / gross profit 等，若按出现顺序收集会占满
+    配额，导致 offset 更靠后的真实报表区域进不了 LLM 输入）：
 
-    - 阶段一：收集报表表名标题/行级关键字命中的块（高价值，含邻居）；
-    - 阶段二：收集宽泛财务关键字命中的块（低价值，叙述章节引用语）；
+    - 阶段一：收集报表表名标题命中的块（数量少，保证进选中集合并排在最前）；
+    - 阶段二：收集行级关键字命中的块——有标题锚点时限定在标题附近的报表区域
+      （``_STATEMENT_REGION_RADIUS``），无锚点时按 ``_ROW_KEYWORD_BUDGET`` 子配额；
+    - 阶段三：收集宽泛财务关键字命中的块（低价值，叙述章节引用语）；
     - 合并时报表命中块排在前面，``_MAX_BLOCKS`` 截断发生在报表命中块之后，
       保证报表内容不被叙述块挤掉；纯叙述输入（无报表命中）沿用旧有界上限。
 
@@ -109,20 +117,32 @@ def _select_financial_blocks(blocks: Iterable[Any]) -> list[tuple[str, str]]:
                 if ntext and nloc not in into:
                     into[nloc] = ntext[:_BLOCK_CHARS]
 
-    priority_hits: list[int] = []
+    title_hits: list[int] = []
+    row_hits: list[int] = []
     secondary_hits: list[int] = []
     for index, block in enumerate(items):
         lowered = (block.text or "").strip().lower()
-        if any(kw in lowered for kw in _STATEMENT_TITLE_KEYWORDS) or any(
-            kw in lowered for kw in _ROW_KEYWORDS
-        ):
-            priority_hits.append(index)
+        if any(kw in lowered for kw in _STATEMENT_TITLE_KEYWORDS):
+            title_hits.append(index)
+        elif any(kw in lowered for kw in _ROW_KEYWORDS):
+            row_hits.append(index)
         elif any(kw in lowered for kw in _FINANCIAL_KEYWORDS):
             secondary_hits.append(index)
 
     priority: dict[str, str] = {}
+    # 阶段一：报表标题命中（数量少）先收集，保证进选中集合且排在最前，截断时不被尾部丢掉。
+    collect(title_hits, priority)
+    if title_hits:
+        # 阶段二（有锚点）：行级关键字命中限定在标题块附近的报表区域，MD&A 远处
+        # 的 row 词不占配额。
+        lo = max(0, min(title_hits) - _STATEMENT_REGION_RADIUS)
+        hi = min(len(items), max(title_hits) + _STATEMENT_REGION_RADIUS + 1)
+        collect([i for i in row_hits if lo <= i < hi], priority)
+    else:
+        # 阶段二（无锚点）：行级关键字命中按子配额有界收集。
+        collect(row_hits[:_ROW_KEYWORD_BUDGET], priority)
+    # 阶段三：宽泛财务关键字命中（低价值，叙述章节引用语）。
     secondary: dict[str, str] = {}
-    collect(priority_hits, priority)
     collect(secondary_hits, secondary)
     ordered_priority = [(loc, priority[loc]) for loc in priority]
     ordered_secondary = [(loc, secondary[loc]) for loc in secondary if loc not in priority]
