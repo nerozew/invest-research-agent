@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from invest_research.infrastructure.annual_document_pipeline import AnnualParsedTextBlock
 from invest_research.infrastructure.annual_llm_fact_extraction import (
+    _MAX_BLOCKS,
     ExtractedFact,
     LLMFactExtractor,
     _label_matches,
@@ -156,6 +157,24 @@ def test_select_financial_blocks_prefers_real_statements() -> None:
     chosen = _select_financial_blocks(blocks)
     locs = [loc for loc, _ in chosen]
     assert "offset:101" in locs  # 报表行必须进选中集合
+
+
+def test_select_financial_blocks_bounded_with_many_row_hits() -> None:
+    """报表行命中块大量（> _MAX_BLOCKS）时，合并结果仍须有界截断。
+
+    回归：通用行词（net income / operating expenses）在报表与叙述章节都出现，
+    各自 ±5 邻居的并集可远超 _MAX_BLOCKS；此前 `remaining` 变负导致优先级列表
+    未截断直接返回，违反有界契约。
+    """
+    blocks = tuple(
+        AnnualParsedTextBlock(
+            text=(f"net income row {i}" if i % 2 == 0 else f"operating expenses row {i}"),
+            locator=f"offset:{i}",
+        )
+        for i in range(500)
+    )
+    chosen = _select_financial_blocks(blocks)
+    assert len(chosen) <= _MAX_BLOCKS
 
 
 def test_excerpt_accepts_english_variants() -> None:

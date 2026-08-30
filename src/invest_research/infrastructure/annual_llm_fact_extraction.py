@@ -127,9 +127,10 @@ def _select_financial_blocks(blocks: Iterable[Any]) -> list[tuple[str, str]]:
     ordered_priority = [(loc, priority[loc]) for loc in priority]
     ordered_secondary = [(loc, secondary[loc]) for loc in secondary if loc not in priority]
     if priority:
-        # 报表命中块在前；剩余额度给叙述块（保证报表内容不被叙述块挤掉）。
-        remaining = _MAX_BLOCKS - len(ordered_priority)
-        return ordered_priority + ordered_secondary[: max(0, remaining)]
+        # 报表命中块在前；合并结果整体按 _MAX_BLOCKS 有界截断（超配额时截尾部），
+        # 避免大量报表行命中（net income / operating expenses 等在报表与 MD&A 同现）
+        # 拉邻居后优先级列表本身超过 _MAX_BLOCKS。
+        return (ordered_priority + ordered_secondary)[:_MAX_BLOCKS]
     # 纯叙述输入：沿用旧有界上限，避免引用语无限占配额。
     return ordered_secondary[:_MAX_NARRATIVE_BLOCKS]
 
