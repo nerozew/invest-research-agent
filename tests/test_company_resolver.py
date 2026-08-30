@@ -81,9 +81,7 @@ def test_ambiguous_query_returns_candidates() -> None:
             ),
         )
     )
-    result = CompanyResolverTool(index=custom).execute(
-        ResolveCompanyRequest(input_company="delta")
-    )
+    result = CompanyResolverTool(index=custom).execute(ResolveCompanyRequest(input_company="delta"))
 
     assert isinstance(result, ToolSuccess)
     assert result.value.resolved is False
@@ -178,3 +176,42 @@ def test_snapshot_is_versioned_large_and_loaded_once() -> None:
     assert first.company_count is not None and first.company_count >= 5_000
     assert first.source_url == "https://www.sec.gov/files/company_tickers.json"
     assert first.retrieved_at
+
+
+def test_lookup_scores_highest_match_for_partial_name() -> None:
+    """部分名称匹配按最相符评分：名称前缀命中 parent（高分），包含命中 subsidiary（低分）。"""
+    parent = CompanyIdentity(cik="0000034088", ticker="XOM", legal_name="EXXON MOBIL CORP")
+    subsidiary = CompanyIdentity(
+        cik="0002115436", ticker="XOM", legal_name="ExxonMobil Holdings Corp"
+    )
+    index = CompanyIndex([("XOM", parent), ("XOM", subsidiary)])
+    # 查询 "Exxon Mobil" → 归一化后与 parent 名称前缀匹配（高分），与 subsidiary 包含匹配（低分）
+    result = index.lookup("Exxon Mobil")
+    assert [c.cik for c in result] == ["0000034088"]  # 最高分命中 parent
+
+
+def test_lookup_exact_ticker_wins_over_name_substring() -> None:
+    """精确 ticker 命中 → 两个实体同分（都是精确 ticker）→ 歧义，全部返回。"""
+    index = CompanyIndex(
+        [
+            (
+                "XOM",
+                CompanyIdentity(cik="0000034088", ticker="XOM", legal_name="EXXON MOBIL CORP"),
+            ),
+            (
+                "XOM",
+                CompanyIdentity(
+                    cik="0002115436", ticker="XOM", legal_name="ExxonMobil Holdings Corp"
+                ),
+            ),
+        ]
+    )
+    result = index.lookup("XOM")
+    assert len(result) == 2
+    assert {c.cik for c in result} == {"0000034088", "0002115436"}
+
+
+def test_lookup_no_match_returns_empty() -> None:
+    """无任何 >0 分候选 → 返回空列表（上层据此 ToolFailure）。"""
+    index = CompanyIndex([])
+    assert index.lookup("TotallyUnknown Corp") == []

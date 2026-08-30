@@ -2,8 +2,9 @@
 
 Production requests read a versioned snapshot of the SEC's official company-ticker
 dataset bundled with the application. Request execution never downloads or refreshes
-that dataset. Exact ticker, exact CIK, normalized legal name, and a small curated alias
-table are supported; fuzzy guessing is intentionally forbidden.
+that dataset. Exact ticker, exact CIK, normalized legal name, a small curated alias
+table, and best-match name scoring (prefix > contains) are supported; absent matches
+fail closed instead of guessing.
 """
 
 from __future__ import annotations
@@ -84,12 +85,44 @@ def _ticker_keys(ticker: str) -> set[str]:
     }
 
 
+def _lookup_key(query: str) -> str:
+    """把查询归一化为索引键：裸 CIK 补零到 10 位，其余走名称归一化。"""
+    stripped = query.strip()
+    if stripped.isdigit() and len(stripped) <= 10:
+        return stripped.zfill(10)
+    return _normalize_lookup_key(stripped)
+
+
+def _match_score(query: str, identity: CompanyIdentity) -> int:
+    """查询与实体的匹配分：精确 3、归一化名称前缀 2、名称包含 1、无 0。
+
+    精确覆盖 ticker/CIK/归一化名称；前缀/包含只看归一化 legal_name（避免过泛）。
+    """
+    q = _normalize_lookup_key(query)
+    if not q:
+        return 0
+    name = _normalize_lookup_key(identity.legal_name)
+    # 精确：归一化名称全等，或查询本身就是 ticker/CIK 精确命中（由 _lookup_key 归一化保证）
+    if name == q:
+        return 3
+    if _lookup_key(query) == identity.cik or (
+        identity.ticker and _lookup_key(query) in _ticker_keys(identity.ticker)
+    ):
+        return 3
+    if name.startswith(q):
+        return 2
+    if q in name:
+        return 1
+    return 0
+
+
 class CompanyIndex:
-    """Exact in-memory index with deterministic ambiguity handling.
+    """确定性内存索引，按“最相符评分”返回候选。
 
     ``entries`` remains injectable for isolated tests. Snapshot identities are indexed
     by ticker, 10-digit CIK, and normalized legal name. Multiple ticker classes sharing
-    one CIK are one issuer rather than an ambiguity.
+    one CIK are one issuer rather than an ambiguity. ``lookup`` 返回最高分候选；
+    多个同最高分 → 全部返回（上层标 ambiguity）；无 >0 分 → 空。
     """
 
     def __init__(
@@ -116,6 +149,9 @@ class CompanyIndex:
                 for ticker_key in _ticker_keys(identity.ticker):
                     self._add(ticker_key, identity)
 
+        # 评分匹配需要访问全部身份（不限于精确索引键），快照 ~10k 条、单次扫描可接受。
+        self._all_identities: list[CompanyIdentity] = list(identities.values())
+
         by_ticker: dict[str, CompanyIdentity] = {}
         for identity in identities.values():
             if identity.ticker:
@@ -137,16 +173,26 @@ class CompanyIndex:
 
     @staticmethod
     def _key(query: str) -> str:
-        stripped = query.strip()
-        if stripped.isdigit() and len(stripped) <= 10:
-            return stripped.zfill(10)
-        return _normalize_lookup_key(stripped)
+        return _lookup_key(query)
 
     def lookup(self, query: str) -> list[CompanyIdentity]:
-        """Return exact candidates and deduplicate share classes by issuer CIK."""
-        candidates = self._index.get(self._key(query), [])
+        """返回最高分候选；多个同最高分全部返回（上层判 ambiguity）；无 >0 分返回空。"""
+        scored: dict[int, list[CompanyIdentity]] = {}
+        # 精确索引命中（ticker/CIK/归一化名称/别名）统一按最高分 3 参与，
+        # 保证别名类查询（如 "exxon mobil" → XOM）不被名称评分兜底差异吞掉。
+        for identity in self._index.get(self._key(query), []):
+            scored.setdefault(3, []).append(identity)
+        # 全表扫描评分（快照 ~10k 条，单次可接受；如需要可用名称前缀桶优化）。
+        for identity in self._all_identities:
+            score = _match_score(query, identity)
+            if score > 0:
+                scored.setdefault(score, []).append(identity)
+        if not scored:
+            return []
+        best = max(scored)
+        # 同最高分按 CIK 去重：共享 CIK 的多 ticker 类别视为同一发行人。
         by_cik: dict[str, CompanyIdentity] = {}
-        for identity in candidates:
+        for identity in scored[best]:
             by_cik.setdefault(identity.cik, identity)
         return list(by_cik.values())
 
@@ -217,8 +263,7 @@ class CompanyResolverTool:
                 error=ToolError(
                     error_code=ErrorCode.INPUT_INVALID,
                     message=(
-                        f"本地 SEC 公司索引未找到精确匹配: {request.input_company}"
-                        f"{snapshot_hint}；未执行模糊猜测"
+                        f"本地 SEC 公司索引未找到匹配: {request.input_company}{snapshot_hint}"
                     ),
                 )
             )
