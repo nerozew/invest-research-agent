@@ -65,6 +65,7 @@ from invest_research.financial.annual_statements import (
     load_statement_mapping,
 )
 from invest_research.financial.html_statement_extractor import extract_financial_tables
+from invest_research.financial.statement_translation import StatementRowTranslator
 from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.annual_active_research import (
     _PAGES_PREFIX,
@@ -194,6 +195,9 @@ class AnnualRuntimeComponents:
     active_research: Any | None = None
     # L2：LLM 从 10-K 原文提取缺失数值（报表行兜底；开关开启才注入）。
     fact_extractor: LLMFactExtractor | None = None
+    # 报表行名 LLM 兜底翻译：HTML 原表渲染时补翻译未命中对照表的行名
+    # （best-effort；不注入则保持英文原文回退）。
+    statement_translator: StatementRowTranslator | None = None
 
 
 @dataclass(frozen=True)
@@ -921,7 +925,18 @@ class AnnualResearchRuntime:
                 FinancialStatementKind.CASH_FLOW,
             }:
                 return None
-            return render_html_statements(statements)
+            # 报表行名 LLM 兜底翻译：收集全部行名交给 translator（对照表命中
+            # 的原地返回，未命中的批量 LLM 翻译）；数字与表格结构绝不经 LLM。
+            extra_labels: dict[str, str] | None = None
+            if self._components.statement_translator is not None:
+                all_labels = tuple(
+                    row[0].strip()
+                    for stmt in statements
+                    for row in stmt.rows
+                    if row and row[0].strip()
+                )
+                extra_labels = self._components.statement_translator.translate_many(all_labels)
+            return render_html_statements(statements, extra_labels=extra_labels or None)
         except Exception:  # noqa: BLE001 - 原表提取尽力而为，失败回退 XBRL 链路
             logger.warning("HTML 原表提取/渲染失败，回退 XBRL 链路", exc_info=True)
             return None

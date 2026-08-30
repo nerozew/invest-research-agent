@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +41,7 @@ from invest_research.application.progress import ProgressSink, StepRecordError
 from invest_research.domain.annual_pipeline import ResearchMode
 from invest_research.domain.models import ResearchRequest
 from invest_research.domain.status import JobStatus
+from invest_research.financial.statement_translation import StatementRowTranslator
 from invest_research.infrastructure.db.models import ResearchJob as ResearchJobORM
 from invest_research.infrastructure.db.progress import SqlProgressSink
 from invest_research.infrastructure.db.repositories import JobRepository
@@ -111,6 +114,64 @@ def _build_annual_web_search_pipeline(
         return WebSearchEvidencePipeline(artifact_root, GoogleSearchTool(provider=serper))
     except Exception:  # noqa: BLE001 - 搜索增强尽力而为，失败不阻塞年度核心流程
         return None
+
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_row_translation_json(raw: str) -> dict[str, str]:
+    """解析 LLM 返回的 ``{英文行名: 中文行名}`` JSON；任何非法输入返回 {}。
+
+    只接受 JSON 对象、键值均为非空字符串；多余键不校验（``StatementRowTranslator``
+    层会按输入标签子集过滤），保证 best-effort 不因单行异常拖垮整批翻译。
+    """
+    match = _JSON_OBJECT_RE.search(raw or "")
+    if match is None:
+        return {}
+    try:
+        payload = json.loads(match.group(0))
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key).strip(): str(value).strip()
+        for key, value in payload.items()
+        if isinstance(key, str) and isinstance(value, str) and value.strip()
+    }
+
+
+def _build_statement_row_translator(settings: Any) -> StatementRowTranslator:
+    """构造报表行名 LLM 兜底翻译器（best-effort：任何失败回退英文原文）。
+
+    依赖边界：``financial/`` 不允许导入 agents/LLM，故 ``llm_translate`` 可调用在
+    worker 层组装（``AnnualLlmDispatcher`` + ``LLMRole.WRITER``）：一次批量请求把
+    未命中行名交给 LLM 翻译，解析 JSON 映射；解析/调用失败均返回 {}。
+    """
+    from invest_research.agents.llm_factory import LLMConfig, LLMRole
+    from invest_research.infrastructure.annual_llm_writing import AnnualLlmDispatcher
+
+    dispatcher = AnnualLlmDispatcher(LLMConfig.from_settings(settings))
+
+    def llm_translate(labels: tuple[str, ...]) -> dict[str, str]:
+        if not labels:
+            return {}
+        try:
+            result = dispatcher.complete(
+                role=LLMRole.WRITER,
+                system_prompt=(
+                    "你是财务报表行名翻译器。把英文报表行名翻译为简体中文"
+                    "（中国通用会计准则常用术语）。只输出一个 JSON 对象，"
+                    "键为原文英文行名、值为对应中文行名，不要输出任何其他内容。"
+                ),
+                user_prompt=json.dumps(list(labels), ensure_ascii=False),
+                max_tokens=4_000,
+            )
+        except Exception:  # noqa: BLE001 - 翻译 best-effort，失败回退英文
+            return {}
+        return _parse_row_translation_json(result.markdown)
+
+    return StatementRowTranslator(llm_translate)
 
 
 def _build_live_research_tools(settings: Any, stats: dict[str, int] | None = None) -> list[Any]:
@@ -476,6 +537,7 @@ def _build_handler(flow_runner: ResearchFlowRunner | None = None) -> ResearchJob
                         if getattr(settings, "annual_llm_extraction_enabled", False)
                         else None
                     ),
+                    statement_translator=_build_statement_row_translator(settings),
                 )
             )
             return runtime.run(job_id=job_id, request=request)

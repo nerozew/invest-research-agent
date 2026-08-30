@@ -24,6 +24,7 @@ from invest_research.domain.models import (
     AnnualComparisonInputFingerprint,
     AnnualComparisonPack,
 )
+from invest_research.financial.statement_translation import StatementRowTranslator
 from invest_research.infrastructure.annual_comparison_builder import AnnualComparisonBuilder
 from invest_research.infrastructure.annual_document_pipeline import (
     AnnualDocumentArtifactResult,
@@ -46,6 +47,22 @@ _HTML_SOURCE = """
 <table>
 <tr><td>Revenue</td><td>72,880</td></tr>
 <tr><td>Net income</td><td>29,760</td></tr>
+</table>
+<div>NVIDIA Corporation<br>Consolidated Balance Sheets</div>
+<table>
+<tr><td>Total assets</td><td>200</td></tr>
+</table>
+<div>NVIDIA Corporation<br>Consolidated Statements of Cash Flows</div>
+<table>
+<tr><td>Net cash provided by operating activities</td><td>50</td></tr>
+</table>
+"""
+
+_HTML_SOURCE_WITH_UNTRANSLATED = """
+<div>NVIDIA Corporation<br>Consolidated Statements of Income</div>
+<table>
+<tr><td>Revenue</td><td>72,880</td></tr>
+<tr><td>Adjusted EBITDA</td><td>42,000</td></tr>
 </table>
 <div>NVIDIA Corporation<br>Consolidated Balance Sheets</div>
 <table>
@@ -84,6 +101,16 @@ class _StubFilingsFetcher:
 
     def fetch_annual_filings(self, request: FetchAnnualFilingsRequest) -> object:
         return None
+
+
+class _StubStatementTranslator:
+    """假 LLM 翻译器：只返回给定行名的中文映射（模拟 LLM 兜底命中）。"""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = mapping
+
+    def translate_many(self, labels: tuple[str, ...]) -> dict[str, str]:
+        return {label: cn for label, cn in self._mapping.items() if label in labels}
 
 
 def _ledger() -> CoverageLedger:
@@ -181,6 +208,34 @@ def test_html_statements_markdown_returns_none_without_source(tmp_path: Path) ->
         coverage_ledger=_ledger(),
     )
     assert runtime._html_statements_markdown(uuid.uuid4(), evidence) is None
+
+
+def test_html_statements_use_llm_translation_for_missing_rows(tmp_path: Path) -> None:
+    """注入 statement_translator 时，对照表未命中的行名被 LLM 兜底翻译为中文。
+
+    构造 source.html 含一个未命中通用对照表的行名（``Adjusted EBITDA``），
+    注入返回 ``{该行名: 中文}`` 的 fake translator；断言渲染输出含中文、
+    不含英文行名（数字/表格结构不受影响）。
+    """
+    runtime = AnnualResearchRuntime(
+        AnnualRuntimeComponents(
+            resolver=_StubResolver(),
+            filings_fetcher=_StubFilingsFetcher(),
+            evidence_fanout=cast(AnnualEvidenceFanoutPipeline, object()),
+            comparison_builder=cast(AnnualComparisonBuilder, object()),
+            artifact_root=tmp_path,
+            statement_translator=cast(
+                StatementRowTranslator,
+                _StubStatementTranslator({"Adjusted EBITDA": "调整后息税折旧摊销前利润"}),
+            ),
+        )
+    )
+    evidence, job_id = _evidence_with_source(tmp_path, _HTML_SOURCE_WITH_UNTRANSLATED)
+    markdown = runtime._html_statements_markdown(job_id, evidence)
+    assert markdown is not None
+    assert "调整后息税折旧摊销前利润" in markdown  # 未命中行名被 LLM 兜底翻译
+    assert "Adjusted EBITDA" not in markdown  # 英文行名被替换
+    assert "72,880" in markdown  # 数字原样保留
 
 
 def test_html_statements_markdown_requires_all_three_statements(tmp_path: Path) -> None:
