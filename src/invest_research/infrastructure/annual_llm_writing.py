@@ -364,8 +364,9 @@ class AnnualSectionExecutor:
             role=LLMRole.ANALYSIS,
             system_prompt=(
                 "你是财务分析助手。只解释给定的 SEC/XBRL 确定性指标，不得重新计算、"
-                "改写数值、补充外部信息或给出投资建议。每个结论必须使用给定 [fr_] 引用。"
-                "只输出中文 Markdown 段落。"
+                "改写数值、补充外部信息或给出投资建议。每个指标必须内联写出具体数值"
+                "（用中文单位，如 4,028 亿美元），[fr_] 引用作为来源佐证放在数值之后，"
+                "不得只写引用而不写数值。只输出中文 Markdown 段落。"
             ),
             user_prompt=self._financial_analysis_prompt(pack, citations),
         )
@@ -392,7 +393,8 @@ class AnnualSectionExecutor:
             system_prompt=(
                 "你是年度投研报告撰写者。只依据输入的确定性指标和分析说明写‘财务表现’"
                 "章节；数值、公式状态不得改写或计算。必须使用已给出的 [fr_] 引用，"
-                "不得给投资建议。只输出 Markdown。"
+                "每个指标必须内联写出具体数值（用中文单位），引用放在数值之后作为"
+                "来源佐证，不得只写引用而不写数值。不得给投资建议。只输出 Markdown。"
             ),
             user_prompt=(
                 "# 章节\n财务表现\n\n# 财务分析说明\n"
