@@ -70,7 +70,9 @@ _CITATION_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
 _FORBIDDEN_ADVICE_RE = re.compile(
     r"(?:建议买入|建议卖出|目标价|建仓|加仓|减仓|持仓比例|guaranteed return)", re.I
 )
-_TRUNCATED_TAILS = ("...", "……", "（未完", "待续", "to be continued")
+# 明确截断尾部标记：只保留不会出现在正常完整输出末尾的措辞。
+# "..." / "……" 在正常中文/英文文本中常见（省略号用法），不宜作截断判定。
+_TRUNCATED_TAILS = ("（未完待续", "未完待续", "待续", "to be continued")
 
 
 def _usage_from_response(usage: Any) -> dict[str, int | None]:
@@ -369,7 +371,6 @@ class AnnualSectionExecutor:
                 "不得只写引用而不写数值。只输出中文 Markdown 段落。"
             ),
             user_prompt=self._financial_analysis_prompt(pack, citations),
-            # 指标内联数值后输出较长：默认 max_tokens 会触顶截断，需给足空间。
             max_tokens=4_000,
         )
         keys = self._validate_output(
