@@ -35,9 +35,9 @@ def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
         match = re.search(r"CIK=(\d{10})", cik_href)
         cik = match.group(1) if match else (company_info.findtext(f"{_ATOM_NS}cik") or "").strip()
         legal_name = (company_info.findtext(f"{_ATOM_NS}conformed-name") or "").strip()
-        # 必须同时拿到 10 位 CIK 与名称才构成合法候选；
-        # 多家命中的 atom 常把名称渲染成 ARRAY(...)（SEC 端缺陷），此时无候选可返回。
-        if legal_name and len(cik) == 10 and cik.isdigit():
+        # 必须同时拿到 10 位 CIK 与名称才构成合法候选；名称带 ARRAY(...) 是 SEC
+        # 端把 Perl 结构残留进 atom 的缺陷（即使非空也不可信），一律跳过。
+        if legal_name and not legal_name.startswith("ARRAY(") and len(cik) == 10 and cik.isdigit():
             return {"cik": cik, "legal_name": legal_name, "ticker": ""}
         return None
 

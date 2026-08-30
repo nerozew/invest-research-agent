@@ -86,3 +86,19 @@ def test_parse_company_search_extracts_real_multi_match_company_info() -> None:
         {"cik": "0000034088", "legal_name": "EXXON MOBIL CORP", "ticker": ""},
         {"cik": "0002115436", "legal_name": "ExxonMobil Holdings Corp", "ticker": ""},
     ]
+
+
+_REAL_ATOM_ARRAY_NAME = """<?xml version="1.0" encoding="ISO-8859-1"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <company-info>
+    <cik-href>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0000034088&amp;owner=include&amp;count=10</cik-href>
+    <conformed-name>ARRAY(0x2)</conformed-name>
+  </company-info>
+</feed>"""
+
+
+def test_parse_company_search_skips_array_residue_name() -> None:
+    """SEC 端缺陷：<conformed-name>ARRAY(...)</conformed-name> 是 Perl 结构残留，
+    即使带了 cik 也必须跳过（避免垃圾候选以 resolved=True 浮出）。"""
+    parsed = _parse_company_search(_REAL_ATOM_ARRAY_NAME)
+    assert parsed == []
