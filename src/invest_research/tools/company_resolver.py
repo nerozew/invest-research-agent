@@ -44,6 +44,28 @@ _CURATED_ALIASES: dict[str, str] = {
     "walmart": "WMT",
 }
 
+# SEC company_tickers 数据错绑/缺失主实体（ticker → 正确主实体）。运行时补入，
+# 保证 resolver 能解析到真正提交 10-K 的母公司（如 XOM → EXXON MOBIL CORP）。
+MAIN_ENTITY_OVERRIDES: dict[str, dict[str, str]] = {
+    "XOM": {"cik": "0000034088", "legal_name": "EXXON MOBIL CORP"},
+}
+
+
+def _apply_main_entity_overrides(entries: list[tuple[str, CompanyIdentity]]) -> None:
+    """把主实体覆盖并入 entries（按 cik 去重；覆盖 ticker 的实体保留，补入缺失的）。"""
+    existing_ciks = {identity.cik for _, identity in entries}
+    for ticker, override in MAIN_ENTITY_OVERRIDES.items():
+        if override["cik"] not in existing_ciks:
+            entries.append(
+                (
+                    ticker,
+                    CompanyIdentity(
+                        cik=override["cik"], ticker=ticker, legal_name=override["legal_name"]
+                    ),
+                )
+            )
+            existing_ciks.add(override["cik"])
+
 
 class ResolveCompanyRequest(BaseModel):
     """Company resolver input: non-empty company name, ticker, or CIK."""
@@ -233,6 +255,9 @@ def load_sec_company_index() -> CompanyIndex:
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("SEC 公司索引快照含无法解析的公司条目") from exc
         entries.append((identity.ticker or "", identity))
+
+    # 补入主实体覆盖（SEC 数据缺失/错绑的母公司），运行时即刻生效、无需重新生成快照
+    _apply_main_entity_overrides(entries)
 
     return CompanyIndex(
         entries,

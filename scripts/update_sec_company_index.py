@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from invest_research.tools.company_resolver import MAIN_ENTITY_OVERRIDES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = (
     REPO_ROOT / "src" / "invest_research" / "resources" / "sec_company_tickers_snapshot.json"
@@ -71,6 +73,14 @@ def _normalize(raw: bytes, *, source_url: str) -> dict[str, Any]:
 
     if len(companies) < 5_000:
         raise ValueError(f"SEC 公司索引异常偏小，仅 {len(companies)} 条")
+    # 主实体覆盖：SEC 数据错绑/缺失时补入正确主实体（与运行时 load_sec_company_index 一致）
+    existing_ciks = {item["cik"] for item in companies}
+    for ticker, override in MAIN_ENTITY_OVERRIDES.items():
+        if override["cik"] not in existing_ciks:
+            companies.append(
+                {"cik": override["cik"], "ticker": ticker, "legal_name": override["legal_name"]}
+            )
+            existing_ciks.add(override["cik"])
     companies.sort(key=lambda item: (item["ticker"], item["cik"], item["legal_name"]))
     return {
         "schema_version": SCHEMA_VERSION,

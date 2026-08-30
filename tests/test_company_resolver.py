@@ -135,7 +135,9 @@ def test_custom_index_injectable() -> None:
 
 def test_live_benchmark_tickers_all_resolve_from_bundled_snapshot() -> None:
     """P06-11 固定 10 家公司不能再因演示 fixture 覆盖不足而失败。"""
-    expected = {
+    # XOM：主实体覆盖表补入母公司 0000034088 → 精确 ticker 同时命中母公司+子公司
+    # （显式歧义，不猜）；其余公司应为唯一命中。
+    expected: dict[str, str | tuple[str, str]] = {
         "AAPL": "0000320193",
         "MSFT": "0000789019",
         "AMZN": "0001018724",
@@ -143,8 +145,8 @@ def test_live_benchmark_tickers_all_resolve_from_bundled_snapshot() -> None:
         "JNJ": "0000200406",
         "WMT": "0000104169",
         # 当前官方 SEC ticker 快照指向 ExxonMobil Holdings Corp 的新 CIK；
-        # 索引刷新时该值可能随 SEC 的法定主体记录更新。
-        "XOM": "0002115436",
+        # 主实体覆盖表补入母公司 0000034088，故 XOM 命中两个实体（歧义）。
+        "XOM": ("0002115436", "0000034088"),
         "BA": "0000012927",
         "KO": "0000021344",
         "TSLA": "0001318605",
@@ -152,6 +154,10 @@ def test_live_benchmark_tickers_all_resolve_from_bundled_snapshot() -> None:
     for ticker, cik in expected.items():
         result = _resolve(ticker)
         assert isinstance(result, ToolSuccess), ticker
+        if isinstance(cik, tuple):
+            assert result.value.resolved is False, ticker
+            assert {c.cik for c in result.value.candidates} == set(cik)
+            continue
         assert result.value.resolved is True, ticker
         assert result.value.candidates[0].cik == cik
 
@@ -215,3 +221,22 @@ def test_lookup_no_match_returns_empty() -> None:
     """无任何 >0 分候选 → 返回空列表（上层据此 ToolFailure）。"""
     index = CompanyIndex([])
     assert index.lookup("TotallyUnknown Corp") == []
+
+
+def test_override_entity_added_when_snapshot_missing() -> None:
+    """主实体覆盖表把缺失的母公司补入快照索引（XOM → 0000034088）。"""
+    from invest_research.tools.company_resolver import (
+        MAIN_ENTITY_OVERRIDES,
+        load_sec_company_index,
+    )
+
+    # 真实快照里 XOM 绑到子公司 0002115436，母公司 0000034088 不在 → 覆盖表应补入
+    index = load_sec_company_index()
+    parent = next((c for c in index.lookup("EXXON MOBIL CORP")), None)
+    assert parent is not None and parent.cik == "0000034088"
+    # XOM 查询应能匹配到母公司（精确 ticker 命中两个实体 → 含母公司）
+    xom = index.lookup("XOM")
+    assert any(c.cik == "0000034088" for c in xom)
+    # 覆盖表数据形状契约：ticker → {"cik", "legal_name"}
+    assert MAIN_ENTITY_OVERRIDES["XOM"]["cik"] == "0000034088"
+    assert MAIN_ENTITY_OVERRIDES["XOM"]["legal_name"] == "EXXON MOBIL CORP"
