@@ -135,3 +135,21 @@ def test_render_aligns_three_year_cash_flow() -> None:
     assert "N/A" not in md
     assert "73,795" in md and "15,311" in md
     assert "·" in md  # 缺值行用 · 占位，而非 N/A
+
+
+def test_render_merges_consecutive_number_cells_in_one_year_column() -> None:
+    """数字[x2] colspan 覆盖两格数值：同一财年列内连续数值格合并为单个值。"""
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.BALANCE_SHEET,
+        # 2024 列数值拆成 "1,23"+"4,567" 两格（数字[x2] 结构），应合并为 1,234,567。
+        rows=(
+            ("", "", "", "As of December 31,", "", "", "", "", "", "", ""),
+            ("", "", "", "2024", "", "", "2025", "", "", "", ""),
+            ("现金及现金等价物", "", "", "1,23", "4,567", "", "", "30,708", "", "", ""),
+        ),
+        year_columns=("2024", "2025"),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,))
+    assert "1,234,567" in md  # 两格数值合并为一个值，而非当作两个财年
+    assert "| 现金及现金等价物 | 1,234,567 | 30,708 |" in md

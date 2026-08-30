@@ -8,7 +8,7 @@ Ruling 1：真实表头即原表首行 rows[0]（首格为行名列→译中文�
 
 from __future__ import annotations
 
-from invest_research.financial.html_statement_extractor import HtmlStatement
+from invest_research.financial.html_statement_extractor import HtmlStatement, _looks_like_year
 from invest_research.financial.statement_cn_labels import translate_statement_row
 
 _SECTION_TITLE = "## 财务报表"
@@ -26,16 +26,11 @@ def _md_cell(value: str, *, missing: str = "N/A") -> str:
     return text.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
-def _is_year_cell(text: str) -> bool:
-    """单元格是否为纯 4 位年份（如 "2024"），用于定位表头年份行。"""
-    return len(text) == 4 and text.isdigit()
-
-
 def _find_data_start(rows: tuple[tuple[str, ...], ...], years: tuple[str, ...]) -> int:
     """定位年份表头行之后的首个数据行下标（年份行通常在第 0/1 行）。"""
     year_set = set(years)
     for i in range(min(2, len(rows))):
-        if {cell for cell in rows[i] if _is_year_cell(cell)} == year_set:
+        if {cell for cell in rows[i] if _looks_like_year(cell)} == year_set:
             return i + 1
     return 2  # 兜底：跳过表头行（第 0 行）与年份行（第 1 行）
 
@@ -49,7 +44,9 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
     """从数据行数值格按顺序提取每个财年的值。
 
     ``$`` 与相邻数字合并（``$ 23,466`` → ``$23,466``），括号负数原样保留，
-    空列跳过；数值不足 n_years 时用 ``·`` 补齐（不产生 N/A 噪音）。
+    空列跳过；同一财年列（锚点区间）内连续数值格合并为一个值（GOOGL 原表
+    ``数字[x2]`` colspan 会把 $+数字拆两格），避免被当作两个财年造成静默错位；
+    数值不足 n_years 时用 ``·`` 补齐（不产生 N/A 噪音）。
     """
     tokens: list[str] = []
     i = 0
@@ -60,18 +57,31 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
             i += 1
             continue
         if cell == "$":
-            # 合并紧跟的数值格（中间空列可跳过），如 ["$", "", "23,466"]。
+            # $ 并入同一财年列数值格（中间空列可跳过），并吸收后续连续数值格。
             j = i + 1
             while j < n and not value_cells[j].strip():
                 j += 1
             if j < n and _looks_like_number(value_cells[j]):
-                tokens.append("$" + value_cells[j].strip())
-                i = j + 1
+                value = "$" + value_cells[j].strip()
+                j += 1
+                while j < n and _looks_like_number(value_cells[j]):
+                    value += value_cells[j].strip()
+                    j += 1
+                tokens.append(value)
+                i = j
                 continue
             i += 1
             continue
         if _looks_like_number(cell):
-            tokens.append(cell)
+            value = cell
+            j = i + 1
+            # 连续数值格合并为一个值（数字[x2] 结构），如 ["1,23", "4,567"] → "1,234,567"。
+            while j < n and _looks_like_number(value_cells[j]):
+                value += value_cells[j].strip()
+                j += 1
+            tokens.append(value)
+            i = j
+            continue
         i += 1
     # 对齐到 n_years：不足补 ·，超出截断。
     return (tokens + ["·"] * n_years)[:n_years]
@@ -94,7 +104,6 @@ def _render_year_aligned(stmt: HtmlStatement) -> str:
 def _render_one(stmt: HtmlStatement) -> str:
     if stmt.year_columns:
         return _render_year_aligned(stmt)
-    rows = stmt.rows
     rows = stmt.rows
     if not rows:
         return ""
