@@ -12,29 +12,46 @@ from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 _EDGAR_COMPANY_SEARCH = "https://www.sec.gov/cgi-bin/browse-edgar"
-_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def _localname(tag: str) -> str:
+    """取 XML tag 的本地名（剥掉命名空间前缀），用于命名空间无关的匹配。
+
+    单家命中时 ``<company-info>`` 继承 feed 的 Atom 命名空间（``{atom}company-info``），
+    而多命中时它是 ``<content type="text/xml">`` 内无命名空间的裸标签
+    （``company-info``）——只按 ``{atom}`` 前缀匹配会漏掉后者。
+    """
+    return tag.split("}")[-1]
 
 
 def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
     """解析 browse-edgar getcompany atom 响应，提取 {cik, legal_name, ticker} 候选。
 
     真实 SEC 响应把公司放在 ``<company-info>`` 块（``<cik-href>`` 含 10 位 CIK、
-    ``<conformed-name>`` 为法定名称）；单家精确命中时它在 feed 顶层，多家命中时
-    嵌套在 ``<entry><content>`` 内。``<entry>`` 其余场景是该公司近期申报（form
-    标题），不是候选公司，不能当作搜索结果。
-    保留旧 ``<entry><title>`` + ``<link href="...CIK=...">`` 格式兜底，兼容
-    历史 mock 与其它变体；按 CIK 去重。
+    ``<conformed-name>`` 为法定名称）；单家精确命中时它在 feed 顶层（带 Atom
+    命名空间），多家命中时嵌套在 ``<entry><content type="text/xml">`` 内且
+    ``<company-info>`` 是无命名空间裸标签。解析对命名空间无关，两种都识别。
+    ``<entry>`` 其余场景是该公司近期申报（form 标题），不是候选公司，不能当作
+    搜索结果。保留旧 ``<entry><title>`` + ``<link href="...CIK=...">`` 格式兜底，
+    兼容历史 mock 与其它变体；按 CIK 去重。
     """
     try:
         root = ET.fromstring(atom_xml)
     except ET.ParseError:
         return []
 
+    def _findtext_local(parent: ET.Element, localname: str) -> str:
+        """取直接子元素中本地名为 localname 的文本（命名空间无关）。"""
+        for child in parent:
+            if _localname(child.tag) == localname:
+                return (child.text or "").strip()
+        return ""
+
     def _company_info_to_candidate(company_info: ET.Element) -> dict[str, str] | None:
-        cik_href = company_info.findtext(f"{_ATOM_NS}cik-href") or ""
+        cik_href = _findtext_local(company_info, "cik-href")
         match = re.search(r"CIK=(\d{10})", cik_href)
-        cik = match.group(1) if match else (company_info.findtext(f"{_ATOM_NS}cik") or "").strip()
-        legal_name = (company_info.findtext(f"{_ATOM_NS}conformed-name") or "").strip()
+        cik = match.group(1) if match else _findtext_local(company_info, "cik")
+        legal_name = _findtext_local(company_info, "conformed-name")
         # 必须同时拿到 10 位 CIK 与名称才构成候选。多命中时名称可能是 ARRAY(...)
         # 残留（SEC 端把 Perl 结构残留进 atom，但 CIK 真实），保留给上层用
         # submissions API 补名；空名称无法补名，不构成候选。
@@ -44,19 +61,25 @@ def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
 
     candidates: list[dict[str, str]] = []
     seen_ciks: set[str] = set()
-    for company_info in root.iter(f"{_ATOM_NS}company-info"):
-        candidate = _company_info_to_candidate(company_info)
+    for element in root.iter():
+        if _localname(element.tag) != "company-info":
+            continue
+        candidate = _company_info_to_candidate(element)
         if candidate is not None and candidate["cik"] not in seen_ciks:
             candidates.append(candidate)
             seen_ciks.add(candidate["cik"])
     if candidates:
         return candidates
 
-    # 旧格式兜底：<entry><title> + <link href="...CIK=...">
-    for entry in root.findall(f"{_ATOM_NS}entry"):
-        title = (entry.findtext(f"{_ATOM_NS}title") or "").strip()
+    # 旧格式兜底：<entry><title> + <link href="...CIK=...">（命名空间无关）
+    for entry in root.iter():
+        if _localname(entry.tag) != "entry":
+            continue
+        title = _findtext_local(entry, "title")
         cik = ""
-        for link in entry.findall(f"{_ATOM_NS}link"):
+        for link in entry:
+            if _localname(link.tag) != "link":
+                continue
             href = link.get("href") or ""
             match = re.search(r"CIK=(\d{10})", href)
             if match:

@@ -108,6 +108,43 @@ def test_parse_company_search_keeps_array_residue_candidate() -> None:
     assert parsed == [{"cik": "0000034088", "legal_name": "ARRAY(0x2)", "ticker": ""}]
 
 
+# 真实 SEC 多命中：feed 用 atom: 前缀命名空间，而 <content type="text/xml"> 内的
+# <company-info> 是无命名空间裸标签（ElementTree 下 tag 为纯 "company-info"）——
+# 解析器必须命名空间无关，否则 {atom}company-info 匹配不到 → 0 候选。
+_REAL_ATOM_MULTI_NAMESPACELESS = """<?xml version="1.0" encoding="ISO-8859-1"?>
+<feed xmlns:atom="http://www.w3.org/2005/Atom">
+  <atom:entry>
+    <atom:content type="text/xml">
+      <company-info name="ARRAY(0x1)">
+        <cik>0001472373</cik>
+        <conformed-name>ARRAY(0x1)</conformed-name>
+      </company-info>
+    </atom:content>
+  </atom:entry>
+</feed>"""
+
+
+def test_parse_company_search_handles_namespaceless_company_info() -> None:
+    """多命中真实结构：<company-info> 无命名空间裸标签，解析器须命名空间无关识别并保留候选。"""
+    parsed = _parse_company_search(_REAL_ATOM_MULTI_NAMESPACELESS)
+    assert parsed == [{"cik": "0001472373", "legal_name": "ARRAY(0x1)", "ticker": ""}]
+
+
+def test_search_multi_hit_namespaceless_enriches_name_from_submissions() -> None:
+    """命名空间无关解析后补名链路跑通：无命名空间 company-info 候选 + submissions API 补名。"""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "browse-edgar" in str(request.url):
+            return httpx.Response(200, text=_REAL_ATOM_MULTI_NAMESPACELESS)
+        assert "submissions/CIK0001472373.json" in str(request.url)
+        return httpx.Response(200, json={"name": "NESTLE SA"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    candidates = search_company_by_name("Nestle", client, "test-agent/1.0")
+    assert candidates == [{"cik": "0001472373", "legal_name": "NESTLE SA", "ticker": ""}]
+
+
 # ---------------------------------------------------------------------------
 # 多命中补名：SEC 多命中时 <conformed-name> 会渲染成 ARRAY(...) 残留（CIK 真实），
 # search_company_by_name 应改用 submissions API 补真实名称；补名失败则跳过。
