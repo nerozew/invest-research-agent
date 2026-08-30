@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from invest_research.financial.annual_statements import FinancialStatementKind
 from invest_research.financial.html_statement_extractor import extract_financial_tables
 
@@ -106,9 +104,8 @@ def test_returns_one_canonical_per_kind() -> None:
 
 
 def test_nvda_real_html_returns_three() -> None:
-    html_path = Path(__file__).resolve().parents[1] / "_tmp_nvda_source.html"
-    if not html_path.exists():
-        pytest.skip("缺少 _tmp_nvda_source.html（gitignored，仅本地有）")
+    """真实 10-K（裁剪后提交的 fixture）能提取三张报表并保留关键行。"""
+    html_path = Path(__file__).resolve().parents[0] / "fixtures" / "nvda_statements_fragment.html"
     statements = extract_financial_tables(html_path.read_text(encoding="utf-8", errors="ignore"))
     assert len(statements) == 3
     assert {s.kind for s in statements} == {
@@ -116,3 +113,9 @@ def test_nvda_real_html_returns_three() -> None:
         FinancialStatementKind.BALANCE_SHEET,
         FinancialStatementKind.CASH_FLOW,
     }
+    income = next(s for s in statements if s.kind is FinancialStatementKind.INCOME_STATEMENT)
+    balance = next(s for s in statements if s.kind is FinancialStatementKind.BALANCE_SHEET)
+    cash = next(s for s in statements if s.kind is FinancialStatementKind.CASH_FLOW)
+    assert "Revenue" in [r[0] for r in income.rows]
+    assert "Cash and cash equivalents" in [r[0] for r in balance.rows]
+    assert "Change in cash and cash equivalents" in [r[0] for r in cash.rows]
