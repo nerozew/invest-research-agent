@@ -4,9 +4,9 @@
 之后仍缺失的指标。LLM 在 10-K 解析块（``AnnualParsedTextBlock``）的财务报表区域内
 定位指标所在行并读取数值；代码强验证后才采纳，避免 LLM 凭空造数：
 
-- ``value`` 必须是可解析的正数 Decimal；
+- ``value`` 必须是可解析的有限 Decimal（现金流量表净变动允许为负，符号语义由调用方判定）；
 - ``locator`` 必须真实存在于输入块（LLM 不能编造位置）；
-- ``excerpt`` 必须包含指标的英文关键字（证明数值来自文件中对应行）。
+- ``excerpt`` 必须包含指标的英文关键字或其措辞变体（证明数值来自文件中对应行）。
 
 输入脱敏：只给块文本 + 指标描述，不含 company/accession 等高基数。
 """
@@ -21,7 +21,9 @@ from typing import Any, Iterable
 
 from invest_research.agents.llm_factory import LLMRole
 
-# 财务报表区域关键字（用于选取有界块子集，避免把整份 10-K 喂给 LLM）。
+# 财务报表区域宽泛关键字（用于选取有界块子集，避免把整份 10-K 喂给 LLM）。
+# 注意：这些宽泛关键字常被 10-K 前部叙述章节（Risk Factors / MD&A）大量引用，
+# 因此仅作为二级选择（低价值），见 ``_select_financial_blocks`` 的两阶段设计。
 _FINANCIAL_KEYWORDS = (
     "consolidated",
     "statement of operations",
@@ -32,12 +34,22 @@ _FINANCIAL_KEYWORDS = (
     "statements of cash flows",
     "statement of comprehensive income",
 )
+# 报表表名标题关键字：命中即视为真实报表区域（一级选择，高价值）。
+_STATEMENT_TITLE_KEYWORDS = (
+    "consolidated statements of income",
+    "consolidated balance sheets",
+    "consolidated statements of cash flows",
+    "consolidated statements of operations",
+    "consolidated statements of earnings",
+)
 # 每个财务报表关键字块前后纳入的邻居块数（补全表格行上下文）。
 _NEIGHBOR_BLOCKS = 5
 # 单块截断字符上限（控制 LLM 输入体积）。
 _BLOCK_CHARS = 300
-# 有界块子集上限（远小于 10-K 数千块）。
-_MAX_BLOCKS = 60
+# 报表命中块配额上限：报表区域优先占满（远小于 10-K 数千块）。
+_MAX_BLOCKS = 200
+# 纯叙述输入（无报表表名/行命中）时的有界上限：沿用旧 60 块，避免叙述引用语无限占配额。
+_MAX_NARRATIVE_BLOCKS = 60
 # 报表行级关键字：现金流量表/利润表的特定行可能远离标题块（如末尾的"汇率影响"），
 # 需额外把含这些关键字的块选入，否则 LLM 看不到 → 提取失败。
 _ROW_KEYWORDS = (
@@ -45,9 +57,16 @@ _ROW_KEYWORDS = (
     "exchange rate changes",
     "net increase (decrease) in cash",
     "net change in cash",
+    "change in cash",  # NVDA 原文措辞（如 "Change in cash and cash equivalents"）
     "cash and cash equivalents, end",
+    "cash and cash equivalents at end",  # 无逗号变体
+    "net cash provided by operating activities",
+    "net cash used in operating activities",
+    "net cash provided by (used in) investing activities",
     "operating expenses",
     "cost of revenue",
+    "net income",  # 利润表/现金流量表锚点
+    "gross profit",
 )
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -64,25 +83,79 @@ class ExtractedFact:
 
 
 def _select_financial_blocks(blocks: Iterable[Any]) -> list[tuple[str, str]]:
-    """选取含财务报表关键字的块及其邻居，每块截断，返回 ``(locator, text)`` 列表。"""
+    """选取含财务报表关键字的块及其邻居，报表区域优先、每块截断。
+
+    两阶段选择（根因：10-K 前部叙述章节大量引用 "consolidated financial
+    statements"，若按出现顺序收集会占满 60 块配额，导致 offset 更靠后的真实报表
+    区域进不了 LLM 输入）：
+
+    - 阶段一：收集报表表名标题/行级关键字命中的块（高价值，含邻居）；
+    - 阶段二：收集宽泛财务关键字命中的块（低价值，叙述章节引用语）；
+    - 合并时报表命中块排在前面，``_MAX_BLOCKS`` 截断发生在报表命中块之后，
+      保证报表内容不被叙述块挤掉；纯叙述输入（无报表命中）沿用旧有界上限。
+
+    返回 ``(locator, text)`` 列表。
+    """
     items = list(blocks)
-    chosen: dict[str, str] = {}
-    for index, block in enumerate(items):
-        text = (block.text or "").strip()
-        lowered = text.lower()
-        if any(kw in lowered for kw in _FINANCIAL_KEYWORDS) or any(
-            kw in lowered for kw in _ROW_KEYWORDS
-        ):
+
+    def collect(hits: Iterable[int], into: dict[str, str]) -> None:
+        """把命中块及其邻居写入 ``into``，每块截断到 ``_BLOCK_CHARS``。"""
+        for index in hits:
             start = max(0, index - _NEIGHBOR_BLOCKS)
             end = min(len(items), index + _NEIGHBOR_BLOCKS + 1)
             for neighbor in range(start, end):
                 ntext = (items[neighbor].text or "").strip()
                 nloc = items[neighbor].locator
-                if ntext and nloc not in chosen:
-                    chosen[nloc] = ntext[:_BLOCK_CHARS]
-    # 有界：按出现顺序截断。
-    ordered = [(loc, chosen[loc]) for loc in chosen]
-    return ordered[:_MAX_BLOCKS]
+                if ntext and nloc not in into:
+                    into[nloc] = ntext[:_BLOCK_CHARS]
+
+    priority_hits: list[int] = []
+    secondary_hits: list[int] = []
+    for index, block in enumerate(items):
+        lowered = (block.text or "").strip().lower()
+        if any(kw in lowered for kw in _STATEMENT_TITLE_KEYWORDS) or any(
+            kw in lowered for kw in _ROW_KEYWORDS
+        ):
+            priority_hits.append(index)
+        elif any(kw in lowered for kw in _FINANCIAL_KEYWORDS):
+            secondary_hits.append(index)
+
+    priority: dict[str, str] = {}
+    secondary: dict[str, str] = {}
+    collect(priority_hits, priority)
+    collect(secondary_hits, secondary)
+    ordered_priority = [(loc, priority[loc]) for loc in priority]
+    ordered_secondary = [(loc, secondary[loc]) for loc in secondary if loc not in priority]
+    if priority:
+        # 报表命中块在前；剩余额度给叙述块（保证报表内容不被叙述块挤掉）。
+        remaining = _MAX_BLOCKS - len(ordered_priority)
+        return ordered_priority + ordered_secondary[: max(0, remaining)]
+    # 纯叙述输入：沿用旧有界上限，避免引用语无限占配额。
+    return ordered_secondary[:_MAX_NARRATIVE_BLOCKS]
+
+
+# label_en 的措辞变体集合（excerpt 校验时任一变体命中即通过）。
+# 实测根因：NVDA 现金净变动行原文是 "Change in cash and cash equivalents"，
+# 而 label_en 为 "net change in cash"，严格子串匹配会误拒。这里按已知措辞差异
+# 登记变体；未登记的 label 用其本身做子串匹配。
+_LABEL_EN_VARIANTS: dict[str, frozenset[str]] = {
+    "net change in cash": frozenset(
+        {
+            "change in cash",
+            "net increase (decrease) in cash",
+            "increase (decrease) in cash",
+        }
+    ),
+    "effect of exchange rate": frozenset({"exchange rate"}),
+}
+
+
+def _label_matches(label_en: str, excerpt: str) -> bool:
+    """excerpt 是否命中 label_en 或其英文措辞变体。"""
+    lowered_excerpt = excerpt.lower()
+    normalized = label_en.strip().lower()
+    variants = set(_LABEL_EN_VARIANTS.get(normalized, ())) | {normalized}
+    return any(variant in lowered_excerpt for variant in variants)
 
 
 class LLMFactExtractor:
@@ -149,7 +222,7 @@ class LLMFactExtractor:
         known_locators = {block.locator for block in blocks}
         if locator not in known_locators:
             return None
-        if label_en.lower() not in excerpt.lower():
+        if not _label_matches(label_en, excerpt):
             return None
         return ExtractedFact(
             metric_name=str(payload.get("metric_name") or metric_name),
@@ -160,14 +233,17 @@ class LLMFactExtractor:
 
     @staticmethod
     def _coerce_value(raw: object) -> Decimal | None:
-        if raw is None:
-            return None
-        if isinstance(raw, bool):
+        """把 LLM 输出的 value 解析为有限 Decimal；允许负值（符号语义由调用方判定）。
+
+        只拒绝 None / bool / 非数字 / NaN / Inf；现金流量表净变动常为负，故不再
+        按正数校验。调用方（``_supplement_statement_rows``）只更新 value 缺失的行。
+        """
+        if raw is None or isinstance(raw, bool):
             return None
         try:
             value = Decimal(str(raw).strip().replace(",", ""))
         except (InvalidOperation, ValueError):
             return None
-        if value <= 0:
+        if not value.is_finite():
             return None
         return value

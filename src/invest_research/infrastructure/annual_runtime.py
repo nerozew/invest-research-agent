@@ -111,9 +111,11 @@ __all__ = [
 
 
 # L2：报表行中文 label → 10-K 原文英文行名（供 excerpt 验证，避免驼峰 concept 名不匹配）。
+# 措辞匹配 NVDA 原文：现金净变动行是 "Change in cash and cash equivalents"，
+# 汇率影响行是 "Effect of exchange rate changes on cash"（_label_matches 按变体放宽）。
 _STATEMENT_EN_LABELS: dict[str, str] = {
-    "汇率变动影响": "effect of exchange rate",
-    "现金及等价物净变动": "net change in cash",
+    "汇率变动影响": "exchange rate",
+    "现金及等价物净变动": "change in cash",
     "营业费用": "operating expenses",
     "毛利润": "gross profit",
     "负债合计": "total liabilities",
