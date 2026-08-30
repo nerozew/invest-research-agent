@@ -21,6 +21,12 @@ _STATEMENT_HEADING = {
 }
 
 
+def _translate_row_name(label: str, extra_labels: dict[str, str] | None) -> str:
+    """行名翻译：extra_labels（LLM 补翻译）优先，否则走通用对照表。"""
+    stripped = label.strip()
+    return (extra_labels or {}).get(stripped) or translate_statement_row(stripped)
+
+
 def _md_cell(value: str, *, missing: str = "N/A") -> str:
     text = value.strip() or missing
     return text.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
@@ -87,7 +93,7 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
     return (tokens + ["·"] * n_years)[:n_years]
 
 
-def _render_year_aligned(stmt: HtmlStatement) -> str:
+def _render_year_aligned(stmt: HtmlStatement, extra_labels: dict[str, str] | None) -> str:
     """按表头年份列对齐渲染（行名 | 年份1 | 年份2…），消除 colspan N/A 噪音。"""
     years = stmt.year_columns or ()
     ncols = len(years) + 1
@@ -95,15 +101,15 @@ def _render_year_aligned(stmt: HtmlStatement) -> str:
     lines.append("| " + " | ".join(_md_cell(c) for c in ("项目", *years)) + " |")
     lines.append("|" + "---|" * ncols)
     for row in stmt.rows[_find_data_start(stmt.rows, years) :]:
-        name = translate_statement_row(row[0].strip())
+        name = _translate_row_name(row[0], extra_labels)
         values = _extract_year_values(row[1:], len(years))
         lines.append("| " + " | ".join(_md_cell(c, missing="·") for c in (name, *values)) + " |")
     return "\n".join(lines)
 
 
-def _render_one(stmt: HtmlStatement) -> str:
+def _render_one(stmt: HtmlStatement, extra_labels: dict[str, str] | None) -> str:
     if stmt.year_columns:
-        return _render_year_aligned(stmt)
+        return _render_year_aligned(stmt, extra_labels)
     rows = stmt.rows
     if not rows:
         return ""
@@ -111,7 +117,7 @@ def _render_one(stmt: HtmlStatement) -> str:
     ncols = max((len(r) for r in rows), default=1)
     # 表头 = 原表首行（真实表头，如 "Year Ended" + 各财年日期列），首格翻译，其余原样。
     header = [
-        _md_cell(translate_statement_row(cell) if i == 0 else cell)
+        _md_cell(_translate_row_name(cell, extra_labels) if i == 0 else cell)
         for i, cell in enumerate(rows[0])
     ]
     # 表头补足到 ncols（补齐格留空，不用"N/A"——那是给数据格用的）。
@@ -121,17 +127,26 @@ def _render_one(stmt: HtmlStatement) -> str:
     lines.append("|" + "---|" * ncols)
     for row in rows[1:]:
         translated = [
-            translate_statement_row(cell) if i == 0 else cell for i, cell in enumerate(row)
+            _translate_row_name(cell, extra_labels) if i == 0 else cell
+            for i, cell in enumerate(row)
         ]
         padded = translated + [""] * (ncols - len(translated))
         lines.append("| " + " | ".join(_md_cell(c) for c in padded) + " |")
     return "\n".join(lines)
 
 
-def render_html_statements(statements: tuple[HtmlStatement, ...]) -> str:
-    """渲染三张原表为 markdown；无表返回空串（调用方据此省略章节）。"""
+def render_html_statements(
+    statements: tuple[HtmlStatement, ...],
+    *,
+    extra_labels: dict[str, str] | None = None,
+) -> str:
+    """渲染三张原表为 markdown；无表返回空串（调用方据此省略章节）。
+
+    ``extra_labels`` 为 LLM 补翻译的行名映射（{英文行名: 中文}），优先于通用对照表；
+    缺省 None 保持现有行为（未命中行名回退对照表/原文）。
+    """
     if not statements:
         return ""
     parts = [_SECTION_TITLE, _NOTE]
-    parts.extend(_render_one(stmt) for stmt in statements)
+    parts.extend(_render_one(stmt, extra_labels) for stmt in statements)
     return "\n\n".join(parts)

@@ -35,11 +35,11 @@ def test_translate_banking_rows() -> None:
 
 def test_translate_strips_paren_note() -> None:
     """行名末尾括号备注（数值说明）剥离后匹配基础行名。"""
-    assert (
-        translate_statement_row("Loans (included $70,684 and $41,350 at fair value)") == "贷款"
-    )
+    assert translate_statement_row("Loans (included $70,684 and $41,350 at fair value)") == "贷款"
     assert translate_statement_row("Total assets(a)") == "资产总计"
-    assert translate_statement_row("Deposits (included $20,930 and $33,768 at fair value)") == "存款"
+    assert (
+        translate_statement_row("Deposits (included $20,930 and $33,768 at fair value)") == "存款"
+    )
 
 
 def test_translate_suffix_fallback() -> None:
@@ -174,3 +174,33 @@ def test_render_merges_consecutive_number_cells_in_one_year_column() -> None:
     md = render_html_statements((stmt,))
     assert "1,234,567" in md  # 两格数值合并为一个值，而非当作两个财年
     assert "| 现金及现金等价物 | 1,234,567 | 30,708 |" in md
+
+
+def test_render_applies_extra_labels_for_missing_rows() -> None:
+    """LLM 补翻译 extra_labels 优先于对照表：未命中行名译中文，对照表命中不受影响。"""
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.CASH_FLOW,
+        rows=(("Net income", "100"), ("MysteryBankRow", "200")),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,), extra_labels={"MysteryBankRow": "神秘银行行"})
+    assert "神秘银行行" in md
+    assert "净利润" in md  # 对照表命中不受影响
+    assert "MysteryBankRow" not in md
+
+
+def test_render_applies_extra_labels_in_year_aligned_path() -> None:
+    """年份对齐路径（GOOGL 风格 colspan 表）同样应用 extra_labels 补翻译。"""
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.BALANCE_SHEET,
+        rows=(
+            ("", "", "", "As of December 31,", "", "", "", "", "", "", ""),
+            ("", "", "", "2024", "", "", "2025", "", "", "", ""),
+            ("MysteryBankRow", "", "", "$", "23,466", "", "$", "30,708", "", "", ""),
+        ),
+        year_columns=("2024", "2025"),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,), extra_labels={"MysteryBankRow": "神秘银行行"})
+    assert "神秘银行行" in md
+    assert "MysteryBankRow" not in md
