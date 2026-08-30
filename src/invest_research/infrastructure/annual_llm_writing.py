@@ -594,12 +594,12 @@ class AnnualSectionExecutor:
     def summarize_mda(self, blocks: Iterable[Any]) -> str:
         """LLM 分析 10-K Item 7 管理层讨论，输出 1000-2000 字多维深度要点。
 
-        - 复用 ``extract_mda`` 取有界原文，输入再截到有界长度；
+        - 复用 ``extract_mda`` 取有界原文（``max_chars`` 传更大上限），输入再截到有界长度；
         - prompt 要求**资深分析师多维梳理**（经营业绩/分部/成本/资本配置/资产负债/风险/
           前瞻），引用原文数字与措辞，禁止元叙述/开场白，并给**下限字数**防偷懒；
         - 输出过短（<400 字，模型只给元说明）返回空串，由调用方回退原文直取节选。
         """
-        mda = extract_mda(blocks)
+        mda = extract_mda(blocks, max_chars=_MDA_SUMMARIZE_MAX_CHARS)
         if mda is None:
             return ""
         source_text = mda.text[:_MDA_SUMMARIZE_MAX_CHARS]

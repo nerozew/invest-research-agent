@@ -198,3 +198,43 @@ def test_summarize_mda_uses_deep_analysis_prompt_and_big_budget(tmp_path: Path) 
     assert "前瞻" in system_prompt
     assert "深度" in system_prompt
     assert max_tokens >= 6000
+
+
+def test_summarize_mda_feeds_extract_mda_with_larger_cap(tmp_path: Path) -> None:
+    """extract_mda 以 12000 上限取原文：LLM 实际收到超过 3000 字的 MD&A 原文节选。
+
+    旧行为 ``extract_mda`` 默认 ``max_chars=3000`` 会把原文先截到 ~3000 字，
+    ``_MDA_SUMMARIZE_MAX_CHARS=12000`` 切片是 no-op；修复后应把更大原文传入 LLM。
+    """
+
+    class _RecordingCompletion:
+        def __init__(self) -> None:
+            self.user_prompt = ""
+
+        def complete(
+            self,
+            *,
+            role: object,
+            system_prompt: str,
+            user_prompt: str,
+            max_tokens: int = 500,
+        ) -> object:
+            self.user_prompt = user_prompt
+            return type("R", (), {"markdown": _DEEP_MDA_SUMMARY})()
+
+    long_body = (
+        "Revenue increased 30% due to strong data center demand and continued adoption. " * 80
+    )
+    assert len(long_body) > 5000
+    blocks = (
+        AnnualParsedTextBlock(
+            text="Item 7. Management's Discussion and Analysis", locator="offset:5000"
+        ),
+        AnnualParsedTextBlock(text=long_body, locator="offset:5100"),
+    )
+    completion = _RecordingCompletion()
+    executor = AnnualSectionExecutor(tmp_path, completion)
+    summary = executor.summarize_mda(blocks)
+    assert summary == _DEEP_MDA_SUMMARY
+    # 修复前原文被截到 ~3000 字；修复后应把 >5000 字的原文节选传给 LLM。
+    assert len(completion.user_prompt) > 5000
