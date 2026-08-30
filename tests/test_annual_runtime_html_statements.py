@@ -57,6 +57,18 @@ _HTML_SOURCE = """
 </table>
 """
 
+_TWO_STATEMENT_HTML = """
+<div>NVIDIA Corporation<br>Consolidated Statements of Income</div>
+<table>
+<tr><td>Revenue</td><td>72,880</td></tr>
+<tr><td>Net income</td><td>29,760</td></tr>
+</table>
+<div>NVIDIA Corporation<br>Consolidated Balance Sheets</div>
+<table>
+<tr><td>Total assets</td><td>200</td></tr>
+</table>
+"""
+
 _SOURCE_KEY = "annual/0001234567/source.html"
 
 
@@ -169,3 +181,16 @@ def test_html_statements_markdown_returns_none_without_source(tmp_path: Path) ->
         coverage_ledger=_ledger(),
     )
     assert runtime._html_statements_markdown(uuid.uuid4(), evidence) is None
+
+
+def test_html_statements_markdown_requires_all_three_statements(tmp_path: Path) -> None:
+    """source.html 只含两张报表时返回 None（调用方回退 XBRL，而非输出残缺原表）。
+
+    计划契约：HTML 原表提取是全有或全无——三张报表（利润表/资产负债表/现金流量表）
+    任一缺失即视为找不到完整报表，回退 XBRL + L2 链路。
+    """
+    runtime = _make_runtime(tmp_path)
+    evidence, job_id = _evidence_with_source(tmp_path, _TWO_STATEMENT_HTML)
+    assert runtime._html_statements_markdown(job_id, evidence) is None
+    # XBRL 回退链路被触达：BLOCKED comparison 无 accession → 报表章节为空串（未用残缺原表）。
+    assert runtime._financial_statements_markdown(job_id, evidence, _comparison()) == ""

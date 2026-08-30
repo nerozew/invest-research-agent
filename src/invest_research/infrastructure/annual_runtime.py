@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ from invest_research.domain.models import (
 )
 from invest_research.domain.quality import QualityRecommendation
 from invest_research.financial.annual_statements import (
+    FinancialStatementKind,
     FinancialStatementSet,
     extract_statements,
     load_statement_mapping,
@@ -108,6 +110,8 @@ __all__ = [
     "AnnualRuntimeComponents",
     "AnnualResearchRuntime",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 # L2：报表行中文 label → 10-K 原文英文行名（供 excerpt 验证，避免驼峰 concept 名不匹配）。
@@ -909,10 +913,17 @@ class AnnualResearchRuntime:
             return None
         try:
             statements = extract_financial_tables(html)
-            if not statements:
+            # 全有或全无：三张报表（利润表/资产负债表/现金流量表）任一缺失即视为
+            # 未找到完整报表，回退 XBRL + L2 链路，避免输出残缺原表。
+            if len(statements) < 3 or {s.kind for s in statements} != {
+                FinancialStatementKind.INCOME_STATEMENT,
+                FinancialStatementKind.BALANCE_SHEET,
+                FinancialStatementKind.CASH_FLOW,
+            }:
                 return None
             return render_html_statements(statements)
         except Exception:  # noqa: BLE001 - 原表提取尽力而为，失败回退 XBRL 链路
+            logger.warning("HTML 原表提取/渲染失败，回退 XBRL 链路", exc_info=True)
             return None
 
     def _financial_statements_markdown(
