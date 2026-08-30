@@ -1,7 +1,8 @@
 """src/invest_research/financial/html_statement_extractor.py
 方案 B 通道 1：从 10-K HTML 原表提取三张报表（原封不动，不经 LLM）。
-识别策略：表格前的文本段含表名（Consolidated Statements of ...）→ 精确；否则回退用
-表格行项目特征（_ROW_FEATURES）识别，避免 MD&A 里大量"Year Ended"小表被误判。
+识别策略：表格前的文本段含表名（Consolidated Statements of ...）→ 标题命中；否则回退用
+表格行项目特征（_ROW_FEATURES）识别。表名在整份 10-K 里会多次出现（目录/正文/附注），
+故每个 kind 只保留行数最多的表作为 canonical，避免 MD&A 里的小表被误判进报表。
 """
 
 from __future__ import annotations
@@ -125,32 +126,48 @@ class _TableGrabber(HTMLParser):
             self._pending_text.append(data)
 
 
+def _kind_by_title(before_text: str) -> FinancialStatementKind | None:
+    """按表前文本段中的表名关键词识别报表类型（_TITLE_KEYWORDS）。
+
+    真实 10-K 里同一表名常出现多次（目录、正文散文提及、财务附注），标题命中只是
+    候选信号；最终 canonical 由 ``extract_financial_tables`` 按行数最多决定。
+    """
+    before_lower = before_text.lower()
+    return next(
+        (
+            kind
+            for kind, keywords in _TITLE_KEYWORDS
+            if any(keyword in before_lower for keyword in keywords)
+        ),
+        None,
+    )
+
+
 def extract_financial_tables(html: str) -> tuple[HtmlStatement, ...]:
-    """定位三张报表表格并原样提取行列；找不到任何报表返回空 tuple（调用方回退 XBRL）。"""
+    """定位三张报表表格并原样提取行列；每个 kind 只保留行数最多的 canonical 表。
+
+    先收集所有匹配表（表名关键词 ``_kind_by_title``，未命中回退行特征
+    ``_detect_statement_kind``），再按 ``len(rows)`` 每 kind 取最大一张，最后按
+    ``source_table_index`` 升序返回（最多 3 张）。找不到任何报表返回空 tuple
+    （调用方回退 XBRL）。
+    """
     grabber = _TableGrabber()
     grabber.feed(html)
-    found: list[HtmlStatement] = []
+    best_by_kind: dict[FinancialStatementKind, HtmlStatement] = {}
     for index, (table, before) in enumerate(
         zip(grabber.tables, grabber.before_texts, strict=False)
     ):
-        before_lower = before.lower()
-        kind_by_title = next(
-            (
-                kind
-                for kind, keywords in _TITLE_KEYWORDS
-                if any(keyword in before_lower for keyword in keywords)
-            ),
-            None,
+        kind = _kind_by_title(before) or _detect_statement_kind(
+            [row[0] for row in table[:3] if row]
         )
-        first_rows = [row[0] for row in table[:3] if row]
-        kind = kind_by_title or _detect_statement_kind(first_rows)
         if kind is None:
             continue
-        found.append(
-            HtmlStatement(
-                kind=kind,
-                rows=tuple(tuple(row) for row in table),
-                source_table_index=index,
-            )
+        statement = HtmlStatement(
+            kind=kind,
+            rows=tuple(tuple(row) for row in table),
+            source_table_index=index,
         )
-    return tuple(found)
+        current = best_by_kind.get(kind)
+        if current is None or len(statement.rows) > len(current.rows):
+            best_by_kind[kind] = statement
+    return tuple(sorted(best_by_kind.values(), key=lambda s: s.source_table_index))
