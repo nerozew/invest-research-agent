@@ -119,3 +119,32 @@ def test_nvda_real_html_returns_three() -> None:
     assert "Revenue" in [r[0] for r in income.rows]
     assert "Cash and cash equivalents" in [r[0] for r in balance.rows]
     assert "Change in cash and cash equivalents" in [r[0] for r in cash.rows]
+
+
+def test_extracts_year_columns_from_header() -> None:
+    """GOOGL 风格 colspan 表：从表头年份行识别 year_columns。"""
+    html = """
+    <div>Alphabet Inc. CONSOLIDATED BALANCE SHEETS</div>
+    <table>
+    <tr><td colspan="3"/><td colspan="3">As of December 31,</td></tr>
+    <tr><td colspan="3"/><td colspan="3">2024</td><td colspan="3">2025</td></tr>
+    <tr><td>Cash and cash equivalents</td><td>$</td><td>23,466</td><td>$</td><td>30,708</td></tr>
+    </table>
+    """
+    statements = extract_financial_tables(html)
+    balance = next(s for s in statements if s.kind is FinancialStatementKind.BALANCE_SHEET)
+    assert balance.year_columns == ("2024", "2025")
+
+
+def test_year_columns_none_when_no_year_header() -> None:
+    """无年份表头行的报表 year_columns 为 None（渲染回退现有逻辑）。"""
+    html = """
+    <div>NVIDIA Corporation and Subsidiaries<br>Consolidated Balance Sheets</div>
+    <table>
+    <tr><td>Assets</td><td>100</td></tr>
+    <tr><td>Total liabilities and shareholders' equity</td><td>100</td></tr>
+    </table>
+    """
+    statements = extract_financial_tables(html)
+    balance = next(s for s in statements if s.kind is FinancialStatementKind.BALANCE_SHEET)
+    assert balance.year_columns is None

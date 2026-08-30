@@ -50,6 +50,24 @@ _ROW_FEATURES: dict[FinancialStatementKind, tuple[str, ...]] = {
 }
 
 
+def _looks_like_year(text: str) -> bool:
+    """单元格是否就是纯 4 位年份（如 "2024"），排除带千分位/文字的数字。"""
+    return len(text) == 4 and text.isdigit()
+
+
+def _detect_year_columns(rows: tuple[tuple[str, ...], ...]) -> tuple[str, ...] | None:
+    """从表头前两行识别年份列（含 2-3 个纯 4 位年份的短行）。
+
+    真实 10-K 的年份表头行形如 ``('', '2024', '', '2025')`` 或
+    ``('', '2023', '', '2024', '', '2025')``；识别不到返回 None（渲染回退现有逻辑）。
+    """
+    for row in rows[:2]:
+        years = tuple(cell for cell in row if _looks_like_year(cell))
+        if 2 <= len(years) <= 3:
+            return years
+    return None
+
+
 @dataclass(frozen=True)
 class HtmlStatement:
     """从 HTML 提取的一张原始报表（保留全部行，含非标准行）。"""
@@ -57,6 +75,7 @@ class HtmlStatement:
     kind: FinancialStatementKind
     rows: tuple[tuple[str, ...], ...]
     source_table_index: int
+    year_columns: tuple[str, ...] | None = None
 
 
 def _detect_statement_kind(first_rows: list[str]) -> FinancialStatementKind | None:
@@ -162,10 +181,12 @@ def extract_financial_tables(html: str) -> tuple[HtmlStatement, ...]:
         )
         if kind is None:
             continue
+        rows = tuple(tuple(row) for row in table)
         statement = HtmlStatement(
             kind=kind,
-            rows=tuple(tuple(row) for row in table),
+            rows=rows,
             source_table_index=index,
+            year_columns=_detect_year_columns(rows),
         )
         current = best_by_kind.get(kind)
         if current is None or len(statement.rows) > len(current.rows):

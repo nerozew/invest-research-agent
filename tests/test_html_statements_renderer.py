@@ -95,3 +95,43 @@ def test_render_preserves_nonstandard_rows_verbatim() -> None:
 
 def test_render_empty_statements_returns_empty_string() -> None:
     assert render_html_statements(()) == ""
+
+
+def test_render_aligns_by_year_columns_without_na_noise() -> None:
+    """GOOGL 风格 colspan 表：按年份列对齐渲染，空值用 · 而非 N/A。"""
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.BALANCE_SHEET,
+        # 行名x3 | 2024 | 2025 展开后的原始行（含 $ 与空列）
+        rows=(
+            ("", "", "", "As of December 31,", "", "", "", "", "", "", ""),
+            ("", "", "", "2024", "", "", "2025", "", "", "", ""),
+            ("现金及现金等价物", "", "", "$", "23,466", "", "$", "30,708", "", "", ""),
+        ),
+        year_columns=("2024", "2025"),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,))
+    assert "2024" in md and "2025" in md
+    assert "N/A" not in md  # 干净对齐，无 N/A 噪音
+    assert "$ 23,466" in md or "23,466" in md
+
+
+def test_render_aligns_three_year_cash_flow() -> None:
+    """现金流量表三年份：数值按年份对齐，缺值行显示 ·。"""
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.CASH_FLOW,
+        rows=(
+            ("", "Year Ended December 31,"),
+            ("", "2023", "", "2024", "", "2025"),
+            ("Net income", "$", "73,795", "", "", "$", "100,118", "", "", "$", "132,170", ""),
+            ("Depreciation", "11,946", "", "", "15,311", "", "", "21,136", ""),
+            ("Operating activities", "", "", "", "", ""),
+        ),
+        year_columns=("2023", "2024", "2025"),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,))
+    assert "2023" in md and "2024" in md and "2025" in md
+    assert "N/A" not in md
+    assert "73,795" in md and "15,311" in md
+    assert "·" in md  # 缺值行用 · 占位，而非 N/A
