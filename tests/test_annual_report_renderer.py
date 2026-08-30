@@ -20,6 +20,7 @@ from invest_research.infrastructure.annual_document_pipeline import AnnualParsed
 from invest_research.reporting.annual_report_renderer import (
     AnnualOfficialStatements,
     OfficialStatement,
+    _looks_like_next_item,
     _statement_lines,
     build_annual_cover,
     build_mda_section,
@@ -276,8 +277,8 @@ def test_statement_lines_renders_english_and_chinese_translation():
     lines = _statement_lines("独立审计意见", statement)
     rendered = "\n".join(lines)
     assert "**独立审计意见**（定位：offset:100）" in rendered
-    assert "> In our opinion" in rendered          # 英文原文保留（出处）
-    assert "**中文翻译**" in rendered                # 中文翻译追加
+    assert "> In our opinion" in rendered  # 英文原文保留（出处）
+    assert "**中文翻译**" in rendered  # 中文翻译追加
     assert "我们认为，合并财务报表" in rendered
 
 
@@ -285,7 +286,7 @@ def test_statement_lines_without_translation_stays_english_only():
     statement = OfficialStatement(text="English only text.", locator="offset:1")
     rendered = "\n".join(_statement_lines("封面页", statement))
     assert "> English only text." in rendered
-    assert "**中文翻译**" not in rendered            # 翻译缺失/失败时不伪造
+    assert "**中文翻译**" not in rendered  # 翻译缺失/失败时不伪造
 
 
 def test_build_mda_summary_section_renders_chinese_summary():
@@ -317,7 +318,7 @@ def test_build_annual_cover_includes_translation_when_present():
     )
     assert "**中文翻译**" in cover
     assert "公允列报" in cover
-    assert "present fairly" in cover              # 英文原文仍保留
+    assert "present fairly" in cover  # 英文原文仍保留
 
 
 def test_extract_mda_skips_toc_item7_and_finds_body(monkeypatch):
@@ -397,6 +398,79 @@ def test_extract_mda_skips_long_cross_reference_block():
     assert mda.locator == "offset:110839"  # 定位到真正的 Item 7，而非风险交叉引用
     assert "forward-looking statements" in mda.text
     assert "fierce competition" not in mda.text  # 不摘风险内容
+
+
+def test_looks_like_next_item_real_item8_title_returns_true() -> None:
+    """真正的 Item 8 标题是短块，应判定为 MD&A 之后的下一个大标题。"""
+    assert _looks_like_next_item("Item 8. Financial Statements and Supplementary Data")
+    assert _looks_like_next_item("Item 8  Financial Statements and Supplementary Data")
+
+
+def test_looks_like_next_item_long_body_reference_returns_false() -> None:
+    """KO 式长正文段里引用 Item 8（如引导段）不是标题，不得误判为下一节。"""
+    long_intro = (
+        "We are a global beverage company. Our fiscal year ends on December 31. "
+        "The following Management's Discussion and Analysis of Financial Condition "
+        "and Results of Operations (MD&A) is intended to help the reader understand "
+        "the results of operations and financial condition of the Company. This MD&A "
+        "is provided as a supplement to, and should be read in conjunction with, our "
+        "Consolidated Financial Statements and the accompanying Notes to Consolidated "
+        "Financial Statements, which are included in Item 8. Financial Statements and "
+        "Supplementary Data of this report. For a discussion of our critical accounting "
+        "estimates, see the notes to the consolidated financial statements."
+    )
+    assert len(long_intro.strip()) > 300  # 长正文段，超过锚点阈值
+    assert not _looks_like_next_item(long_intro)
+
+
+def test_extract_mda_ko_style_intro_does_not_stop_early() -> None:
+    """KO 式 Item 7 引导段引用 Item 8 不得中断收集：MD&A 应非空且含正文。"""
+    blocks = (
+        AnnualParsedTextBlock(text="Item 1A. Risk Factors", locator="offset:1000"),
+        AnnualParsedTextBlock(
+            text=(
+                "Item 7. Management's Discussion and Analysis of Financial Condition "
+                "and Results of Operations"
+            ),
+            locator="offset:5000",
+        ),
+        AnnualParsedTextBlock(
+            text=(
+                "We are a global beverage company. Our fiscal year ends on December 31. "
+                "The following Management's Discussion and Analysis of Financial Condition "
+                "and Results of Operations (MD&A) is intended to help the reader understand "
+                "the results of operations and financial condition of the Company. This MD&A "
+                "is provided as a supplement to, and should be read in conjunction with, our "
+                "Consolidated Financial Statements and the accompanying Notes to Consolidated "
+                "Financial Statements, which are included in Item 8. Financial Statements and "
+                "Supplementary Data of this report."
+            ),
+            locator="offset:5100",
+        ),
+        AnnualParsedTextBlock(
+            text=(
+                "Our net revenues increased 30% during fiscal 2025, driven by continued "
+                "strength in our beverage portfolio and higher pricing across markets."
+            ),
+            locator="offset:5300",
+        ),
+        AnnualParsedTextBlock(
+            text="Item 8. Financial Statements and Supplementary Data", locator="offset:9000"
+        ),
+        AnnualParsedTextBlock(
+            text=(
+                "Consolidated Balance Sheets as of December 31, 2025 and 2024, and the "
+                "related Statements of Income, Comprehensive Income, and Cash Flows."
+            ),
+            locator="offset:9100",
+        ),
+    )
+    mda = extract_mda(blocks)
+    assert mda is not None
+    assert mda.locator == "offset:5000"
+    assert "global beverage company" in mda.text  # 引导段被纳入
+    assert "net revenues increased 30%" in mda.text  # 正文被纳入
+    assert "Consolidated Balance Sheets" not in mda.text  # 真正 Item 8 标题即停，不串财务表
 
 
 def test_render_citation_numbers_assigns_sequence_and_dedups():

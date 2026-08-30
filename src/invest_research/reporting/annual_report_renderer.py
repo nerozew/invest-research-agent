@@ -190,9 +190,7 @@ def strip_locator_markers(markdown: str) -> str:
     return _LOCATOR_MARKER_RE.sub("", markdown)
 
 
-def build_reference_list(
-    registry: CitationRegistry, key_to_number: dict[str, int]
-) -> str:
+def build_reference_list(registry: CitationRegistry, key_to_number: dict[str, int]) -> str:
     """生成论文式文末引用列表：``[1] [标题](url)``（可点击）。
 
     - 按编号顺序列出；source 有 ``canonical_url`` → ``[n] [标题](url)``；
@@ -248,9 +246,14 @@ def extract_official_statements(
 
 
 def _looks_like_next_item(text: str) -> bool:
-    """判断是否已进入 MD&A 之后的下一个大标题（Item 8 财务报表）。"""
+    """判断是否已进入 MD&A 之后的下一个大标题（Item 8 财务报表）。
+
+    真正的 Item 8 标题是短块；长正文段（如 KO Item 7 引导段里引用
+    "Item 8. Financial Statements and Supplementary Data"）不是标题，不得误判。
+    """
     lowered = text.lower()
-    return (
+    is_short_heading = len(text.strip()) < _MDA_ANCHOR_MAX_CHARS
+    return is_short_heading and (
         lowered.startswith("item 8")
         or "item 8." in lowered
         or "financial statements and supplementary data" in lowered
