@@ -35,9 +35,10 @@ def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
         match = re.search(r"CIK=(\d{10})", cik_href)
         cik = match.group(1) if match else (company_info.findtext(f"{_ATOM_NS}cik") or "").strip()
         legal_name = (company_info.findtext(f"{_ATOM_NS}conformed-name") or "").strip()
-        # 必须同时拿到 10 位 CIK 与名称才构成合法候选；名称带 ARRAY(...) 是 SEC
-        # 端把 Perl 结构残留进 atom 的缺陷（即使非空也不可信），一律跳过。
-        if legal_name and not legal_name.startswith("ARRAY(") and len(cik) == 10 and cik.isdigit():
+        # 必须同时拿到 10 位 CIK 与名称才构成候选。多命中时名称可能是 ARRAY(...)
+        # 残留（SEC 端把 Perl 结构残留进 atom，但 CIK 真实），保留给上层用
+        # submissions API 补名；空名称无法补名，不构成候选。
+        if legal_name and len(cik) == 10 and cik.isdigit():
             return {"cik": cik, "legal_name": legal_name, "ticker": ""}
         return None
 
@@ -65,8 +66,29 @@ def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
     return candidates
 
 
+def _looks_like_array_residue(name: str) -> bool:
+    """判断名称是否为 SEC browse-edgar 多命中时的 Perl 结构残留（ARRAY(...)）。"""
+    return name.startswith("ARRAY(")
+
+
+def _fetch_name_by_cik(cik: str, client: Any, user_agent: str) -> str:
+    """按 CIK 调 SEC submissions API 拿真实公司名；失败返回空串。"""
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    try:
+        response = client.get(url, headers={"User-Agent": user_agent}, timeout=30.0)
+        response.raise_for_status()
+        data = response.json()
+        return str(data.get("name", "")).strip()
+    except Exception:  # noqa: BLE001 - best-effort
+        return ""
+
+
 def search_company_by_name(name: str, client: Any, user_agent: str) -> list[dict[str, str]]:
-    """按公司名调 SEC browse-edgar 搜索；best-effort，失败/无候选返回 []。"""
+    """按公司名调 SEC browse-edgar 搜索；best-effort，失败/无候选返回 []。
+
+    多命中场景 SEC 会把 <conformed-name> 渲染成 ARRAY(...) 残留（CIK 仍真实），
+    这里对这类候选逐个调 submissions API 补真实名称；补名失败则跳过（不引入垃圾名）。
+    """
     params = f"?action=getcompany&company={quote(name)}&output=atom&count=10"
     try:
         response = client.get(
@@ -77,4 +99,17 @@ def search_company_by_name(name: str, client: Any, user_agent: str) -> list[dict
         response.raise_for_status()
     except Exception:  # noqa: BLE001 - 在线兜底 best-effort
         return []
-    return _parse_company_search(response.text)
+
+    candidates = _parse_company_search(response.text)
+    enriched: list[dict[str, str]] = []
+    for cand in candidates:
+        legal_name = cand["legal_name"]
+        if not legal_name or _looks_like_array_residue(legal_name):
+            real = _fetch_name_by_cik(cand["cik"], client, user_agent)
+            if not real:
+                continue  # 补名失败 → 跳过（不引入垃圾名）
+            legal_name = real
+        enriched.append(
+            {"cik": cand["cik"], "legal_name": legal_name, "ticker": cand.get("ticker", "")}
+        )
+    return enriched

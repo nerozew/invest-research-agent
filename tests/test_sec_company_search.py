@@ -1,4 +1,8 @@
-from invest_research.tools.sec_company_search import _parse_company_search, search_company_by_name
+from invest_research.tools.sec_company_search import (
+    _fetch_name_by_cik,
+    _parse_company_search,
+    search_company_by_name,
+)
 
 _ATOM = (
     """<?xml version="1.0" encoding="UTF-8"?>
@@ -97,8 +101,72 @@ _REAL_ATOM_ARRAY_NAME = """<?xml version="1.0" encoding="ISO-8859-1"?>
 </feed>"""
 
 
-def test_parse_company_search_skips_array_residue_name() -> None:
+def test_parse_company_search_keeps_array_residue_candidate() -> None:
     """SEC 端缺陷：<conformed-name>ARRAY(...)</conformed-name> 是 Perl 结构残留，
-    即使带了 cik 也必须跳过（避免垃圾候选以 resolved=True 浮出）。"""
+    但 CIK 真实——解析保留候选，交由 search_company_by_name 用 submissions API 补名。"""
     parsed = _parse_company_search(_REAL_ATOM_ARRAY_NAME)
-    assert parsed == []
+    assert parsed == [{"cik": "0000034088", "legal_name": "ARRAY(0x2)", "ticker": ""}]
+
+
+# ---------------------------------------------------------------------------
+# 多命中补名：SEC 多命中时 <conformed-name> 会渲染成 ARRAY(...) 残留（CIK 真实），
+# search_company_by_name 应改用 submissions API 补真实名称；补名失败则跳过。
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_name_by_cik_uses_submissions_api() -> None:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "data.sec.gov/submissions/CIK0001472373.json" in str(request.url)
+        return httpx.Response(200, json={"name": "NESTLE SA"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert _fetch_name_by_cik("0001472373", client, "test-agent/1.0") == "NESTLE SA"
+
+
+def test_search_multi_hit_enriches_name_from_submissions() -> None:
+    import httpx
+
+    # browse-edgar 多命中：conformed-name 为 ARRAY 残留，cik 真实
+    atom = """<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <company-info name="ARRAY(0x1)">
+          <cik>0001472373</cik>
+          <conformed-name>ARRAY(0x1)</conformed-name>
+        </company-info>
+      </entry>
+    </feed>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "browse-edgar" in str(request.url):
+            return httpx.Response(200, text=atom)
+        assert "submissions/CIK0001472373.json" in str(request.url)
+        return httpx.Response(200, json={"name": "NESTLE SA"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    candidates = search_company_by_name("Nestle", client, "test-agent/1.0")
+    assert candidates == [{"cik": "0001472373", "legal_name": "NESTLE SA", "ticker": ""}]
+
+
+def test_search_multi_hit_skips_when_enrich_fails() -> None:
+    import httpx
+
+    atom = """<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <company-info name="ARRAY(0x1)">
+          <cik>0001472373</cik>
+          <conformed-name>ARRAY(0x1)</conformed-name>
+        </company-info>
+      </entry>
+    </feed>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "browse-edgar" in str(request.url):
+            return httpx.Response(200, text=atom)
+        return httpx.Response(500)  # submissions 失败
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert search_company_by_name("Nestle", client, "test-agent/1.0") == []
