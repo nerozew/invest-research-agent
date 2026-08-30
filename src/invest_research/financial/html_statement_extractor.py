@@ -49,6 +49,20 @@ _ROW_FEATURES: dict[FinancialStatementKind, tuple[str, ...]] = {
     ),
 }
 
+# 利润表主表特征：行名含这些关键词的主表得分更高（每股收益细表/分部表不含）。
+_INCOME_MAIN_FEATURES: tuple[str, ...] = (
+    "revenue",
+    "cost of revenues",
+    "operating income",
+    "income before income tax",
+)
+
+
+def _income_statement_score(rows: tuple[tuple[str, ...], ...]) -> int:
+    """利润表候选表主表度评分：行名中含特征词越多越可能是主表。"""
+    blob = " ".join(row[0] for row in rows if row).lower()
+    return sum(1 for feature in _INCOME_MAIN_FEATURES if feature in blob)
+
 
 def _looks_like_year(text: str) -> bool:
     """单元格是否就是纯 4 位年份（如 "2024"），排除带千分位/文字的数字。"""
@@ -172,7 +186,7 @@ def extract_financial_tables(html: str) -> tuple[HtmlStatement, ...]:
     """
     grabber = _TableGrabber()
     grabber.feed(html)
-    best_by_kind: dict[FinancialStatementKind, HtmlStatement] = {}
+    best_by_kind: dict[FinancialStatementKind, tuple[HtmlStatement, int]] = {}
     for index, (table, before) in enumerate(
         zip(grabber.tables, grabber.before_texts, strict=False)
     ):
@@ -188,7 +202,11 @@ def extract_financial_tables(html: str) -> tuple[HtmlStatement, ...]:
             source_table_index=index,
             year_columns=_detect_year_columns(rows),
         )
+        # 评分：利润表优先主表特征（含 Revenue/Operating income），其余 kind 按行数。
+        score = len(rows)
+        if kind is FinancialStatementKind.INCOME_STATEMENT:
+            score = _income_statement_score(rows) * 10_000 + len(rows)
         current = best_by_kind.get(kind)
-        if current is None or len(statement.rows) > len(current.rows):
-            best_by_kind[kind] = statement
-    return tuple(sorted(best_by_kind.values(), key=lambda s: s.source_table_index))
+        if current is None or score > current[1]:
+            best_by_kind[kind] = (statement, score)
+    return tuple(sorted((s for s, _ in best_by_kind.values()), key=lambda s: s.source_table_index))

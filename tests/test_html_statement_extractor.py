@@ -148,3 +148,27 @@ def test_year_columns_none_when_no_year_header() -> None:
     statements = extract_financial_tables(html)
     balance = next(s for s in statements if s.kind is FinancialStatementKind.BALANCE_SHEET)
     assert balance.year_columns is None
+
+
+def test_income_canonical_prefers_main_statement_over_per_share() -> None:
+    """利润表 canonical 优先含 Revenues 的主表，而非行数更多的每股收益表。"""
+    html = """
+    <div>NVIDIA Corporation and Subsidiaries<br>Consolidated Statements of Income</div>
+    <table>
+    <tr><td>Revenues</td><td>100</td></tr>
+    <tr><td>Operating income</td><td>40</td></tr>
+    <tr><td>Net income</td><td>30</td></tr>
+    </table>
+    <div>per share data</div>
+    <table>
+    <tr><td>Basic net income per share:</td><td>1</td></tr>
+    <tr><td>Numerator</td><td>2</td></tr>
+    <tr><td>Denominator</td><td>3</td></tr>
+    <tr><td>Basic net income per share</td><td>4</td></tr>
+    <tr><td>Diluted net income per share</td><td>5</td></tr>
+    <tr><td>Numerator</td><td>6</td></tr>
+    </table>
+    """
+    statements = extract_financial_tables(html)
+    income = next(s for s in statements if s.kind is FinancialStatementKind.INCOME_STATEMENT)
+    assert any("Revenues" in row[0] for row in income.rows)  # 主表（含 Revenues）
