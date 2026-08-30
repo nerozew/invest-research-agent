@@ -199,6 +199,24 @@ def test_all_sections_failed_writes_fetch_failed_manifest(tmp_path: Path) -> Non
     assert result.section_artifacts == {}
 
 
+def test_low_quality_matching_uses_host_boundary() -> None:
+    """低质来源按主机名边界匹配，避免子串误杀真实新闻域名。
+
+    回归：``hint in url`` 会让 ``x.com`` 命中 ``fox.com``、``t.me`` 命中
+    ``t.medium.com``，把真实新闻域名静默剔除。修复后仅当 host == hint 或
+    host 以 ``.hint`` 结尾才判定为低质。
+    """
+    from invest_research.infrastructure.annual_web_search_pipeline import _is_low_quality
+
+    # 真实新闻域名不被子串误杀
+    assert _is_low_quality("https://www.fox.com/story/1") is False
+    assert _is_low_quality("https://t.medium.com/article/1") is False
+    # 社交/低质域名按主机名边界命中
+    assert _is_low_quality("https://www.facebook.com/post/1") is True
+    assert _is_low_quality("https://x.com/user/status/1") is True
+    assert _is_low_quality("https://sub.t.me/chan") is True
+
+
 def test_build_entries_prefers_authoritative_and_filters_noise(tmp_path: Path) -> None:
     """低质来源（社交/聚合噪音）被剔除；权威来源排在普通来源之前。"""
     items = (

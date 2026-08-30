@@ -21,6 +21,7 @@ import json
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -117,9 +118,19 @@ _LOW_QUALITY_HOST_HINTS: tuple[str, ...] = (
 
 
 def _is_low_quality(url: str) -> bool:
-    """URL 命中任一低质来源提示即视为噪音，应被剔除。"""
-    lowered = url.lower()
-    return any(hint in lowered for hint in _LOW_QUALITY_HOST_HINTS)
+    """URL 主机名边界命中任一低质来源提示即视为噪音，应被剔除。
+
+    按 ``urlparse`` 解析主机名，仅当 ``host == hint`` 或 host 以 ``.hint`` 结尾才命中，
+    避免子串匹配误杀真实新闻域名（如 ``x.com`` 命中 ``fox.com``、``t.me`` 命中
+    ``t.medium.com``）。解析失败/无主机名视为非低质（不误伤）。
+    """
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except ValueError:
+        return False
+    # 去掉 userinfo 与端口，仅保留主机名部分。
+    host = netloc.split("@")[-1].split(":")[0]
+    return any(host == hint or host.endswith("." + hint) for hint in _LOW_QUALITY_HOST_HINTS)
 
 
 # 本管道支持产生证据的叙事 kind（对齐 _SEARCH_TEMPLATES）。
