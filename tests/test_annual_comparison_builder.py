@@ -362,3 +362,58 @@ def test_52_53_week_fiscal_year_requires_exact_canonical_report_dates() -> None:
 
     assert calculation.metrics[0].status is MetricStatus.COMPUTED
     assert calculation.metrics[0].value == Decimal("0.1")
+
+
+def test_select_pair_allows_different_concepts_across_years() -> None:
+    """GOOGL 场景：两年分别用不同 revenue concept，也应各自匹配（跨年 concept 可比）。"""
+    from invest_research.financial.annual_comparison import _select_pair
+    from invest_research.financial.concept_mapping import ConceptMapping
+
+    mapping = ConceptMapping(
+        version="test",
+        entries=[
+            {
+                "metric_name": "revenue",
+                "candidates": (
+                    "RevenueFromContractWithCustomerExcludingAssessedTax",
+                    "Revenues",
+                    "Revenue",
+                ),
+            }
+        ],
+    )
+
+    def fact(concept: str, fy: int, val: int) -> FinancialFact:
+        return FinancialFact(
+            company_id="0000789019",
+            source_id="sec-facts",
+            taxonomy="us-gaap",
+            concept=concept,
+            fiscal_year=fy,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number="accn",
+            value=Decimal(val),
+            unit="USD",
+            period_start=date(fy, 1, 1),
+            period_end=date(fy, 12, 31),
+        )
+
+    facts = [
+        fact("RevenueFromContractWithCustomerExcludingAssessedTax", 2024, 350018),
+        fact("Revenues", 2025, 402836),
+    ]
+    target, comparator = _select_pair(
+        facts,
+        mapping=mapping,
+        logical_name="revenue",
+        target_year=2025,
+        target_accession="accn",
+        target_report_date=date(2025, 12, 31),
+        comparator_year=2024,
+        comparator_accession="accn",
+        comparator_report_date=date(2024, 12, 31),
+        instant=False,
+    )
+    assert target.fact is not None and target.fact.value == Decimal("402836")
+    assert comparator.fact is not None and comparator.fact.value == Decimal("350018")

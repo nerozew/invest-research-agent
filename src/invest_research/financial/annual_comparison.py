@@ -114,6 +114,7 @@ def _select_pair(
     instant: bool,
 ) -> tuple[_Choice, _Choice]:
     candidates = _mapping_candidates(mapping, logical_name)
+    # 第一遍：同 concept（保持既有优先级语义——同一 concept 必须两年都存在）。
     for concept in candidates:
         target = _select_one(
             facts,
@@ -135,6 +136,29 @@ def _select_pair(
         )
         if target.fact is not None and comparator.fact is not None:
             return target, comparator
+    # 第二遍：跨 concept 兜底——target/comparator 各自独立从候选集合中选，
+    # 允许两年使用不同 concept（如 GOOGL 换用 revenue 概念）。仅当第一遍无同
+    # concept 命中时触发，保证同口径优先、不退化旧行为。
+    target = _select_one(
+        facts,
+        candidates=candidates,
+        fiscal_year=target_year,
+        accession=target_accession,
+        report_date=target_report_date,
+        instant=instant,
+        logical_name=logical_name,
+    )
+    comparator = _select_one(
+        facts,
+        candidates=candidates,
+        fiscal_year=comparator_year,
+        accession=comparator_accession,
+        report_date=comparator_report_date,
+        instant=instant,
+        logical_name=logical_name,
+    )
+    if target.fact is not None and comparator.fact is not None:
+        return target, comparator
     return (
         _Choice(None, f"{logical_name}: 两个财年不存在同口径、canonical 的可比事实"),
         _Choice(None, f"{logical_name}: 两个财年不存在同口径、canonical 的可比事实"),
