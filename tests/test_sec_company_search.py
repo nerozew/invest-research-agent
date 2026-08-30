@@ -145,6 +145,41 @@ def test_search_multi_hit_namespaceless_enriches_name_from_submissions() -> None
     assert candidates == [{"cik": "0001472373", "legal_name": "NESTLE SA", "ticker": ""}]
 
 
+# 真实 SEC 多命中：<company-info> 块内只有 <cik> 与 name 属性，**没有**
+# <conformed-name> 元素（该元素只在单命中场景出现）——legal_name 须回退到 name 属性。
+_REAL_ATOM_MULTI_NAME_ATTR = """<?xml version="1.0" encoding="ISO-8859-1"?>
+<feed xmlns:atom="http://www.w3.org/2005/Atom">
+  <atom:entry>
+    <atom:content type="text/xml">
+      <company-info name="ARRAY(0x1)">
+        <cik>0001472373</cik>
+      </company-info>
+    </atom:content>
+  </atom:entry>
+</feed>"""
+
+
+def test_parse_company_search_falls_back_to_name_attr() -> None:
+    """多命中真实结构：无 <conformed-name> 元素时 legal_name 回退到 company-info 的 name 属性。"""
+    parsed = _parse_company_search(_REAL_ATOM_MULTI_NAME_ATTR)
+    assert parsed == [{"cik": "0001472373", "legal_name": "ARRAY(0x1)", "ticker": ""}]
+
+
+def test_search_multi_hit_name_attr_enriches_from_submissions() -> None:
+    """name 属性回退后补名链路跑通：ARRAY(...) 属性候选 + submissions API 补名。"""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "browse-edgar" in str(request.url):
+            return httpx.Response(200, text=_REAL_ATOM_MULTI_NAME_ATTR)
+        assert "submissions/CIK0001472373.json" in str(request.url)
+        return httpx.Response(200, json={"name": "NESTLE SA"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    candidates = search_company_by_name("Nestle", client, "test-agent/1.0")
+    assert candidates == [{"cik": "0001472373", "legal_name": "NESTLE SA", "ticker": ""}]
+
+
 # ---------------------------------------------------------------------------
 # 多命中补名：SEC 多命中时 <conformed-name> 会渲染成 ARRAY(...) 残留（CIK 真实），
 # search_company_by_name 应改用 submissions API 补真实名称；补名失败则跳过。

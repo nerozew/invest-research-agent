@@ -51,7 +51,12 @@ def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
         cik_href = _findtext_local(company_info, "cik-href")
         match = re.search(r"CIK=(\d{10})", cik_href)
         cik = match.group(1) if match else _findtext_local(company_info, "cik")
-        legal_name = _findtext_local(company_info, "conformed-name")
+        # 单命中时名称在 <conformed-name> 元素；多命中时该元素缺失，名称在
+        # <company-info name="..."> 属性里（通常是 ARRAY(...) 残留）——回退到属性。
+        legal_name = (
+            _findtext_local(company_info, "conformed-name")
+            or (company_info.get("name") or "").strip()
+        )
         # 必须同时拿到 10 位 CIK 与名称才构成候选。多命中时名称可能是 ARRAY(...)
         # 残留（SEC 端把 Perl 结构残留进 atom，但 CIK 真实），保留给上层用
         # submissions API 补名；空名称无法补名，不构成候选。
