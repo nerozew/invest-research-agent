@@ -62,6 +62,7 @@ from invest_research.financial.annual_statements import (
     extract_statements,
     load_statement_mapping,
 )
+from invest_research.financial.html_statement_extractor import extract_financial_tables
 from invest_research.flows.state import ResearchFlowState
 from invest_research.infrastructure.annual_active_research import (
     _PAGES_PREFIX,
@@ -96,6 +97,7 @@ from invest_research.reporting.annual_report_renderer import (
     strip_locator_markers,
 )
 from invest_research.reporting.annual_statements_renderer import render_statements
+from invest_research.reporting.html_statements_renderer import render_html_statements
 from invest_research.tools.artifact_store import ArtifactStore
 from invest_research.tools.base import ToolFailure, ToolSuccess
 from invest_research.tools.company_resolver import ResolveCompanyRequest
@@ -887,13 +889,43 @@ class AnnualResearchRuntime:
         except (KeyError, ValueError):
             return None
 
+    def _html_statements_markdown(
+        self, job_id: uuid.UUID, evidence: AnnualEvidenceBundle
+    ) -> str | None:
+        """优先从 source.html 提取三张原表；无 source/无报表表格返回 None（回退 XBRL）。"""
+        target = evidence.target_document
+        if target is None or target.source_artifact is None:
+            return None
+        try:
+            store = ArtifactStore(self._components.artifact_root / str(job_id))
+            content = store.read(target.source_artifact.artifact_key)
+        except (KeyError, ValueError):
+            return None
+        try:
+            html = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        try:
+            statements = extract_financial_tables(html)
+            if not statements:
+                return None
+            return render_html_statements(statements)
+        except Exception:  # noqa: BLE001 - 原表提取尽力而为，失败回退 XBRL 链路
+            return None
+
     def _financial_statements_markdown(
         self,
         job_id: uuid.UUID,
         evidence: AnnualEvidenceBundle,
         comparison: AnnualComparisonPack,
     ) -> str:
-        """确定性生成三张财务报表章节 markdown（数字直取 SEC 事实，不经 LLM）。"""
+        """确定性生成三张财务报表章节 markdown（数字直取 SEC 事实，不经 LLM）。
+
+        优先返回 10-K HTML 原表（方案 B）；无 source / 提取失败时回退 XBRL + L2 链路。
+        """
+        html_md = self._html_statements_markdown(job_id, evidence)
+        if html_md is not None:
+            return html_md
         if (
             comparison.target_accession_number is None
             or comparison.target_fiscal_year is None
