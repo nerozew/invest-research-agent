@@ -21,6 +21,27 @@ def test_translate_common_rows() -> None:
     assert translate_statement_row("UnknownCustomRow") == "UnknownCustomRow"
 
 
+def test_translate_banking_rows() -> None:
+    """JPM 银行业行名覆盖。"""
+    assert translate_statement_row("Net interest income") == "净利息收入"
+    assert translate_statement_row("Investment banking fees") == "投资银行手续费"
+    assert translate_statement_row("Noninterest revenue") == "非利息收入"
+    assert translate_statement_row("Provision for credit losses") == "信贷损失拨备"
+    assert translate_statement_row("Cash and due from banks") == "现金及存放同业款项"
+    assert translate_statement_row("Trading assets") == "交易性资产"
+    assert translate_statement_row("Allowance for loan losses") == "贷款损失准备"
+    assert translate_statement_row("Basic earnings per share") == "基本每股收益"
+
+
+def test_translate_strips_paren_note() -> None:
+    """行名末尾括号备注（数值说明）剥离后匹配基础行名。"""
+    assert (
+        translate_statement_row("Loans (included $70,684 and $41,350 at fair value)") == "贷款"
+    )
+    assert translate_statement_row("Total assets(a)") == "资产总计"
+    assert translate_statement_row("Deposits (included $20,930 and $33,768 at fair value)") == "存款"
+
+
 def test_translate_suffix_fallback() -> None:
     # 未命中的完整行名按 "后缀词 + 已知词" 回退（如 "Total X" → "X合计"）。
     assert translate_statement_row("Total Operating income") == "营业利润合计"
