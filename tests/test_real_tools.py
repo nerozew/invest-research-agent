@@ -151,3 +151,53 @@ def test_live_missing_serper_key_fails_fast() -> None:
     # serper_api_key 显式为 None → build_live_client_and_serper 抛 FlowModeError
     with pytest.raises(FlowModeError):
         build_live_client_and_serper(settings)
+
+
+def test_toolkit_resolver_online_fallback_wired_offline() -> None:
+    """P07：build_research_toolkit 注入的 online_search 在本地未命中时兜底生效。
+
+    用 mock httpx client（不联网）验证三层架构的第三层接线：
+    - 本地快照未命中 → 触发在线搜索闭包 → 把 SEC browse-edgar atom 候选
+      转为 CompanyIdentity 返回（resolved=True）；
+    - 请求带共享 client 已配置的 SEC User-Agent（SEC 合规）。
+    """
+    import httpx
+
+    from invest_research.infrastructure.real_tools import build_research_toolkit
+    from invest_research.tools.base import ToolSuccess
+    from invest_research.tools.company_resolver import ResolveCompanyRequest
+
+    _ATOM = (
+        """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>EXXON MOBIL CORP</title>
+    <category term="cik"/>
+    <link rel="self" href="/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0000034088"""
+        """&amp;type=10-K"/>
+  </entry>
+</feed>"""
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # SEC 合规：请求必须带 UA；且命中 browse-edgar 名称搜索端点
+        assert request.headers.get("User-Agent")
+        assert "browse-edgar" in str(request.url)
+        return httpx.Response(200, text=_ATOM)
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        headers={"User-Agent": "test-agent/1.0 (+tests@example.com)"},
+    )
+    try:
+        toolkit = build_research_toolkit(client=client, serper=None)
+        # 快照外的公司名：本地 lookup 无候选，应触发在线兜底拿到 CIK
+        result = toolkit.resolver.execute(
+            ResolveCompanyRequest(input_company="Some Obscure New Company")
+        )
+    finally:
+        client.close()
+
+    assert isinstance(result, ToolSuccess)
+    assert result.value.resolved is True
+    assert result.value.candidates[0].cik == "0000034088"

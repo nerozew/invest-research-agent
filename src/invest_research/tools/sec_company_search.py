@@ -16,12 +16,42 @@ _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 
 def _parse_company_search(atom_xml: str) -> list[dict[str, str]]:
-    """解析 browse-edgar getcompany atom 响应，提取 {cik, legal_name, ticker} 候选。"""
+    """解析 browse-edgar getcompany atom 响应，提取 {cik, legal_name, ticker} 候选。
+
+    真实 SEC 响应把公司放在 ``<company-info>`` 块（``<cik-href>`` 含 10 位 CIK、
+    ``<conformed-name>`` 为法定名称）；单家精确命中时它在 feed 顶层，多家命中时
+    嵌套在 ``<entry><content>`` 内。``<entry>`` 其余场景是该公司近期申报（form
+    标题），不是候选公司，不能当作搜索结果。
+    保留旧 ``<entry><title>`` + ``<link href="...CIK=...">`` 格式兜底，兼容
+    历史 mock 与其它变体；按 CIK 去重。
+    """
     try:
         root = ET.fromstring(atom_xml)
     except ET.ParseError:
         return []
+
+    def _company_info_to_candidate(company_info: ET.Element) -> dict[str, str] | None:
+        cik_href = company_info.findtext(f"{_ATOM_NS}cik-href") or ""
+        match = re.search(r"CIK=(\d{10})", cik_href)
+        cik = match.group(1) if match else (company_info.findtext(f"{_ATOM_NS}cik") or "").strip()
+        legal_name = (company_info.findtext(f"{_ATOM_NS}conformed-name") or "").strip()
+        # 必须同时拿到 10 位 CIK 与名称才构成合法候选；
+        # 多家命中的 atom 常把名称渲染成 ARRAY(...)（SEC 端缺陷），此时无候选可返回。
+        if legal_name and len(cik) == 10 and cik.isdigit():
+            return {"cik": cik, "legal_name": legal_name, "ticker": ""}
+        return None
+
     candidates: list[dict[str, str]] = []
+    seen_ciks: set[str] = set()
+    for company_info in root.iter(f"{_ATOM_NS}company-info"):
+        candidate = _company_info_to_candidate(company_info)
+        if candidate is not None and candidate["cik"] not in seen_ciks:
+            candidates.append(candidate)
+            seen_ciks.add(candidate["cik"])
+    if candidates:
+        return candidates
+
+    # 旧格式兜底：<entry><title> + <link href="...CIK=...">
     for entry in root.findall(f"{_ATOM_NS}entry"):
         title = (entry.findtext(f"{_ATOM_NS}title") or "").strip()
         cik = ""

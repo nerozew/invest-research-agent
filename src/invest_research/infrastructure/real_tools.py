@@ -34,7 +34,7 @@ from crewai.tools import tool
 
 from invest_research.application.analysis_assembler import build_fact_ref
 from invest_research.domain.errors import ErrorCode
-from invest_research.domain.models import FinancialFact, ResearchRequest
+from invest_research.domain.models import CompanyIdentity, FinancialFact, ResearchRequest
 from invest_research.financial.concept_mapping import CONCEPTS_V1_PATH, load_concept_mapping
 from invest_research.infrastructure.performance import PerformanceRecorder
 from invest_research.infrastructure.prefetch import PrefetchResult, PrefetchStatus
@@ -50,6 +50,7 @@ from invest_research.tools.company_resolver import CompanyResolverTool, ResolveC
 from invest_research.tools.google_search import GoogleSearchTool, SearchQuery
 from invest_research.tools.parser_router import DocumentParseError, parse_document
 from invest_research.tools.sec_company_facts import FetchFactsRequest, SECCompanyFactsTool
+from invest_research.tools.sec_company_search import search_company_by_name
 from invest_research.tools.sec_downloader import DownloadRequest, SECDownloaderTool
 from invest_research.tools.sec_submissions import FetchSubmissionsRequest, SECSubmissionsTool
 
@@ -734,8 +735,27 @@ class ResearchToolkit:
 
 def build_research_toolkit(client: Any, serper: Any) -> ResearchToolkit:
     """构造 Research 工具集（共享 client/serper；包装层与 prefetch 复用）。"""
+
+    def online_search(name: str) -> list[CompanyIdentity]:
+        """在线兜底：本地快照未命中时按名称实时搜 SEC EDGAR 拿 CIK（best-effort）。
+
+        client 是 worker/live_resources 用 build_http_client 构建的共享 httpx client，
+        其默认请求头已带 SEC 合规 User-Agent（见 worker.py 的 SEC UA 组装）——
+        这里复用同一 client 与 UA，tools 层不自建 client。
+        """
+        user_agent = client.headers.get("User-Agent") or "invest-research/0.1"
+        candidates = search_company_by_name(name, client, user_agent)
+        return [
+            CompanyIdentity(
+                cik=item["cik"],
+                ticker=item["ticker"] or None,
+                legal_name=item["legal_name"],
+            )
+            for item in candidates
+        ]
+
     return ResearchToolkit(
-        resolver=CompanyResolverTool(),
+        resolver=CompanyResolverTool(online_search=online_search),
         submissions=SECSubmissionsTool(client),
         facts=SECCompanyFactsTool(client),
         downloader=SECDownloaderTool(client),
