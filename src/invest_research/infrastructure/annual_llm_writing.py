@@ -59,10 +59,10 @@ _WEB_SEARCH_PARSER_VERSION = "annual_web_search_section_v1"
 _MAX_CONTEXT_CHARS = 12_000
 # 官方声明翻译：每段原文输入上限（超出按节选截断，best-effort）。
 _OFFICIAL_TRANSLATE_MAX_CHARS = 1_500
-# MD&A 摘译：喂给 LLM 的原文上限（原文可能几千字，取有界前段挑重点）。
-_MDA_SUMMARIZE_MAX_CHARS = 4_000
-# MD&A 摘译最低字符量：低于此值视为模型只给了元说明/偷懒，回退原文直取。
-_MDA_SUMMARY_MIN_CHARS = 100
+# MD&A 深度分析：喂给 LLM 的原文上限（4000 → 12000，给足原文空间做多维梳理）。
+_MDA_SUMMARIZE_MAX_CHARS = 12_000
+# MD&A 深度分析最低字符量：低于此值视为模型只给了元说明/偷懒，回退原文直取。
+_MDA_SUMMARY_MIN_CHARS = 400
 # Item/MD&A 标题块命中后连带纳入的后续正文块数量（捕获长段落如管理层讨论）。
 _BLOCK_SPAN = 5
 _MAX_OUTPUT_TOKENS = 8_000
@@ -592,11 +592,12 @@ class AnnualSectionExecutor:
         )
 
     def summarize_mda(self, blocks: Iterable[Any]) -> str:
-        """LLM 分析 10-K Item 7 管理层讨论挑重点，输出 300-500 字中文摘译。
+        """LLM 分析 10-K Item 7 管理层讨论，输出 1000-2000 字多维深度要点。
 
         - 复用 ``extract_mda`` 取有界原文，输入再截到有界长度；
-        - prompt 明确要求**实质要点**（禁止元叙述/开场白）并给**下限字数**，防止模型偷懒；
-        - 输出过短（<100 字，模型只给元说明）返回空串，由调用方回退原文直取节选。
+        - prompt 要求**资深分析师多维梳理**（经营业绩/分部/成本/资本配置/资产负债/风险/
+          前瞻），引用原文数字与措辞，禁止元叙述/开场白，并给**下限字数**防偷懒；
+        - 输出过短（<400 字，模型只给元说明）返回空串，由调用方回退原文直取节选。
         """
         mda = extract_mda(blocks)
         if mda is None:
@@ -605,14 +606,21 @@ class AnnualSectionExecutor:
         result = self._completion.complete(
             role=LLMRole.ANALYSIS,
             system_prompt=(
-                "你是财报分析师。阅读管理层讨论与分析（MD&A）原文节选，提炼最重要的"
-                "3-5 个业务与财务要点，用中文写出 300-500 字的要点说明。直接给出要点"
-                "内容（可用 `- ` 列表），不要解释“本节是管理层讨论与分析”、不要"
-                "开场白或元叙述。只使用原文中出现的事实和数字，不得编造、不得补充"
-                "外部信息、不得给出投资建议。只输出中文要点。"
+                "你是资深财报分析师，擅长从上市公司 10-K 的管理层讨论与分析（MD&A）"
+                "中提取关键信息。请对给定的 MD&A 原文做深度要点梳理（中文，1000-2000 字），"
+                "按以下维度组织：\n"
+                "① 经营业绩与收入/利润驱动\n"
+                "② 分部或产品线表现\n"
+                "③ 成本与费用结构变化\n"
+                "④ 资本配置、分红回购与流动性\n"
+                "⑤ 资产负债与现金流\n"
+                "⑥ 管理层强调的风险与不确定性\n"
+                "⑦ 前瞻性展望\n"
+                "引用原文中的具体数字与措辞支撑每个要点。只使用原文出现的事实，不得编造、"
+                "不得补充外部信息、不得给出投资建议。直接输出内容，不要开场白或元叙述。"
             ),
             user_prompt=f"# 管理层讨论与分析原文节选\n{source_text}",
-            max_tokens=2_000,
+            max_tokens=6_000,
         )
         summary = (result.markdown or "").strip()
         if len(summary) < _MDA_SUMMARY_MIN_CHARS:
