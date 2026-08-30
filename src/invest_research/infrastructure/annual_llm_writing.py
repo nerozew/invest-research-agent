@@ -369,6 +369,8 @@ class AnnualSectionExecutor:
                 "不得只写引用而不写数值。只输出中文 Markdown 段落。"
             ),
             user_prompt=self._financial_analysis_prompt(pack, citations),
+            # 指标内联数值后输出较长：默认 max_tokens 会触顶截断，需给足空间。
+            max_tokens=4_000,
         )
         keys = self._validate_output(
             result,
@@ -402,6 +404,8 @@ class AnnualSectionExecutor:
                 f"{self._financial_analysis_prompt(pack, citations)}\n\n"
                 "必须以 `## 财务表现` 开头。"
             ),
+            # 指标内联数值后输出较长：默认 max_tokens 会触顶截断，需给足空间。
+            max_tokens=4_000,
         )
         keys = self._validate_output(
             result,
