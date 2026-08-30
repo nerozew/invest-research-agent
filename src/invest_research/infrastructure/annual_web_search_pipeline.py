@@ -88,10 +88,39 @@ _AUTHORITATIVE_PUBLISHERS = frozenset(
         "nytimes.com",
         "forbes.com",
         "sec.gov",
+        "cnn.com",
+        "theguardian.com",
+        "economist.com",
+        "barrons.com",
+        "investing.com",
+        "tipranks.com",
+        "zacks.com",
+        "moodys.com",
+        "fitchratings.com",
+        "spratings.com",
     }
 )
 # URL 中出现即视为权威（公司 IR / 官方 newsroom 页面）。
 _AUTHORITATIVE_HOST_HINTS = ("investor", "ir.", "newsroom", "press", "sec.gov")
+
+# 明确剔除的低质来源（社交/低可信聚合噪音）。
+_LOW_QUALITY_HOST_HINTS: tuple[str, ...] = (
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "t.me",
+    "public.com",
+)
+
+
+def _is_low_quality(url: str) -> bool:
+    """URL 命中任一低质来源提示即视为噪音，应被剔除。"""
+    lowered = url.lower()
+    return any(hint in lowered for hint in _LOW_QUALITY_HOST_HINTS)
+
 
 # 本管道支持产生证据的叙事 kind（对齐 _SEARCH_TEMPLATES）。
 _SUPPORTED_KINDS: frozenset[str] = frozenset(kind.value for kind, _, _ in _SEARCH_TEMPLATES)
@@ -292,10 +321,17 @@ class WebSearchEvidencePipeline:
     def _build_entries(
         self, items: tuple[SearchResult, ...], as_of: date
     ) -> tuple[WebSearchEntry, ...]:
-        """按 as_of 兜底过滤 + URL 去重 + 可信度分级，并限制条数。"""
+        """低质剔除 + 权威优先排序（同分稳定保持原序），再按 as_of/去重/限量。"""
+        # 先剔除明确低质来源（社交/聚合噪音）。
+        filtered = [item for item in items if not _is_low_quality(item.url)]
+        # 权威来源在前；同分保持原序，确定性、稳定。
+        sorted_items = sorted(
+            filtered,
+            key=lambda item: 0 if _credibility(item.url, item.publisher) == "authoritative" else 1,
+        )
         seen: set[str] = set()
         entries: list[WebSearchEntry] = []
-        for item in items:
+        for item in sorted_items:
             if item.published_at is not None and item.published_at > as_of:
                 continue
             if item.url in seen:

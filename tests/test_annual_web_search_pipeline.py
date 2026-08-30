@@ -42,9 +42,7 @@ class RecordingSearchTool:
                 error=ToolError(error_code=ErrorCode.UPSTREAM_5XX, message="搜索服务失败")
             )
         items = self.items_by_query.get(request.query, ())
-        return ToolSuccess(
-            value=SearchResponse(items=tuple(items), total=len(items), page=1)
-        )
+        return ToolSuccess(value=SearchResponse(items=tuple(items), total=len(items), page=1))
 
 
 def _item(
@@ -199,6 +197,26 @@ def test_all_sections_failed_writes_fetch_failed_manifest(tmp_path: Path) -> Non
     assert result.status is WebSearchEvidenceStatus.FETCH_FAILED
     assert result.failure is not None
     assert result.section_artifacts == {}
+
+
+def test_build_entries_prefers_authoritative_and_filters_noise(tmp_path: Path) -> None:
+    """低质来源（社交/聚合噪音）被剔除；权威来源排在普通来源之前。"""
+    items = (
+        _item(
+            "Facebook post",
+            "https://www.facebook.com/msft/posts/1",
+            publisher="facebook.com",
+        ),
+        _item("Reuters: MSFT", "https://reuters.com/technology/msft", publisher="reuters.com"),
+        _item("Unknown blog", "https://unknown.com/msft-analysis", publisher="unknown.com"),
+    )
+    pipeline = WebSearchEvidencePipeline(tmp_path, RecordingSearchTool())
+    entries = pipeline._build_entries(items, date.fromisoformat(AS_OF))
+    urls = [entry.url for entry in entries]
+    assert "facebook.com" not in " ".join(urls)
+    assert urls.index("https://reuters.com/technology/msft") < urls.index(
+        "https://unknown.com/msft-analysis"
+    )
 
 
 def _default_query_map() -> dict[str, tuple[SearchResult, ...]]:
