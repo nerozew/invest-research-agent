@@ -135,18 +135,16 @@ def test_custom_index_injectable() -> None:
 
 def test_live_benchmark_tickers_all_resolve_from_bundled_snapshot() -> None:
     """P06-11 固定 10 家公司不能再因演示 fixture 覆盖不足而失败。"""
-    # XOM：主实体覆盖表补入母公司 0000034088 → 精确 ticker 同时命中母公司+子公司
-    # （显式歧义，不猜）；其余公司应为唯一命中。
-    expected: dict[str, str | tuple[str, str]] = {
+    expected = {
         "AAPL": "0000320193",
         "MSFT": "0000789019",
         "AMZN": "0001018724",
         "JPM": "0000019617",
         "JNJ": "0000200406",
         "WMT": "0000104169",
-        # 当前官方 SEC ticker 快照指向 ExxonMobil Holdings Corp 的新 CIK；
-        # 主实体覆盖表补入母公司 0000034088，故 XOM 命中两个实体（歧义）。
-        "XOM": ("0002115436", "0000034088"),
+        # 当前官方 SEC ticker 快照把 XOM 绑到子公司 0002115436；主实体覆盖表
+        # 补入母公司 0000034088 并在精确 ticker 查询时唯一胜出。
+        "XOM": "0000034088",
         "BA": "0000012927",
         "KO": "0000021344",
         "TSLA": "0001318605",
@@ -154,10 +152,6 @@ def test_live_benchmark_tickers_all_resolve_from_bundled_snapshot() -> None:
     for ticker, cik in expected.items():
         result = _resolve(ticker)
         assert isinstance(result, ToolSuccess), ticker
-        if isinstance(cik, tuple):
-            assert result.value.resolved is False, ticker
-            assert {c.cik for c in result.value.candidates} == set(cik)
-            continue
         assert result.value.resolved is True, ticker
         assert result.value.candidates[0].cik == cik
 
@@ -234,9 +228,17 @@ def test_override_entity_added_when_snapshot_missing() -> None:
     index = load_sec_company_index()
     parent = next((c for c in index.lookup("EXXON MOBIL CORP")), None)
     assert parent is not None and parent.cik == "0000034088"
-    # XOM 查询应能匹配到母公司（精确 ticker 命中两个实体 → 含母公司）
+    # XOM 精确 ticker 应唯一解析到主实体（覆盖表主实体 tie-break 胜出，不与子公司歧义）
     xom = index.lookup("XOM")
-    assert any(c.cik == "0000034088" for c in xom)
+    assert [c.cik for c in xom] == ["0000034088"]
     # 覆盖表数据形状契约：ticker → {"cik", "legal_name"}
     assert MAIN_ENTITY_OVERRIDES["XOM"]["cik"] == "0000034088"
     assert MAIN_ENTITY_OVERRIDES["XOM"]["legal_name"] == "EXXON MOBIL CORP"
+
+
+def test_override_exact_ticker_resolves_to_main_entity_uniquely() -> None:
+    """XOM 精确 ticker 唯一解析到覆盖表主实体（不与 SEC 快照原绑定的子公司歧义）。"""
+    from invest_research.tools.company_resolver import load_sec_company_index
+
+    index = load_sec_company_index()
+    assert [c.cik for c in index.lookup("XOM")] == ["0000034088"]

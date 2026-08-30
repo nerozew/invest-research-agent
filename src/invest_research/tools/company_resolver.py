@@ -50,6 +50,12 @@ MAIN_ENTITY_OVERRIDES: dict[str, dict[str, str]] = {
     "XOM": {"cik": "0000034088", "legal_name": "EXXON MOBIL CORP"},
 }
 
+# 覆盖表主实体的 CIK 集合：lookup 精确 ticker 查询时的 tie-break 依据。
+# 只对真实覆盖表生效（load_sec_company_index 注入），构造的普通 index 不受影响。
+_OVERRIDE_MAIN_CIKS: frozenset[str] = frozenset(
+    override["cik"] for override in MAIN_ENTITY_OVERRIDES.values()
+)
+
 
 def _apply_main_entity_overrides(entries: list[tuple[str, CompanyIdentity]]) -> None:
     """把主实体覆盖并入 entries（按 cik 去重；覆盖 ticker 的实体保留，补入缺失的）。"""
@@ -115,10 +121,14 @@ def _lookup_key(query: str) -> str:
     return _normalize_lookup_key(stripped)
 
 
-def _match_score(query: str, identity: CompanyIdentity) -> int:
+def _match_score(
+    query: str, identity: CompanyIdentity, override_main_ciks: frozenset[str] = frozenset()
+) -> int:
     """查询与实体的匹配分：精确 3、归一化名称前缀 2、名称包含 1、无 0。
 
     精确覆盖 ticker/CIK/归一化名称；前缀/包含只看归一化 legal_name（避免过泛）。
+    主实体 tie-break：查询精确命中覆盖表主实体的 ticker 时加 1 分（3→4）唯一胜出，
+    避免 SEC 快照仍绑定的子公司并列成歧义（XOM → 母公司 0000034088）。
     """
     q = _normalize_lookup_key(query)
     if not q:
@@ -127,9 +137,12 @@ def _match_score(query: str, identity: CompanyIdentity) -> int:
     # 精确：归一化名称全等，或查询本身就是 ticker/CIK 精确命中（由 _lookup_key 归一化保证）
     if name == q:
         return 3
-    if _lookup_key(query) == identity.cik or (
-        identity.ticker and _lookup_key(query) in _ticker_keys(identity.ticker)
-    ):
+    if _lookup_key(query) == identity.cik:
+        return 3
+    if identity.ticker and _lookup_key(query) in _ticker_keys(identity.ticker):
+        # 覆盖表主实体在精确 ticker 查询时唯一胜出（tie-break）
+        if identity.cik in override_main_ciks:
+            return 4
         return 3
     if name.startswith(q):
         return 2
@@ -155,11 +168,14 @@ class CompanyIndex:
         source_url: str | None = None,
         retrieved_at: str | None = None,
         company_count: int | None = None,
+        override_main_ciks: frozenset[str] = frozenset(),
     ) -> None:
         self._index: dict[str, list[CompanyIdentity]] = {}
         self.source_url = source_url
         self.retrieved_at = retrieved_at
         self.company_count = company_count
+        # 主实体覆盖的 CIK 集合（精确 ticker tie-break 用；构造的普通 index 默认为空，无 tie-break）
+        self._override_main_ciks = override_main_ciks
         identities: dict[tuple[str, str | None], CompanyIdentity] = {}
 
         for key, identity in entries:
@@ -206,7 +222,7 @@ class CompanyIndex:
             scored.setdefault(3, []).append(identity)
         # 全表扫描评分（快照 ~10k 条，单次可接受；如需要可用名称前缀桶优化）。
         for identity in self._all_identities:
-            score = _match_score(query, identity)
+            score = _match_score(query, identity, self._override_main_ciks)
             if score > 0:
                 scored.setdefault(score, []).append(identity)
         if not scored:
@@ -265,6 +281,7 @@ def load_sec_company_index() -> CompanyIndex:
         source_url=str(payload.get("source_url") or ""),
         retrieved_at=str(payload.get("retrieved_at") or ""),
         company_count=declared_count,
+        override_main_ciks=_OVERRIDE_MAIN_CIKS,
     )
 
 
