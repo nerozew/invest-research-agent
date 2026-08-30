@@ -62,9 +62,7 @@ def test_annual_dispatcher_records_real_usage_without_prompt_content() -> None:
         def create(self, **_: object) -> object:
             return SimpleNamespace(
                 choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content="valid"), finish_reason="stop"
-                    )
+                    SimpleNamespace(message=SimpleNamespace(content="valid"), finish_reason="stop")
                 ],
                 usage=SimpleNamespace(
                     prompt_tokens=12,
@@ -357,8 +355,7 @@ def test_narrative_writer_selects_mda_blocks(tmp_path: Path) -> None:
     completion = _Completion(
         lambda _: AnnualLlmResult(
             markdown=(
-                "## Business overview\nMD&A discussed growth and AI investment. "
-                f"[{citation}]"
+                f"## Business overview\nMD&A discussed growth and AI investment. [{citation}]"
             )
         )
     )
@@ -370,3 +367,55 @@ def test_narrative_writer_selects_mda_blocks(tmp_path: Path) -> None:
     # Item 7 标题后的 MD&A 正文块被纳入（全文级解析）。
     assert "Revenue growth was driven by cloud adoption" in prompt
     assert "We expect continued investment in AI infrastructure" in prompt
+
+
+def test_artifact_title_matches_entry_by_url(tmp_path: Path) -> None:
+    """web 工件含多条 entry 时，标题按 artifact.source_url 匹配对应 entry，而非恒取首条。
+
+    实测 bug：material_event 工件 3 个 URL 全被标成第一条 "NVIDIA Newsroom: Home"，
+    导致 techcrunch/coreweave 引用标题错配。
+    """
+    job_id = "job-title"
+    section = WebSearchSectionEvidence(
+        kind="business_overview",
+        as_of_date="2026-08-26",
+        entries=(
+            WebSearchEntry(
+                title="NVIDIA Newsroom: Home",
+                url="https://nvidianews.nvidia.com/",
+                publisher="nvidianews.nvidia.com",
+                accessed_at=date(2026, 8, 26),
+                snippet="Official NVIDIA newsroom.",
+            ),
+            WebSearchEntry(
+                title="Nvidia closes in on Hugging Face acquisition",
+                url="https://techcrunch.com/2026/08/25/nvidia-hugging-face/",
+                publisher="techcrunch.com",
+                accessed_at=date(2026, 8, 26),
+                snippet="TechCrunch reports on the acquisition.",
+            ),
+            WebSearchEntry(
+                title="CoreWeave and Nvidia expand partnership",
+                url="https://www.coreweave.com/nvidia-partnership",
+                publisher="coreweave.com",
+                accessed_at=date(2026, 8, 26),
+                snippet="CoreWeave expands AI cloud deal.",
+            ),
+        ),
+    )
+    store = ArtifactStore(tmp_path / job_id)
+    ref = store.write(
+        "annual/web-search/business_overview.json", section.model_dump_json().encode()
+    )
+    # 指向第二条 entry 的工件（techcrunch URL）。
+    artifact = EvidenceArtifact(
+        artifact_key=ref.artifact_key,
+        kind=EvidenceKind.BUSINESS_OVERVIEW,
+        source_url="https://techcrunch.com/2026/08/25/nvidia-hugging-face/",
+        content_checksum=ref.content_checksum,
+        parser_version="annual_web_search_section_v1",
+        validation_status=EvidenceValidationStatus.VALIDATED,
+    )
+    executor = AnnualSectionExecutor(tmp_path, _Completion(lambda _: AnnualLlmResult(markdown="")))
+    title = executor._artifact_title(artifact, store)
+    assert title == "Nvidia closes in on Hugging Face acquisition"

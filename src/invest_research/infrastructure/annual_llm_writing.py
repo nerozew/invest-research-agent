@@ -257,15 +257,12 @@ class AnnualLlmDispatcher:
             "llm_calls": len(calls),
             "llm_duration_seconds": round(sum(float(item["duration_s"]) for item in calls), 6),
             "models": {
-                role.value: self.model_for(role)
-                for role in (LLMRole.ANALYSIS, LLMRole.WRITER)
+                role.value: self.model_for(role) for role in (LLMRole.ANALYSIS, LLMRole.WRITER)
             },
             "token_usage": usage,
             "token_usage_complete": complete_usage,
             "usage_missing_calls": sum(
-                1
-                for item in successful
-                if not isinstance(item.get("total_tokens"), int)
+                1 for item in successful if not isinstance(item.get("total_tokens"), int)
             ),
         }
 
@@ -575,17 +572,13 @@ class AnnualSectionExecutor:
             )
         except AnnualLlmCallError:
             return statements
-        translated = _parse_translated_statements(
-            result.markdown, [label for label, _ in entries]
-        )
+        translated = _parse_translated_statements(result.markdown, [label for label, _ in entries])
         if not translated:
             return statements
         by_label = dict(zip([label for label, _ in entries], translated))
         return AnnualOfficialStatements(
             cover_page=_with_translation(statements.cover_page, by_label.get("封面页")),
-            audit_opinion=_with_translation(
-                statements.audit_opinion, by_label.get("独立审计意见")
-            ),
+            audit_opinion=_with_translation(statements.audit_opinion, by_label.get("独立审计意见")),
             certification_302=_with_translation(
                 statements.certification_302, by_label.get("302 认证")
             ),
@@ -634,6 +627,10 @@ class AnnualSectionExecutor:
                 web = WebSearchSectionEvidence.model_validate_json(content)
             except ValueError:
                 return None
+            # 按 source_url 匹配对应 entry 的标题；一个工件可能含多个搜索结果。
+            for entry in web.entries:
+                if entry.url == artifact.source_url:
+                    return entry.title
             return web.entries[0].title if web.entries else None
         try:
             parsed = AnnualParsedDocument.model_validate_json(content)
