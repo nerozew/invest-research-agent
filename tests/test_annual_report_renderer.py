@@ -406,6 +406,55 @@ def test_looks_like_next_item_real_item8_title_returns_true() -> None:
     assert _looks_like_next_item("Item 8  Financial Statements and Supplementary Data")
 
 
+def test_looks_like_next_item_short_body_reference_returns_false() -> None:
+    """Finding 2：短于锚点阈值的正文句子里引用 Item 8 措辞，不是标题。
+
+    审阅者实测：106 字符短句 "The consolidated financial statements are included in
+    Item 8. Financial Statements and Supplementary Data." 只含引用措辞、并非标题形态，
+    不得因长度门控放行而被误判为下一节、导致 MD&A 提前终止。
+    """
+    sentence = (
+        "The consolidated financial statements are included in Item 8. "
+        "Financial Statements and Supplementary Data."
+    )
+    assert len(sentence.strip()) < 300  # 长度门控本身无法挡住此短句
+    assert not _looks_like_next_item(sentence)
+
+
+def test_extract_mda_short_item8_reference_does_not_stop_early() -> None:
+    """Finding 2 端到端：短句引用 Item 8 不得提前终止 MD&A 收集。"""
+    blocks = (
+        AnnualParsedTextBlock(
+            text="Item 7. Management's Discussion and Analysis", locator="offset:5000"
+        ),
+        AnnualParsedTextBlock(
+            text="Revenue increased 30% due to strong demand during fiscal 2025.",
+            locator="offset:5100",
+        ),
+        AnnualParsedTextBlock(
+            text=(
+                "The consolidated financial statements are included in Item 8. "
+                "Financial Statements and Supplementary Data."
+            ),
+            locator="offset:5300",
+        ),
+        AnnualParsedTextBlock(
+            text=(
+                "We remain focused on operating leverage as we scale the fulfillment "
+                "network and expand internationally."
+            ),
+            locator="offset:5500",
+        ),
+        AnnualParsedTextBlock(
+            text="Item 8. Financial Statements and Supplementary Data", locator="offset:9000"
+        ),
+    )
+    mda = extract_mda(blocks)
+    assert mda is not None  # 短句引用不得让 MD&A 整节丢失
+    assert "Revenue increased 30%" in mda.text
+    assert "operating leverage" in mda.text  # 越过短句引用继续收集正文
+
+
 def test_looks_like_next_item_long_body_reference_returns_false() -> None:
     """KO 式长正文段里引用 Item 8（如引导段）不是标题，不得误判为下一节。"""
     long_intro = (

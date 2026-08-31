@@ -248,16 +248,21 @@ def extract_official_statements(
 def _looks_like_next_item(text: str) -> bool:
     """判断是否已进入 MD&A 之后的下一个大标题（Item 8 财务报表）。
 
-    真正的 Item 8 标题是短块；长正文段（如 KO Item 7 引导段里引用
-    "Item 8. Financial Statements and Supplementary Data"）不是标题，不得误判。
+    真正的 Item 8 标题是短块、且整块就是标题本身（以 "Item 8" 开头，去掉空白/句点
+    等标点后紧跟 "Financial Statements..." 措辞）。正文里引用 Item 8 措辞的句子——
+    无论长短（如 KO 引导段整段引用、或短句 "…included in Item 8. Financial
+    Statements and Supplementary Data."）——不是标题，不得误判。
     """
-    lowered = text.lower()
-    is_short_heading = len(text.strip()) < _MDA_ANCHOR_MAX_CHARS
-    return is_short_heading and (
-        lowered.startswith("item 8")
-        or "item 8." in lowered
-        or "financial statements and supplementary data" in lowered
-    )
+    stripped = text.strip()
+    if not stripped or len(stripped) >= _MDA_ANCHOR_MAX_CHARS:
+        return False
+    lowered = stripped.lower()
+    if not lowered.startswith("item 8"):
+        return False
+    # 去掉 "Item 8" 后的空白/标点（句点、冒号、连字符、en/em 破折号等），
+    # 剩余部分必须本身就以财务报表标题措辞开头——仅"句中包含"不算标题形态。
+    rest = lowered[len("item 8"):].lstrip(" \t\n\r.:;,-–—")
+    return rest.startswith("financial statements")
 
 
 def extract_mda(
