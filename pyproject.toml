@@ -71,3 +71,8 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# 项目根加入 sys.path：tests 非包（无 __init__.py），部分测试用
+# `from tests.test_xxx import ...` 跨文件导入（如 test_annual_runtime）。
+# `python -m pytest` 时 cwd 天然在 sys.path；CI 用 `uv run pytest` 时不在，
+# 故显式声明，保证本地与 CI 行为一致。
+pythonpath = ["."]
