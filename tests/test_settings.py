@@ -30,8 +30,14 @@ def test_missing_required_variables_raise_readable_error(
     assert "Field required" in error_text
 
 
-def test_settings_builds_from_explicit_values() -> None:
+def test_settings_builds_from_explicit_values(monkeypatch: pytest.MonkeyPatch) -> None:
     """显式传入完整必需字段应能正常构建配置对象。"""
+    # 隔离外部环境：CrewAI 导入时 load_dotenv() 会把 .env 灌进 os.environ，
+    # 污染 LLM_BASE_URL 等默认值断言（_env_file=None 只能阻止直接读 .env 文件，
+    # 无法阻止已注入 os.environ 的变量）。
+    for name in ("LLM_BASE_URL", "PROJECT_NAME", "ENVIRONMENT"):
+        monkeypatch.delenv(name, raising=False)
+
     settings = Settings(
         _env_file=None,
         llm_api_key="sk-test-value",
@@ -40,7 +46,7 @@ def test_settings_builds_from_explicit_values() -> None:
 
     assert settings.project_name == "invest-research"
     assert settings.environment == "development"
-    assert settings.llm_base_url == "https://api.deepseek.com"
+    assert settings.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert settings.sec_user_agent_contact == "test@example.com"
 
 

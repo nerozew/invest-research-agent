@@ -1,0 +1,13 @@
+{
+  "research_jobs_total": 0.0,
+  "http_requests_total": 3.0,
+  "agent_runs_total": 0.0,
+  "pack_validation_total": 0.0,
+  "tool_cache_total": 0.0,
+  "research_job_duration_seconds_count": 0.0,
+  "research_job_duration_seconds_sum": 0.0,
+  "workflow_step_duration_seconds_count": 0.0,
+  "workflow_step_duration_seconds_sum": 0.0,
+  "http_request_duration_seconds_count": 3.0,
+  "http_request_duration_seconds_sum": 0.003735432999974364
+}

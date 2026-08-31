@@ -1,0 +1,1847 @@
+{
+  "schema_version": "evals_dataset_v1",
+  "generated_on": "fixed",
+  "note": "20 公司 × 5 场景 = 100 条；所有 as_of_date 固定，无动态 today；无密钥。",
+  "cases": [
+    {
+      "case_id": "aapl-annual_10k_zh",
+      "company": "Apple Inc.",
+      "ticker": "AAPL",
+      "cik": "0000320193",
+      "industry": "consumer_electronics",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "aapl-quarterly_10q_zh",
+      "company": "Apple Inc.",
+      "ticker": "AAPL",
+      "cik": "0000320193",
+      "industry": "consumer_electronics",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "aapl-combined_zh",
+      "company": "Apple Inc.",
+      "ticker": "AAPL",
+      "cik": "0000320193",
+      "industry": "consumer_electronics",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "aapl-historical_asof",
+      "company": "Apple Inc.",
+      "ticker": "AAPL",
+      "cik": "0000320193",
+      "industry": "consumer_electronics",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "aapl-annual_10k_en",
+      "company": "Apple Inc.",
+      "ticker": "AAPL",
+      "cik": "0000320193",
+      "industry": "consumer_electronics",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "msft-annual_10k_zh",
+      "company": "Microsoft Corporation",
+      "ticker": "MSFT",
+      "cik": "0000789019",
+      "industry": "software",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "msft-quarterly_10q_zh",
+      "company": "Microsoft Corporation",
+      "ticker": "MSFT",
+      "cik": "0000789019",
+      "industry": "software",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "msft-combined_zh",
+      "company": "Microsoft Corporation",
+      "ticker": "MSFT",
+      "cik": "0000789019",
+      "industry": "software",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "msft-historical_asof",
+      "company": "Microsoft Corporation",
+      "ticker": "MSFT",
+      "cik": "0000789019",
+      "industry": "software",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "msft-annual_10k_en",
+      "company": "Microsoft Corporation",
+      "ticker": "MSFT",
+      "cik": "0000789019",
+      "industry": "software",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "amzn-annual_10k_zh",
+      "company": "Amazon.com Inc.",
+      "ticker": "AMZN",
+      "cik": "0001018724",
+      "industry": "ecommerce",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "amzn-quarterly_10q_zh",
+      "company": "Amazon.com Inc.",
+      "ticker": "AMZN",
+      "cik": "0001018724",
+      "industry": "ecommerce",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "amzn-combined_zh",
+      "company": "Amazon.com Inc.",
+      "ticker": "AMZN",
+      "cik": "0001018724",
+      "industry": "ecommerce",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "amzn-historical_asof",
+      "company": "Amazon.com Inc.",
+      "ticker": "AMZN",
+      "cik": "0001018724",
+      "industry": "ecommerce",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "amzn-annual_10k_en",
+      "company": "Amazon.com Inc.",
+      "ticker": "AMZN",
+      "cik": "0001018724",
+      "industry": "ecommerce",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "googl-annual_10k_zh",
+      "company": "Alphabet Inc.",
+      "ticker": "GOOGL",
+      "cik": "0001652044",
+      "industry": "technology",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "googl-quarterly_10q_zh",
+      "company": "Alphabet Inc.",
+      "ticker": "GOOGL",
+      "cik": "0001652044",
+      "industry": "technology",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "googl-combined_zh",
+      "company": "Alphabet Inc.",
+      "ticker": "GOOGL",
+      "cik": "0001652044",
+      "industry": "technology",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "googl-historical_asof",
+      "company": "Alphabet Inc.",
+      "ticker": "GOOGL",
+      "cik": "0001652044",
+      "industry": "technology",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "googl-annual_10k_en",
+      "company": "Alphabet Inc.",
+      "ticker": "GOOGL",
+      "cik": "0001652044",
+      "industry": "technology",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "meta-annual_10k_zh",
+      "company": "Meta Platforms Inc.",
+      "ticker": "META",
+      "cik": "0001326801",
+      "industry": "social_media",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "meta-quarterly_10q_zh",
+      "company": "Meta Platforms Inc.",
+      "ticker": "META",
+      "cik": "0001326801",
+      "industry": "social_media",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "meta-combined_zh",
+      "company": "Meta Platforms Inc.",
+      "ticker": "META",
+      "cik": "0001326801",
+      "industry": "social_media",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "meta-historical_asof",
+      "company": "Meta Platforms Inc.",
+      "ticker": "META",
+      "cik": "0001326801",
+      "industry": "social_media",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "meta-annual_10k_en",
+      "company": "Meta Platforms Inc.",
+      "ticker": "META",
+      "cik": "0001326801",
+      "industry": "social_media",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "jpm-annual_10k_zh",
+      "company": "JPMorgan Chase & Co.",
+      "ticker": "JPM",
+      "cik": "0000019617",
+      "industry": "banking",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "jpm-quarterly_10q_zh",
+      "company": "JPMorgan Chase & Co.",
+      "ticker": "JPM",
+      "cik": "0000019617",
+      "industry": "banking",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "jpm-combined_zh",
+      "company": "JPMorgan Chase & Co.",
+      "ticker": "JPM",
+      "cik": "0000019617",
+      "industry": "banking",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "jpm-historical_asof",
+      "company": "JPMorgan Chase & Co.",
+      "ticker": "JPM",
+      "cik": "0000019617",
+      "industry": "banking",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "jpm-annual_10k_en",
+      "company": "JPMorgan Chase & Co.",
+      "ticker": "JPM",
+      "cik": "0000019617",
+      "industry": "banking",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "jnj-annual_10k_zh",
+      "company": "Johnson & Johnson",
+      "ticker": "JNJ",
+      "cik": "0000200406",
+      "industry": "healthcare",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "jnj-quarterly_10q_zh",
+      "company": "Johnson & Johnson",
+      "ticker": "JNJ",
+      "cik": "0000200406",
+      "industry": "healthcare",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "jnj-combined_zh",
+      "company": "Johnson & Johnson",
+      "ticker": "JNJ",
+      "cik": "0000200406",
+      "industry": "healthcare",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "jnj-historical_asof",
+      "company": "Johnson & Johnson",
+      "ticker": "JNJ",
+      "cik": "0000200406",
+      "industry": "healthcare",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "jnj-annual_10k_en",
+      "company": "Johnson & Johnson",
+      "ticker": "JNJ",
+      "cik": "0000200406",
+      "industry": "healthcare",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "wmt-annual_10k_zh",
+      "company": "Walmart Inc.",
+      "ticker": "WMT",
+      "cik": "0000104169",
+      "industry": "retail",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "wmt-quarterly_10q_zh",
+      "company": "Walmart Inc.",
+      "ticker": "WMT",
+      "cik": "0000104169",
+      "industry": "retail",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "wmt-combined_zh",
+      "company": "Walmart Inc.",
+      "ticker": "WMT",
+      "cik": "0000104169",
+      "industry": "retail",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "wmt-historical_asof",
+      "company": "Walmart Inc.",
+      "ticker": "WMT",
+      "cik": "0000104169",
+      "industry": "retail",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "wmt-annual_10k_en",
+      "company": "Walmart Inc.",
+      "ticker": "WMT",
+      "cik": "0000104169",
+      "industry": "retail",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "xom-annual_10k_zh",
+      "company": "Exxon Mobil Corporation",
+      "ticker": "XOM",
+      "cik": "0000034088",
+      "industry": "energy",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "xom-quarterly_10q_zh",
+      "company": "Exxon Mobil Corporation",
+      "ticker": "XOM",
+      "cik": "0000034088",
+      "industry": "energy",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "xom-combined_zh",
+      "company": "Exxon Mobil Corporation",
+      "ticker": "XOM",
+      "cik": "0000034088",
+      "industry": "energy",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "xom-historical_asof",
+      "company": "Exxon Mobil Corporation",
+      "ticker": "XOM",
+      "cik": "0000034088",
+      "industry": "energy",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "xom-annual_10k_en",
+      "company": "Exxon Mobil Corporation",
+      "ticker": "XOM",
+      "cik": "0000034088",
+      "industry": "energy",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "pg-annual_10k_zh",
+      "company": "The Procter & Gamble Company",
+      "ticker": "PG",
+      "cik": "0000080424",
+      "industry": "consumer_goods",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "pg-quarterly_10q_zh",
+      "company": "The Procter & Gamble Company",
+      "ticker": "PG",
+      "cik": "0000080424",
+      "industry": "consumer_goods",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "pg-combined_zh",
+      "company": "The Procter & Gamble Company",
+      "ticker": "PG",
+      "cik": "0000080424",
+      "industry": "consumer_goods",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "pg-historical_asof",
+      "company": "The Procter & Gamble Company",
+      "ticker": "PG",
+      "cik": "0000080424",
+      "industry": "consumer_goods",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "pg-annual_10k_en",
+      "company": "The Procter & Gamble Company",
+      "ticker": "PG",
+      "cik": "0000080424",
+      "industry": "consumer_goods",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 6,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "tsla-annual_10k_zh",
+      "company": "Tesla Inc.",
+      "ticker": "TSLA",
+      "cik": "0001318605",
+      "industry": "automotive",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "tsla-quarterly_10q_zh",
+      "company": "Tesla Inc.",
+      "ticker": "TSLA",
+      "cik": "0001318605",
+      "industry": "automotive",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "tsla-combined_zh",
+      "company": "Tesla Inc.",
+      "ticker": "TSLA",
+      "cik": "0001318605",
+      "industry": "automotive",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "tsla-historical_asof",
+      "company": "Tesla Inc.",
+      "ticker": "TSLA",
+      "cik": "0001318605",
+      "industry": "automotive",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "tsla-annual_10k_en",
+      "company": "Tesla Inc.",
+      "ticker": "TSLA",
+      "cik": "0001318605",
+      "industry": "automotive",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "nvda-annual_10k_zh",
+      "company": "NVIDIA Corporation",
+      "ticker": "NVDA",
+      "cik": "0001045810",
+      "industry": "semiconductors",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "nvda-quarterly_10q_zh",
+      "company": "NVIDIA Corporation",
+      "ticker": "NVDA",
+      "cik": "0001045810",
+      "industry": "semiconductors",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "nvda-combined_zh",
+      "company": "NVIDIA Corporation",
+      "ticker": "NVDA",
+      "cik": "0001045810",
+      "industry": "semiconductors",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "nvda-historical_asof",
+      "company": "NVIDIA Corporation",
+      "ticker": "NVDA",
+      "cik": "0001045810",
+      "industry": "semiconductors",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "nvda-annual_10k_en",
+      "company": "NVIDIA Corporation",
+      "ticker": "NVDA",
+      "cik": "0001045810",
+      "industry": "semiconductors",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "nflx-annual_10k_zh",
+      "company": "Netflix Inc.",
+      "ticker": "NFLX",
+      "cik": "0001065280",
+      "industry": "streaming",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "nflx-quarterly_10q_zh",
+      "company": "Netflix Inc.",
+      "ticker": "NFLX",
+      "cik": "0001065280",
+      "industry": "streaming",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "nflx-combined_zh",
+      "company": "Netflix Inc.",
+      "ticker": "NFLX",
+      "cik": "0001065280",
+      "industry": "streaming",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "nflx-historical_asof",
+      "company": "Netflix Inc.",
+      "ticker": "NFLX",
+      "cik": "0001065280",
+      "industry": "streaming",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "nflx-annual_10k_en",
+      "company": "Netflix Inc.",
+      "ticker": "NFLX",
+      "cik": "0001065280",
+      "industry": "streaming",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "ko-annual_10k_zh",
+      "company": "The Coca-Cola Company",
+      "ticker": "KO",
+      "cik": "0000021344",
+      "industry": "beverages",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "ko-quarterly_10q_zh",
+      "company": "The Coca-Cola Company",
+      "ticker": "KO",
+      "cik": "0000021344",
+      "industry": "beverages",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "ko-combined_zh",
+      "company": "The Coca-Cola Company",
+      "ticker": "KO",
+      "cik": "0000021344",
+      "industry": "beverages",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "ko-historical_asof",
+      "company": "The Coca-Cola Company",
+      "ticker": "KO",
+      "cik": "0000021344",
+      "industry": "beverages",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "ko-annual_10k_en",
+      "company": "The Coca-Cola Company",
+      "ticker": "KO",
+      "cik": "0000021344",
+      "industry": "beverages",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "ba-annual_10k_zh",
+      "company": "The Boeing Company",
+      "ticker": "BA",
+      "cik": "0000012927",
+      "industry": "aerospace",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "ba-quarterly_10q_zh",
+      "company": "The Boeing Company",
+      "ticker": "BA",
+      "cik": "0000012927",
+      "industry": "aerospace",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "ba-combined_zh",
+      "company": "The Boeing Company",
+      "ticker": "BA",
+      "cik": "0000012927",
+      "industry": "aerospace",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "ba-historical_asof",
+      "company": "The Boeing Company",
+      "ticker": "BA",
+      "cik": "0000012927",
+      "industry": "aerospace",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "ba-annual_10k_en",
+      "company": "The Boeing Company",
+      "ticker": "BA",
+      "cik": "0000012927",
+      "industry": "aerospace",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "dis-annual_10k_zh",
+      "company": "The Walt Disney Company",
+      "ticker": "DIS",
+      "cik": "0001744489",
+      "industry": "entertainment",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "dis-quarterly_10q_zh",
+      "company": "The Walt Disney Company",
+      "ticker": "DIS",
+      "cik": "0001744489",
+      "industry": "entertainment",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "dis-combined_zh",
+      "company": "The Walt Disney Company",
+      "ticker": "DIS",
+      "cik": "0001744489",
+      "industry": "entertainment",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "dis-historical_asof",
+      "company": "The Walt Disney Company",
+      "ticker": "DIS",
+      "cik": "0001744489",
+      "industry": "entertainment",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "dis-annual_10k_en",
+      "company": "The Walt Disney Company",
+      "ticker": "DIS",
+      "cik": "0001744489",
+      "industry": "entertainment",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "cat-annual_10k_zh",
+      "company": "Caterpillar Inc.",
+      "ticker": "CAT",
+      "cik": "0000018230",
+      "industry": "industrial",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "cat-quarterly_10q_zh",
+      "company": "Caterpillar Inc.",
+      "ticker": "CAT",
+      "cik": "0000018230",
+      "industry": "industrial",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "cat-combined_zh",
+      "company": "Caterpillar Inc.",
+      "ticker": "CAT",
+      "cik": "0000018230",
+      "industry": "industrial",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "cat-historical_asof",
+      "company": "Caterpillar Inc.",
+      "ticker": "CAT",
+      "cik": "0000018230",
+      "industry": "industrial",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "cat-annual_10k_en",
+      "company": "Caterpillar Inc.",
+      "ticker": "CAT",
+      "cik": "0000018230",
+      "industry": "industrial",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "v-annual_10k_zh",
+      "company": "Visa Inc.",
+      "ticker": "V",
+      "cik": "0001403161",
+      "industry": "payments",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "v-quarterly_10q_zh",
+      "company": "Visa Inc.",
+      "ticker": "V",
+      "cik": "0001403161",
+      "industry": "payments",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "v-combined_zh",
+      "company": "Visa Inc.",
+      "ticker": "V",
+      "cik": "0001403161",
+      "industry": "payments",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "v-historical_asof",
+      "company": "Visa Inc.",
+      "ticker": "V",
+      "cik": "0001403161",
+      "industry": "payments",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "v-annual_10k_en",
+      "company": "Visa Inc.",
+      "ticker": "V",
+      "cik": "0001403161",
+      "industry": "payments",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 9,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "unh-annual_10k_zh",
+      "company": "UnitedHealth Group Inc.",
+      "ticker": "UNH",
+      "cik": "0000731766",
+      "industry": "health_insurance",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "unh-quarterly_10q_zh",
+      "company": "UnitedHealth Group Inc.",
+      "ticker": "UNH",
+      "cik": "0000731766",
+      "industry": "health_insurance",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "unh-combined_zh",
+      "company": "UnitedHealth Group Inc.",
+      "ticker": "UNH",
+      "cik": "0000731766",
+      "industry": "health_insurance",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "unh-historical_asof",
+      "company": "UnitedHealth Group Inc.",
+      "ticker": "UNH",
+      "cik": "0000731766",
+      "industry": "health_insurance",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "unh-annual_10k_en",
+      "company": "UnitedHealth Group Inc.",
+      "ticker": "UNH",
+      "cik": "0000731766",
+      "industry": "health_insurance",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 12,
+      "description": "10-K 英文年报"
+    },
+    {
+      "case_id": "hd-annual_10k_zh",
+      "company": "The Home Depot Inc.",
+      "ticker": "HD",
+      "cik": "0000354950",
+      "industry": "retail",
+      "scenario": "annual_10k_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 中文年报"
+    },
+    {
+      "case_id": "hd-quarterly_10q_zh",
+      "company": "The Home Depot Inc.",
+      "ticker": "HD",
+      "cik": "0000354950",
+      "industry": "retail",
+      "scenario": "quarterly_10q_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-Q 中文季报"
+    },
+    {
+      "case_id": "hd-combined_zh",
+      "company": "The Home Depot Inc.",
+      "ticker": "HD",
+      "cik": "0000354950",
+      "industry": "retail",
+      "scenario": "combined_zh",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K + 10-Q 综合中文"
+    },
+    {
+      "case_id": "hd-historical_asof",
+      "company": "The Home Depot Inc.",
+      "ticker": "HD",
+      "cik": "0000354950",
+      "industry": "retail",
+      "scenario": "historical_asof",
+      "as_of_date": "2024-06-30",
+      "language": "zh-CN",
+      "requested_forms": [
+        "10-K",
+        "10-Q"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "历史截止测试"
+    },
+    {
+      "case_id": "hd-annual_10k_en",
+      "company": "The Home Depot Inc.",
+      "ticker": "HD",
+      "cik": "0000354950",
+      "industry": "retail",
+      "scenario": "annual_10k_en",
+      "as_of_date": "2025-10-31",
+      "language": "en",
+      "requested_forms": [
+        "10-K"
+      ],
+      "expected_source_types": [
+        "sec_filing"
+      ],
+      "fiscal_year_end": 1,
+      "description": "10-K 英文年报"
+    }
+  ]
+}

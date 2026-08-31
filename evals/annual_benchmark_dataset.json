@@ -1,0 +1,25 @@
+{
+  "schema_version": "live_dataset_v1",
+  "generated_on": "fixed",
+  "note": "P07-11 canary：同一年度 10-K 范围下比较 legacy 与 annual_deep；固定两家公司、两次重复，禁止用于简历性能结论。",
+  "cases": [
+    {
+      "case_id": "annual-amzn",
+      "ticker": "AMZN",
+      "company": "Amazon.com Inc.",
+      "sector": "ecommerce",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K"]
+    },
+    {
+      "case_id": "annual-jpm",
+      "ticker": "JPM",
+      "company": "JPMorgan Chase & Co.",
+      "sector": "banking",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K"]
+    }
+  ]
+}

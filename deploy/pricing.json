@@ -1,0 +1,9 @@
+{
+  "as_of": "2026-08-29",
+  "note": "DeepSeek V4 Flash 定价（美元每百万 token，第三方报价）；DeepSeek 已预告涨价，按需更新",
+  "models": {
+    "default": { "input_per_1m": 0.14, "output_per_1m": 0.28 },
+    "deep": { "input_per_1m": 0.14, "output_per_1m": 0.28 },
+    "fast": { "input_per_1m": 0.14, "output_per_1m": 0.28 }
+  }
+}

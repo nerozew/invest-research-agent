@@ -1,0 +1,271 @@
+# P04-10/UI-05：本地 Docker Compose（migrate / API / Worker / Streamlit / PostgreSQL / Redis）
+# P06-06：observability profile（Prometheus / Grafana / OTel Collector / Jaeger）
+# 远程运行优先使用 GHCR 预构建镜像（GitHub Actions 构建并推送，见 .github/workflows/docker-image.yml）。
+# 服务内部用服务名通信；不公开 DB/Redis 端口；PostgreSQL 使用持久化 volume；
+# healthcheck 配置齐全；不含任何真实密钥（敏感配置由运行时 .env 提供，不进镜像）。
+#
+# 使用前设置：export INVEST_RESEARCH_IMAGE=ghcr.io/nerozew/invest-research-agent:phase5
+# 本地可选构建：docker compose build（会用仓库 Dockerfile 构建同名镜像，作为未设置变量时的回退）
+# 启用观测组件：docker compose --profile observability up -d（不影响基础服务行为）
+
+# 固定 Compose 项目名，避免不同终端因目录名/历史 -p 参数创建两套容器并争抢端口。
+name: agent
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+  REDIS_URL: redis://redis:6379/0
+  BROKER_URL: redis://redis:6379/0
+  ARTIFACT_ROOT: /app/artifacts
+  SEC_USER_AGENT_CONTACT: ${SEC_USER_AGENT_CONTACT:-your-email@example.com}
+  # HTTP User-Agent 必须 ASCII（默认值含中文会让 httpx 崩溃）
+  HTTP_USER_AGENT: ${HTTP_USER_AGENT:-invest-research/0.1 (+your-email@example.com)}
+  LLM_API_KEY: ${LLM_API_KEY:-your-llm-api-key-placeholder}
+  # P06-11：显式供应商（qwen/deepseek/generic），默认 qwen 向后兼容
+  LLM_VENDOR: ${LLM_VENDOR:-qwen}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  LLM_MODEL_RESEARCH: ${LLM_MODEL_RESEARCH:-qwen-max}
+  LLM_MODEL_ANALYSIS: ${LLM_MODEL_ANALYSIS:-qwen-max}
+  LLM_MODEL_WRITER: ${LLM_MODEL_WRITER:-qwen-max}
+  # P05-12A/B：Flow 运行模式（默认 fake 不调用模型；live 需真实 LLM/SERPER key）
+  FLOW_MODE: ${FLOW_MODE:-fake}
+  # P05.5：fast/deep 档位与思考模式开关（否则容器退回 deep + 思考模式开启，Qwen3.5 会慢到超时）
+  RESEARCH_PROFILE: ${RESEARCH_PROFILE:-deep}
+  LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-false}
+  LLM_RESEARCH_ENABLE_THINKING: ${LLM_RESEARCH_ENABLE_THINKING:-false}
+  LLM_ANALYSIS_ENABLE_THINKING: ${LLM_ANALYSIS_ENABLE_THINKING:-false}
+  LLM_WRITER_ENABLE_THINKING: ${LLM_WRITER_ENABLE_THINKING:-false}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+  LLM_TIMEOUT: ${LLM_TIMEOUT:-120.0}
+  SERPER_API_KEY: ${SERPER_API_KEY:-your-serper-api-key-placeholder}
+  SERPER_ENDPOINT: ${SERPER_ENDPOINT:-https://google.serper.dev/search}
+  # 后端 API 地址（Streamlit 通过服务名访问）
+  API_BASE_URL: http://api:8000
+  # src 布局：把源码目录加入 PYTHONPATH（镜像内源码位于 /app/src）
+  PYTHONPATH: /app/src
+  # 非 root 用户 app 无 /home/app；crewai(chromadb) 需要可写数据目录，HOME 指向可写的 /tmp
+  HOME: /tmp
+  # P06-06：应用 OTLP trace 导出到 observability profile 的 collector。
+  # 未启用该 profile 时，导出失败由 OTel SDK 批量处理器静默重试丢弃，不影响业务。
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  # P06-11K/L：失败诊断包默认只在任务失败时落盘；不把完整内容写入 Jaeger/Prometheus。
+  DIAGNOSTIC_CAPTURE_MODE: ${DIAGNOSTIC_CAPTURE_MODE:-failure_payload}
+  DIAGNOSTIC_MAX_EVENT_BYTES: ${DIAGNOSTIC_MAX_EVENT_BYTES:-65536}
+  DIAGNOSTIC_MAX_BUNDLE_BYTES: ${DIAGNOSTIC_MAX_BUNDLE_BYTES:-4194304}
+  DIAGNOSTIC_MAX_EVENTS: ${DIAGNOSTIC_MAX_EVENTS:-200}
+  DIAGNOSTIC_RETENTION_DAYS: ${DIAGNOSTIC_RETENTION_DAYS:-7}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: invest
+      POSTGRES_PASSWORD: invest
+      POSTGRES_DB: invest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invest -d invest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase5}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "alembic upgrade head"
+    environment:
+      DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+      # src 布局：alembic env.py 需 import invest_research 包（镜像内 /app/src）
+      PYTHONPATH: /app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase5}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "uvicorn invest_research.infrastructure.wiring:create_production_app_factory --factory --host 0.0.0.0 --port 8000"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    volumes:
+      - artifacts_data:/app/artifacts
+
+  worker:
+    image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase5}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app worker --loglevel=info --queues=research-jobs"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-worker
+      # 多进程 Prometheus 指标目录：作为真实容器 env 传递（进程启动即在 os.environ），
+      # 避免仅靠 worker.py 的 os.environ.setdefault 在 Celery fork 下不可靠（P06-06C 事故）。
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_metrics
+      # WS3 成本估算单价文件（worker 容器内路径，见下方 volume 挂载）。
+      PRICING_FILE: /app/pricing.json
+      # L2：LLM 从 10-K 原文提取缺失数值（报表行/指标兜底；开启后每缺失项一次 LLM 调用）。
+      ANNUAL_LLM_EXTRACTION_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - artifacts_data:/app/artifacts
+      - ./deploy/pricing.json:/app/pricing.json:ro
+
+  streamlit:
+    image: ${INVEST_RESEARCH_IMAGE:-invest-research:phase5}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "streamlit run frontend/Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true"
+    environment:
+      API_BASE_URL: http://api:8000
+      API_TIMEOUT: "30"
+      # src 布局：前端页面 import invest_research.* 需能找到 /app/src（镜像内源码）
+      PYTHONPATH: /app/src
+      HOME: /tmp
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0) if urllib.request.urlopen('http://localhost:8501/_stcore/health',timeout=3).status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ============ P06-06 observability profile（仅显式启用时启动）============
+  # 启动：docker compose --profile observability up -d
+  # 说明：观测组件使用独立 profile，不改变基础服务（postgres/redis/api/worker/streamlit）行为。
+  # 所有镜像使用明确版本（不使用 latest）；采集/存储均为本地开发用途，不暴露公网。
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      # 本地开发默认 admin/admin；生产部署必须通过环境变量覆盖（见 docs/10 §7）。
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.113.0
+    profiles: ["observability"]
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "13133:13133"
+    # 官方 collector 镜像为 distroless（无 shell）；healthcheck 用非 shell CMD 探测进程存活。
+    # 实时健康由配置中的 health_check extension 提供（13133）。
+    healthcheck:
+      test: ["CMD", "/otelcol", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      # 启用 OTLP 接收（collector 通过 4317 gRPC 转发 trace）
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+    # 最小 trace 后端：默认内存存储（重启丢失），仅本地查看链路，不用于生产。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:16686/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  postgres_data:
+  redis_data:
+  artifacts_data:
+  prometheus_data:
+  grafana_data:

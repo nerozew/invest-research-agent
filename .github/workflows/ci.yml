@@ -1,0 +1,162 @@
+# P06-09：独立 CI quality gate（不把 docker-image workflow 当作 CI）
+#
+# 触发：push 到任意分支 + pull_request + 手动 dispatch（workflow_dispatch）。
+# 目标：本地开发质量门禁的可重复化——Ruff / mypy(src) / 离线 pytest / 迁移+DB 集成检查。
+#
+# 安全边界（对齐 .clinerules/02）：
+# - 全部 job 显式设置 FLOW_MODE=fake（禁止真实 SEC/Serper/LLM 调用）；
+# - 不注入任何真实密钥（不 resolve 任何 secrets）；
+# - 每个 job 明确 timeout-minutes，失败时按 job 名可定位；
+# - concurrency/cancel-in-progress：同分支新 push 取消旧 run；
+# - 依赖缓存：uv 缓存 + pip 缓存加速后续 run。
+
+name: ci
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 所有 job 共用的默认环境：FLOW_MODE=fake + 禁止真实出网调用（业务代码不联网）。
+env:
+  FLOW_MODE: fake
+  PYTHONUNBUFFERED: "1"
+  # 本地离线测试用 SQLite；DB 集成 job 内部自建 PostgreSQL 容器
+  DATABASE_URL: "sqlite+pysqlite:///:memory:"
+
+jobs:
+  ruff:
+    name: ruff (lint + format)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run Ruff
+        run: uv run ruff check src tests migrations scripts
+
+  mypy:
+    name: mypy (type check src)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run mypy
+        run: uv run mypy src
+
+  test-offline:
+    name: pytest (offline unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      # 离线测试排除需要 Docker testcontainers 的 DB 集成测试（由 migration job 覆盖）
+      # SKIP_DB_TESTS=1：跳过 testcontainers job_repository/migration/step_artifact 测试
+      - name: Run offline pytest
+        env:
+          SKIP_DB_TESTS: "1"
+        run: uv run pytest -q -p no:cacheprovider --ignore-glob="*test_worker*" -m "not docker"
+
+      # 此文件使用隔离的 SQLite 和内存 broker，不属于上面排除的 Worker 集成测试。
+      - name: Run offline worker startup recovery regressions
+        env:
+          SKIP_DB_TESTS: "1"
+          BROKER_URL: "memory://"
+          OTEL_SDK_DISABLED: "true"
+        run: uv run pytest -q -p no:cacheprovider tests/test_worker_stale_recovery.py
+
+  migrations:
+    name: migration + db integration (postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: invest
+          POSTGRES_PASSWORD: invest
+          POSTGRES_DB: invest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U invest -d invest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      # 用真实 PostgreSQL 跑 Alembic 迁移 + repository 集成测试（覆盖 upgrade/downgrade 可回滚）。
+      # 包含年度迁移、节点恢复和 API 真实数据库回归；P07 用例各自创建独立临时库。
+      # 必须覆盖全局 DATABASE_URL（sqlite）：migrations/env.py 优先读取该环境变量，
+      # 若不覆盖，Alembic 会在 SQLite 上跑迁移导致 downgrade 失败。
+      - name: Run migration and DB integration tests
+        env:
+          SKIP_DB_TESTS: ""
+          DATABASE_URL: "postgresql+psycopg://invest:invest@localhost:5432/invest"
+          TEST_DATABASE_URL: "postgresql+psycopg://invest:invest@localhost:5432/invest"
+        run: |
+          uv run pytest -q -p no:cacheprovider tests/test_migration_001.py tests/test_migration_002.py tests/test_migration_003.py tests/test_migration_004.py tests/test_migration_annual.py tests/test_job_repository.py tests/test_step_artifact_repository.py
+          uv run pytest -q -p no:cacheprovider tests/test_annual_node_runtime.py tests/test_worker_stale_recovery.py tests/test_api_get_job.py -k "postgresql or postgres_aware"

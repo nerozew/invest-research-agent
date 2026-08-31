@@ -1,0 +1,73 @@
+{
+  "benchmark_run_id": "0f2d5a2bea61",
+  "workflow_success_rate": 1.0,
+  "live_agent_success_rate": null,
+  "live_agent_success_rate_note": "本轮 fake 模式只验证 workflow_success_rate（API/DB/Redis/Celery/Worker/Flow 全链）；真实 SEC/Serper/LLM 下的 Agent 成功率由后续 live 基准另行评估，不得用本数字宣传为真实 Agent 成功率。",
+  "main_jobs_total": 100,
+  "main_fast_count": 50,
+  "main_deep_count": 50,
+  "succeeded": 100,
+  "failed": 0,
+  "timeout": 0,
+  "fast_succeeded": 50,
+  "deep_succeeded": 50,
+  "fast_success_rate": 1.0,
+  "deep_success_rate": 1.0,
+  "strict_gt_95_percent": true,
+  "duration_seconds_avg": 0.51,
+  "duration_seconds_p50": 0.482,
+  "duration_seconds_p90": 0.672,
+  "duration_seconds_p95": 0.707,
+  "duration_seconds_p99": 0.863,
+  "duration_seconds_min": 0.274,
+  "duration_seconds_max": 0.874,
+  "throughput_jobs_per_second": 1.959324,
+  "failure_by_error_code": {},
+  "failure_by_stage": {},
+  "missing_artifacts_distribution": {
+    "none": 100
+  },
+  "control_cancel_ok": true,
+  "control_scenarios": {
+    "cancel": true
+  },
+  "prometheus_before": {
+    "research_jobs_total": 0.0,
+    "http_requests_total": 3.0,
+    "agent_runs_total": 0.0,
+    "pack_validation_total": 0.0,
+    "tool_cache_total": 0.0,
+    "research_job_duration_seconds_count": 0.0,
+    "research_job_duration_seconds_sum": 0.0,
+    "workflow_step_duration_seconds_count": 0.0,
+    "workflow_step_duration_seconds_sum": 0.0,
+    "http_request_duration_seconds_count": 3.0,
+    "http_request_duration_seconds_sum": 0.003735432999974364
+  },
+  "prometheus_after": {
+    "research_jobs_total": 300.0,
+    "http_requests_total": 151.0,
+    "agent_runs_total": 0.0,
+    "pack_validation_total": 0.0,
+    "tool_cache_total": 0.0,
+    "research_job_duration_seconds_count": 100.0,
+    "research_job_duration_seconds_sum": 51.483186999999994,
+    "workflow_step_duration_seconds_count": 800.0,
+    "workflow_step_duration_seconds_sum": 14.117750000000001,
+    "http_request_duration_seconds_count": 151.0,
+    "http_request_duration_seconds_sum": 6.314456516999826
+  },
+  "prometheus_diff": {
+    "agent_runs_total": 0,
+    "http_requests_total": 148.0,
+    "pack_validation_total": 0,
+    "research_jobs_total": 300.0,
+    "tool_cache_total": 0,
+    "research_job_duration_seconds_count": 100.0,
+    "workflow_step_duration_seconds_count": 800.0,
+    "workflow_step_duration_seconds_sum": 14.117750000000001,
+    "http_request_duration_seconds_count": 148.0,
+    "research_job_duration_seconds_sum": 51.483186999999994,
+    "http_request_duration_seconds_sum": 6.3107210839998515
+  }
+}

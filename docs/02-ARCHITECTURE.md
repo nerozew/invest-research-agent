@@ -45,6 +45,8 @@ flowchart LR
 
 为满足题目要求，系统保留三个核心 Agent。质量校验使用确定性代码和 guardrail，而不是增加一个会带来新不确定性的“审核 Agent”。后续可以把 LLM 审核作为辅助评分器，但不能替代硬校验。
 
+**Phase 3.5 补充（受控反思与修订闭环）**：质量门禁输出结构化质量问题（`QualityIssue`），由 `flows/ReflectionController`（P03-20）路由到「发布 / 定向修订（Writer，≤1 次）/ 补证（Research，≤1 次后重走 Analysis+Writer）/ 拒绝」——所有循环由 Flow 控制，**Agent 之间不直接调用**（对齐 ADR-001）。新的类型化契约（`RevisionRequest`、`SupplementResearchRequest` 等）落在 `domain/` 或 `flows/` 层（P03-16 起），不增加第四个审核 Agent。
+
 ## 4. 工具设计（至少 5 个，实际规划 9 个）
 
 所有工具都必须有 Pydantic 输入/输出、超时、错误分类、重试策略、脱敏日志和契约测试。
@@ -79,9 +81,9 @@ flowchart LR
 | 重试 | Tenacity + 自定义错误分类 | 指数退避、抖动和可测试策略 |
 | 文档 | BeautifulSoup/lxml、Docling、PyMuPDF | SEC HTML 优先，PDF 多级降级 |
 | 数值 | `decimal.Decimal`、pandas | 金额/比例计算避免二进制浮点误差 |
-| 报告 | Jinja2 Markdown；WeasyPrint（P1） | 本地工件可控，便于引用和差异比较 |
+| 报告 | legacy 走 Jinja2 Markdown；**年度走自包含 raw 发布**（`annual_report_renderer.py`） | 年度报告含官方声明中英对照、MD&A 中文摘译、正文引用纯文本、来源清单可点击，直接发布不重复套模板 |
 | 测试 | pytest、pytest-asyncio、respx、testcontainers | 外部 API 可录制/Mock，数据库可集成测试 |
-| 可观测性 | structlog、Prometheus、Grafana、OpenTelemetry | 补齐路线第 5 周能力并支撑成功率证明 |
+| 可观测性 | structlog、Prometheus、Grafana、OpenTelemetry | API 单进程 + Worker 多进程（`PROMETHEUS_MULTIPROC_DIR` 真实 env）；WS3 成本指标（token/工具/成本）+ Grafana 8 行看板 + Jaeger 链路 |
 | 部署 | Docker Compose | 免费、本地可复现，适合作品集演示 |
 
 具体依赖版本在项目初始化当天通过官方兼容矩阵选择并锁定到 `uv.lock`。文档只约束主版本和能力，不把未来已经过期的小版本写死。
@@ -184,3 +186,55 @@ Redis 只负责队列、锁和缓存。任务、步骤、事实、指标和工�
 ### ADR-005：SEC HTML 优先于 PDF
 
 SEC 主文档通常为 HTML/iXBRL，更容易保留表格、链接和结构；PDF 作为用户文件或备用来源。这样仍满足 PDF 解析要求，同时提高真实任务成功率。
+
+### ADR-006：Streamlit 是 FastAPI 的 HTTP 客户端
+
+Streamlit 不是独立业务层，只是 FastAPI 的 HTTP 客户端。所有数据访问都经后端 API，
+前端不直接访问 PostgreSQL/Redis、不直接调用 CrewAI Flow、不读取工件文件系统——
+保证唯一入口、统一鉴权与脱敏、可复用后端的缓存/限流/错误分类。
+
+### ADR-007：P07 保留三 Agent，改由确定性 DAG Scheduler 管理年度证据流水线
+
+P07 不增加可自由调度其他 Agent 的“主 Agent”。Scheduler 是确定性控制面：负责年度
+filing 节点的 fan-out/fan-in、依赖、事件、预算、恢复和持久化；Research Agent 只在
+Coverage Ledger 指出缺口时进行有界 ReAct；Analysis Agent 解释可信财务事实而不算术；
+Writer 消费按证据类型路由的已验证上下文。首版年度任务图由代码模板生成，不引入
+Planner LLM。详见 `docs/24-P07-ANNUAL-PIPELINE-ADR.md`。
+
+展示层补充：年度最终报告由 `reporting/annual_report_renderer.py` **确定性渲染并自包含
+raw 发布**（不走 legacy Jinja 模板，避免标题/来源/限制/声明重复）；LLM 仅做 best-effort
+的官方声明翻译与 MD&A 摘译（失败降级英文，不阻塞发布），正文引用保留来源名纯文本、
+末尾来源清单可点击。
+
+## 11. 前端边界（Streamlit 轻量操作界面）
+
+### 11.1 依赖关系
+
+```
+Streamlit → FastAPI → Application/Flow → PostgreSQL/Redis
+```
+
+- Streamlit 只通过 HTTP 调用 FastAPI（创建任务、查状态、下载工件等）。
+- FastAPI 是唯一面向外部的入口；Application/Flow 在后端执行，Streamlit 不可见。
+- PostgreSQL/Redis 只被后端访问，Streamlit 完全不直接连接。
+
+### 11.2 Streamlit 禁止项
+
+- 禁止直接访问数据库（PostgreSQL）。
+- 禁止直接调用 CrewAI Flow。
+- 禁止保存或显示 API Key（含 LLM API Key、搜索 API Key）。
+- 禁止读取服务器工件路径（如 `artifacts/` 绝对路径）。
+- 禁止绕过 FastAPI 下载文件（工件只能通过后端安全下载接口获取）。
+
+### 11.3 目录与配置
+
+- 目录建议：`frontend/`（Streamlit 应用 + typed API client）。
+- API 地址通过环境变量配置（如 `API_BASE_URL`），不写死在代码里。
+- 创建任务使用客户端生成并保存的 `Idempotency-Key`。
+- 不在 `st.session_state` 保存密钥；不显示数据库连接字符串和内部文件路径。
+
+### 11.4 测试要求
+
+- 前端测试使用 fake HTTP API（如 httpx MockTransport / 自定义 fake client），
+  不依赖真实数据库、Redis、Docker 或模型，全程离线可复现。
+- 页面不负责业务判断：轮询停止条件、错误归类和展示职责在前端，业务校验在后端。

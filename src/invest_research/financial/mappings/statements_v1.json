@@ -1,0 +1,214 @@
+{
+  "version": "statement_mapping_v1",
+  "statements": {
+    "balance_sheet": {
+      "label": "资产负债表",
+      "period_type": "instant",
+      "rows": [
+        {
+          "label": "现金及现金等价物",
+          "candidates": [
+            "CashAndCashEquivalentsAtCarryingValue",
+            "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations"
+          ]
+        },
+        {
+          "label": "应收账款",
+          "candidates": [
+            "AccountsReceivableCurrent",
+            "AccountsReceivableNetCurrent"
+          ]
+        },
+        {
+          "label": "存货",
+          "candidates": [
+            "InventoryNet",
+            "Inventory"
+          ]
+        },
+        {
+          "label": "流动资产合计",
+          "candidates": [
+            "AssetsCurrent",
+            "CurrentAssets"
+          ]
+        },
+        {
+          "label": "固定资产净额",
+          "candidates": [
+            "PropertyPlantAndEquipmentNet",
+            "PropertyPlantAndEquipmentNetBookValue"
+          ]
+        },
+        {
+          "label": "商誉",
+          "candidates": [
+            "Goodwill"
+          ]
+        },
+        {
+          "label": "资产总计",
+          "candidates": [
+            "Assets",
+            "TotalAssets"
+          ]
+        },
+        {
+          "label": "流动负债合计",
+          "candidates": [
+            "LiabilitiesCurrent",
+            "CurrentLiabilities"
+          ]
+        },
+        {
+          "label": "长期债务",
+          "candidates": [
+            "LongTermDebtNoncurrent",
+            "LongTermDebt"
+          ]
+        },
+        {
+          "label": "负债合计",
+          "candidates": [
+            "Liabilities",
+            "TotalLiabilities"
+          ],
+          "derivation": {
+            "formula": "subtract",
+            "inputs": [
+              "负债和权益合计",
+              "股东权益"
+            ]
+          }
+        },
+        {
+          "label": "股东权益",
+          "candidates": [
+            "StockholdersEquity",
+            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+          ]
+        },
+        {
+          "label": "负债和权益合计",
+          "candidates": [
+            "LiabilitiesAndStockholdersEquity"
+          ]
+        },
+        {
+          "label": "留存收益",
+          "candidates": [
+            "RetainedEarningsAccumulatedDeficit"
+          ]
+        }
+      ]
+    },
+    "income_statement": {
+      "label": "利润表",
+      "period_type": "duration",
+      "rows": [
+        {
+          "label": "收入",
+          "candidates": [
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "Revenue"
+          ]
+        },
+        {
+          "label": "销售成本",
+          "candidates": [
+            "CostOfRevenue",
+            "CostOfGoodsAndServicesSold",
+            "CostOfGoodsSold"
+          ]
+        },
+        {
+          "label": "毛利润",
+          "candidates": [
+            "GrossProfit",
+            "GrossProfitFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "derivation": {
+            "formula": "subtract",
+            "inputs": [
+              "收入",
+              "销售成本"
+            ]
+          }
+        },
+        {
+          "label": "营业费用",
+          "candidates": [
+            "OperatingExpenses"
+          ]
+        },
+        {
+          "label": "营业利润",
+          "candidates": [
+            "OperatingIncomeLoss"
+          ]
+        },
+        {
+          "label": "所得税费用",
+          "candidates": [
+            "IncomeTaxExpenseBenefit"
+          ]
+        },
+        {
+          "label": "净利润",
+          "candidates": [
+            "NetIncomeLoss",
+            "ProfitLoss"
+          ]
+        }
+      ]
+    },
+    "cash_flow": {
+      "label": "现金流量表",
+      "period_type": "duration",
+      "rows": [
+        {
+          "label": "经营活动现金流",
+          "candidates": [
+            "NetCashProvidedByUsedInOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+          ]
+        },
+        {
+          "label": "投资活动现金流",
+          "candidates": [
+            "NetCashProvidedByUsedInInvestingActivities",
+            "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations"
+          ]
+        },
+        {
+          "label": "筹资活动现金流",
+          "candidates": [
+            "NetCashProvidedByUsedInFinancingActivities",
+            "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations"
+          ]
+        },
+        {
+          "label": "资本支出",
+          "candidates": [
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PaymentsToAcquireProductiveAssets"
+          ]
+        },
+        {
+          "label": "汇率变动影响",
+          "candidates": [
+            "EffectOfExchangeRateOnCashAndCashEquivalents"
+          ]
+        },
+        {
+          "label": "现金及等价物净变动",
+          "candidates": [
+            "CashAndCashEquivalentsPeriodIncreaseDecrease",
+            "IncreaseDecreaseInCashAndCashEquivalents"
+          ]
+        }
+      ]
+    }
+  }
+}

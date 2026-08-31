@@ -1,0 +1,150 @@
+# P06-10A：独立隔离 benchmark Compose project（invest-research-benchmark）
+#
+# 用法（不触碰当前开发栈与 obs-smoke 栈）：
+#   docker compose -p invest-research-benchmark -f deploy/compose.benchmark.yml \
+#     up -d --build
+#   执行校准：uv run python scripts/run_phase6_benchmark.py \
+#     --api-base http://localhost:18080 --jobs 10 --fast-ratio 0.5 --concurrency 2
+#   清理（只清理本 project 自己创建的容器；默认不带 -v）：
+#   docker compose -p invest-research-benchmark -f deploy/compose.benchmark.yml down
+#
+# 约束：
+# - FLOW_MODE=fake：worker 使用 ResearchFlowRunner，不调 SEC/Serper/LLM；
+# - LLM/SERPER key 只用占位符（不读真实 .env 中的 key）；
+# - 端口全部避开 live 栈（8000/9090/3000）与 obs-smoke（18000/19090/13000）：
+#   api 18080 / prometheus 19091；
+# - 独立 volume（*_benchmark），不共享、不删除 live/obs-smoke 栈数据；
+# - 不执行主项目 docker compose down -v；只允许清理本 project 创建的
+#   invest-research-benchmark_* 卷（需验证 project 名称后再清理）。
+#
+# 说明：
+# - 本 project 内含 Prometheus（19091）用于校准验收的前后快照旁证；
+# - 不包含 Grafana/Jaeger（基准只关心 workflow 成功率与 Prometheus 旁证）。
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+  REDIS_URL: redis://redis:6379/0
+  BROKER_URL: redis://redis:6379/0
+  ARTIFACT_ROOT: /app/artifacts
+  SEC_USER_AGENT_CONTACT: benchmark@example.com
+  HTTP_USER_AGENT: invest-research-benchmark/0.1 (+benchmark@example.com)
+  LLM_API_KEY: placeholder-llm-key-for-benchmark
+  LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+  LLM_MODEL_RESEARCH: qwen-max
+  LLM_MODEL_ANALYSIS: qwen-max
+  LLM_MODEL_WRITER: qwen-max
+  FLOW_MODE: fake
+  RESEARCH_PROFILE: deep
+  LLM_ENABLE_THINKING: "false"
+  SERPER_API_KEY: placeholder-serper-key-for-benchmark
+  SERPER_ENDPOINT: https://google.serper.dev/search
+  API_BASE_URL: http://api:8000
+  PYTHONPATH: /app/src
+  HOME: /tmp
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: invest
+      POSTGRES_PASSWORD: invest
+      POSTGRES_DB: invest
+    volumes:
+      - postgres_data_benchmark:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invest -d invest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data_benchmark:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: invest-research:phase5
+    command: sh -c "alembic upgrade head"
+    environment:
+      DATABASE_URL: postgresql+psycopg://invest:invest@postgres:5432/invest
+      PYTHONPATH: /app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: invest-research:phase5
+    command: sh -c "uvicorn invest_research.infrastructure.wiring:create_production_app_factory --factory --host 0.0.0.0 --port 8000"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "18080:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    volumes:
+      - artifacts_data_benchmark:/app/artifacts
+
+  worker:
+    image: invest-research:phase5
+    command: sh -c "celery -A invest_research.infrastructure.queue.worker:celery_app worker --loglevel=info --queues=research-jobs"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: invest-research-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - artifacts_data_benchmark:/app/artifacts
+
+  # Prometheus 只用于校准前后的指标快照旁证（不用于推导本轮成功率）。
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data_benchmark:/prometheus
+    ports:
+      - "19091:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data_benchmark:
+  redis_data_benchmark:
+  artifacts_data_benchmark:
+  prometheus_data_benchmark:

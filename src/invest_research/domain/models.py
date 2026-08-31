@@ -19,9 +19,24 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from invest_research.domain.annual_pipeline import AnnualComparisonStatus, ResearchMode
+from invest_research.domain.quality import QualityRecommendation
+
 _CIK_PATTERN = re.compile(r"^\d{10}$")
 _ALLOWED_LANGUAGES = frozenset({"zh-CN", "en"})
 _DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q")
+
+
+class ResearchProfileMode(StrEnum):
+    """每任务研究档位（P06-06A）。
+
+    - ``FAST``：低迭代、低重试预算，适合演示与初步报告（不降级 AI 质量保证，
+      只是预算更少）；
+    - ``DEEP``：更充分研究，耗时与模型费用更高（默认，与旧请求兼容）。
+    """
+
+    FAST = "fast"
+    DEEP = "deep"
 
 
 class ResearchRequest(BaseModel):
@@ -40,6 +55,14 @@ class ResearchRequest(BaseModel):
 
     # 请求的 SEC 表单类型（非空，默认 10-K + 10-Q）
     requested_forms: tuple[str, ...] = Field(default=_DEFAULT_FORMS)
+
+    # P06-06A：每任务研究档位（fast/deep）。默认 deep 保证旧请求兼容；
+    # Pydantic 自动校验非法值（API 422）。
+    research_profile: str = Field(default=ResearchProfileMode.DEEP.value)
+
+    # P07-01：显式年度深度研究模式。当前运行时只支持 legacy；annual_deep 的
+    # fail-fast 门禁位于 application 创建任务边界，避免它被旧串行流程静默执行。
+    research_mode: ResearchMode = Field(default=ResearchMode.LEGACY)
 
     @field_validator("input_company")
     @classmethod
@@ -73,6 +96,25 @@ class ResearchRequest(BaseModel):
         if not value:
             raise ValueError("requested_forms 不能为空")
         return value
+
+    @field_validator("research_profile")
+    @classmethod
+    def _validate_research_profile(cls, value: str) -> str:
+        """研究档位只能为 fast 或 deep（P06-06A）。"""
+        try:
+            ResearchProfileMode(value)
+        except ValueError as exc:
+            raise ValueError("research_profile 仅支持 fast 或 deep") from exc
+        return value
+
+    def idempotency_fingerprint(self) -> str:
+        """返回向后兼容的请求幂等指纹。
+
+        P07 新增的默认 ``legacy`` 不参与指纹，使升级前后完全相同的旧请求继续
+        复用已有 Idempotency-Key；显式 ``annual_deep`` 则必须参与隔离。
+        """
+        exclude = {"research_mode"} if self.research_mode is ResearchMode.LEGACY else None
+        return self.model_dump_json(exclude=exclude)
 
 
 class CompanyIdentity(BaseModel):
@@ -142,6 +184,8 @@ class Source(BaseModel):
     """外部来源的规范化目录（sources 表）。
 
     关键约束：canonical_url 唯一（去重）、accessed_at 必填。
+    ``locator``：来源内定位（章节/页码/锚点），P05-13 要求每条引用可定位到
+    URL + locator；可选，允许缺省（如整站来源）。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -153,6 +197,7 @@ class Source(BaseModel):
     published_at: date | None = None
     accessed_at: date
     content_checksum: str | None = None
+    locator: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @field_validator("canonical_url")
@@ -234,7 +279,8 @@ class FinancialFact(BaseModel):
     taxonomy: str = Field(min_length=1)
     concept: str = Field(min_length=1)
     label: str | None = None
-    value: Decimal = Field(gt=0)
+    # 允许负值/零：净亏损、负现金流是真实业务（对齐 MetricResult 的口径，见下）
+    value: Decimal
     unit: str = Field(min_length=1)
     period_start: date | None = None
     period_end: date | None = None
@@ -279,7 +325,9 @@ class MetricResult(BaseModel):
     job_id: str
     metric_name: str = Field(min_length=1)
     period_end: date
-    value: Decimal | None = Field(default=None, gt=0)
+    # 注意：增长率/利润率允许负值（收入下降、经营亏损是正常业务），
+    # 不可设 gt=0；仅约束 value 为有限 Decimal 即可（PRD §8 负数场景）。
+    value: Decimal | None = None
     unit: str = Field(min_length=1)
     status: MetricStatus
     formula_version: str = Field(min_length=1)
@@ -293,6 +341,47 @@ class MetricResult(BaseModel):
             raise ValueError("status=computed 时 value 不能为空")
         if self.status != MetricStatus.COMPUTED and self.value is not None:
             raise ValueError(f"status={self.status.value} 时 value 必须为空")
+        return self
+
+
+class AnnualComparisonInputFingerprint(BaseModel):
+    """P07-05 比较包可安全复用所需的所有输入版本。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    company_facts_artifact_key: str | None = None
+    company_facts_checksum: str | None = None
+    target_document_checksum: str | None = None
+    comparator_document_checksum: str | None = None
+    target_accession_number: str | None = None
+    comparator_accession_number: str | None = None
+    concept_mapping_version: str = Field(min_length=1)
+
+
+class AnnualComparisonPack(BaseModel):
+    """可信年度财务比较结果；只含确定性数据与限制。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: str = "annual_comparison_pack_v1"
+    status: AnnualComparisonStatus
+    target_fiscal_year: int | None = Field(default=None, ge=1900, le=9999)
+    comparator_fiscal_year: int | None = Field(default=None, ge=1900, le=9999)
+    target_accession_number: str | None = None
+    comparator_accession_number: str | None = None
+    concept_mapping_version: str = Field(min_length=1)
+    input_fingerprint: AnnualComparisonInputFingerprint
+    facts: tuple[FinancialFact, ...] = ()
+    metrics: tuple[MetricResult, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "AnnualComparisonPack":
+        if self.status is AnnualComparisonStatus.BLOCKED:
+            if self.facts or self.metrics or not self.limitations:
+                raise ValueError("blocked 比较包不得包含事实或指标，且必须说明限制")
+        elif self.target_fiscal_year is None or self.comparator_fiscal_year is None:
+            raise ValueError("可计算的比较包必须包含两个财年")
         return self
 
 
@@ -316,17 +405,184 @@ class ResearchPack(BaseModel):
     conflicts: list[str] = Field(default_factory=list)  # 发现的矛盾/冲突
 
 
+class AnalysisCompleteness(StrEnum):
+    """分析结果完整性状态（P06-09A）。
+
+    - ``COMPLETE``：分析数据完整，关键分析结果（facts 或 metrics）非空；
+    - ``PARTIAL``：只有部分可用结果，必须用 ``limitations`` 说明缺哪些数据及原因；
+    - ``UNAVAILABLE``：没有可用分析结果，必须提供 ``unavailable_reason``，
+      不得伪造财务指标（facts/metrics 必须为空）。
+    """
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
 class FinancialAnalysisPack(BaseModel):
-    """财报分析 Agent 的输出（workflow 步骤 04）。"""
+    """财报分析 Agent 的输出（workflow 步骤 04，schema v2）。
+
+    P06-09A 引入 ``completeness`` 三态（complete/partial/unavailable）：
+    - 旧版 ``version="analysis_pack_v1"`` 工件按宽松模式读取（兼容历史数据，不强行
+      套用新状态校验）；
+    - 新版 ``schema_version="analysis_pack_v2"`` 严格校验状态与内容是否一致；
+    - ``unavailable`` 是合法业务结果，不是系统异常：Writer 只报告数据不可用，
+      不得推断不存在的数据。
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    version: str = Field(min_length=1)  # 例如 "analysis_pack_v1"
+    version: str = Field(min_length=1)  # 例如 "analysis_pack_v2"
+    # P06-09A：显式 schema 版本标识（区别于旧 version 自由文本，供兼容读取分支判断）
+    schema_version: str = Field(default="analysis_pack_v2")
     period_end: date
-    facts: list[FinancialFact] = Field(min_length=1)
+    # P05.5-deploy-fix：允许空 facts——无可用财务事实时如实为空（报告据实标注数据限制），
+    # 而不是让整个流水线崩溃（LLM 输出空 facts 是真实边界情况）
+    facts: list[FinancialFact] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)
     analysis_notes: str | None = None
     limitations: list[str] = Field(default_factory=list)
+    # P06-09A：结果完整性状态；默认 partial 保持旧语义（允许空 facts+limitations）
+    completeness: AnalysisCompleteness = AnalysisCompleteness.PARTIAL
+    # P06-09A：unavailable 时必须提供的不可用原因；其它状态必须为空
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_schema_version(cls, data: object) -> object:
+        """旧版 ``version="analysis_pack_v1"`` 工件自动标记 schema_version=v1。
+
+        v1 无 ``completeness``/``schema_version`` 字段；读取历史工件时按旧语义
+        标记为 v1（宽松校验分支），不强行套用新状态规则。
+        """
+        if isinstance(data, dict):
+            if "schema_version" in data:
+                return data
+            version = data.get("version")
+            if isinstance(version, str) and version.endswith("_v1"):
+                data = {**data, "schema_version": "analysis_pack_v1"}
+        return data
+
+    @model_validator(mode="after")
+    def _validate_completeness(self) -> "FinancialAnalysisPack":
+        """跨字段校验：状态与内容必须一致（仅 v2 严格；v1 旧版宽松）。
+
+        - complete：关键分析结果（facts 或 metrics）不得为空；unavailable_reason 为空；
+        - partial：必须明确 limitations（说明缺哪些数据及原因）；unavailable_reason 为空；
+        - unavailable：必须提供 unavailable_reason；facts/metrics 必须为空（不得伪造指标）。
+        """
+        # v1 旧版工件：保持旧语义，不做新状态强制校验（兼容历史数据读取）。
+        if self.schema_version == "analysis_pack_v1":
+            return self
+
+        if self.completeness == AnalysisCompleteness.COMPLETE:
+            if not self.facts and not self.metrics:
+                raise ValueError("completeness=complete 时 facts 或 metrics 至少一项非空")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=complete 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.PARTIAL:
+            if not self.limitations:
+                raise ValueError("completeness=partial 时必须提供 limitations（缺失数据及原因）")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=partial 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.UNAVAILABLE:
+            if not self.unavailable_reason:
+                raise ValueError("completeness=unavailable 时必须提供 unavailable_reason")
+            if self.facts or self.metrics:
+                raise ValueError(
+                    "completeness=unavailable 时 facts/metrics 必须为空（不得伪造指标）"
+                )
+        return self
+
+
+class AnalysisSelectionDraft(BaseModel):
+    """财报分析 Agent 的“选择草稿”（P06-11C，仅限 JSON 文本本地校验路径）。
+
+    设计动机（LLM 选择，代码组装）：
+    - 不再要求 LLM 重新抄写完整 ``FinancialFact``（嵌套契约容易被模型丢弃，
+      如 DeepSeek JSON 文本路径丢 ``company_id`` → ``facts.0.company_id: Field
+      required``）；
+    - LLM 只返回一组 ``selected_fact_refs`` 引用，真正的 ``FinancialFact``
+      由 ``AnalysisPackAssembler`` 从原始可信预取事实中确定性取回；
+    - ``metric_results`` 仅承载确定性的指标计算引用（本任务范围：若无法安全捕获
+      FinancialCalculator 返回值，保持空并由 assembler 输出 partial 说明限制）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(min_length=1)  # 例如 "analysis_selection_draft_v1"
+    schema_version: str = Field(default="analysis_selection_draft_v1")
+    period_end: date
+    # LLM 选中的事实引用（稳定短 hash，由 build_fact_ref 确定性生成）。
+    # 允许为空：completeness=unavailable 时合法；重复引用由 assembler 幂等去重。
+    selected_fact_refs: list[str] = Field(default_factory=list)
+    # 确定性指标计算引用（本任务范围可能为空；非空时必须携带完整结果或在组装时丢弃）。
+    metric_results: list[MetricResult] = Field(default_factory=list)
+    analysis_notes: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    completeness: AnalysisCompleteness = AnalysisCompleteness.PARTIAL
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_selection_draft(self) -> "AnalysisSelectionDraft":
+        """跨字段校验：状态与内容一致（对齐 FinancialAnalysisPack v2 语义）。
+
+        - unavailable：selected_fact_refs/metric_results 必须为空，且必须有
+          unavailable_reason；
+        - partial：必须提供 limitations；
+        - complete：selected_fact_refs 或 metric_results 至少一项非空，
+          unavailable_reason 为空。
+        """
+        if self.completeness == AnalysisCompleteness.COMPLETE:
+            if not self.selected_fact_refs and not self.metric_results:
+                raise ValueError(
+                    "completeness=complete 时 selected_fact_refs 或 metric_results 至少一项非空"
+                )
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=complete 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.PARTIAL:
+            if not self.limitations:
+                raise ValueError("completeness=partial 时必须提供 limitations")
+            if self.unavailable_reason is not None:
+                raise ValueError("completeness=partial 时 unavailable_reason 必须为空")
+        elif self.completeness == AnalysisCompleteness.UNAVAILABLE:
+            if not self.unavailable_reason:
+                raise ValueError("completeness=unavailable 时必须提供 unavailable_reason")
+            if self.selected_fact_refs or self.metric_results:
+                raise ValueError(
+                    "completeness=unavailable 时 selected_fact_refs/metric_results 必须为空"
+                )
+        return self
+
+
+class ResearchSelectionDraft(BaseModel):
+    """信息搜集 Agent 的“选择草稿”（P06-11E，仅限 JSON 文本本地校验路径）。
+
+    设计动机（与 AnalysisSelectionDraft 对称）：
+    - LLM 不重新抄写完整 ``Source`` 契约，只返回一组 ``selected_source_urls``；
+    - 真正的 ``Source`` 由 ``ResearchPackAssembler`` 从可信预取/缓存
+      SEC 申报结果中确定性取回；
+    - 防止 DeepSeek JSON 文本路径丢失 ``canonical_url``/``source_type`` 等
+      必填字段（嵌套契约丢失）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(min_length=1)  # 例如 "research_selection_draft_v1"
+    schema_version: str = Field(default="research_selection_draft_v1")
+    as_of_date: date
+    # LLM 选中的来源 URL（从 prefetch 提供的可信来源集合中复制，禁止发明）。
+    # 允许为空（无来源时不得伪造 ResearchPack）。
+    selected_source_urls: list[str] = Field(default_factory=list)
+    coverage_notes: str | None = None
+    conflicts: list[str] = Field(default_factory=list)
+
+    @field_validator("selected_source_urls")
+    @classmethod
+    def _strip_urls(cls, value: list[str]) -> list[str]:
+        """逐项清理首尾空白并过滤空项（不修改 URL 内容）。"""
+        cleaned = [u.strip() for u in value if u and u.strip()]
+        return cleaned
 
 
 class ReportDraft(BaseModel):
@@ -349,4 +605,4 @@ class QualityReport(BaseModel):
     all_passed: bool
     issues: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    recommendation: str = Field(min_length=1)  # 例如 published / rejected
+    recommendation: QualityRecommendation  # 收紧为枚举（P03-16）

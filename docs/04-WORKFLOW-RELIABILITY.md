@@ -52,6 +52,44 @@ artifacts/{job_id}/
 | 06 质量检查 | draft + 所有 packs | `QualityReport` | schema、数字、引用、声明全部通过 |
 | 07 发布 | validated draft | `RunManifest` | 工件存在、checksum 一致、状态原子提交 |
 
+## 2.5 受控反思与修订闭环（Phase 3.5 补充）
+
+主流程仍是：Research → Analysis → Writer → **Quality Gate**。
+升级点：质量门禁不再只输出一个布尔，而是输出**结构化质量问题（QualityIssue）列表**，
+由受控路由（ReflectionController，P03-20）决定下一步唯一动作（不直接调 Agent）。
+
+### 路由决策（确定性）
+
+| 结构化问题 | 动作 | 下游 | 次数上限 | 终止条件 |
+|---|---|---|---|---|
+| 无问题 | PUBLISH | 07 发布 RunManifest | — | 发布 |
+| 仅非关键警告 | PUBLISH_PARTIAL | 07 发布（partial） | — | 发布（带警告） |
+| 章节/表述/免责声明等可修复 | REVISE_REPORT → Writer 定向修订 | 重新 Writer → 再跑质量门禁 | **修订 ≤1 次** | 修订后通过则发布；仍失败→REJECT |
+| 缺少关键证据 | SUPPLEMENT_RESEARCH → 补证请求 | Research 补证一次 → 重新 Analysis → 重写 Writer → 再跑质量门禁 | **补证 ≤1 次** | 补证后通过则发布；仍缺→REJECT |
+| 数字篡改 / 关键引用仍缺失 / 不可修复 / 次数耗尽 | REJECT | 终止，任务 partial/failed | — | 拒绝 |
+
+### 核心规则
+
+1. **Agent 不得互相调用**：所有返回与循环由 Flow + ReflectionController 控制（对齐 ADR-001）。
+2. **反思有界**：Writer 修订最多 1 次；补充研究最多 1 次。schema 格式重试与业务修订分别计数（格式重试见 guardrail P03-09，业务反思计数见 P03-20）。
+3. **不允许无限循环**：任何路径的请求总数受 `max_revision=1, max_supplement=1` 硬上限。
+4. **定向修订**：Writer 只修改被 QualityIssue 指出的问题；不得新增上游不存在的事实；不得修改 FinancialFact / MetricResult。
+5. **证据缺失不得猜测**：缺少证据必须删除结论或请求补证，不能编造。
+6. **每次产物保留**：每次报告草稿、质量报告、修订/补证请求及其原因都作为工件/结构化记录保留（供审计与 RunManifest）。
+7. **Quality Gate 仍是确定性代码**：不增加第四个"审核 Agent"。
+8. **fake 测试不调用真实模型**：P03-21 纯 fake 覆盖发布/修订/补证/拒绝四条路径。
+
+### 数据结构（P03-16 实现，详见该任务）
+
+- `QualitySeverity`：WARNING / ERROR / CRITICAL
+- `QualityAction`：NONE / REVISE_REPORT / SUPPLEMENT_RESEARCH / REANALYZE / REJECT
+- `QualityRecommendation`：PUBLISH / PUBLISH_PARTIAL / REVISE / REJECT
+- `QualityIssue`：code、severity、stage、message、action、related_claim、citation_key
+- `RevisionRequest`：issues、revision_number、original_draft_version、allowed_actions、forbidden_actions
+- `SupplementResearchRequest`：missing_evidence、related_claim、required_source_type、as_of_date、attempt_number
+
+> 字段取舍见 P03-16 任务；此处仅给最小契约。
+
 ## 3. 任务状态机
 
 ```mermaid

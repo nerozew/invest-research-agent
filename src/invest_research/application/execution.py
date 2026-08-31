@@ -1,0 +1,196 @@
+"""Worker 执行服务（P04-07：Worker 调用 Flow）。
+
+架构边界：
+- Worker 只接收 job_id；
+- 通过端口（Protocol）从 Repository 加载请求、更新状态、运行 Flow；
+- 本层不导入 SQLAlchemy/Celery/CrewAI——测试注入 fake 端口即可完全离线。
+
+状态机（对齐 docs/04 §3）：
+- mark_running 用"从 pending → running"的条件更新实现：仅当任务当前为
+  pending 时成功（返回 True），否则返回 False——这同时保证：
+  1. 正确处理 pending → running → 终态；
+  2. 防止已完成的 job 被重复执行（幂等，乐观锁语义）。
+- 成功完成 → mark_succeeded（从 running → 终态 succeeded）。
+- Flow 抛出任何异常 → mark_failed（从 running → 终态 failed），绝不把
+  任务永久留在 running（P05.5-deploy-fix：live 下 Analysis 空 facts 撞
+  schema 校验曾导致任务卡 running）。
+
+P06-07 前置修复：最终报告发布（ReportArtifactPublisher）在 Worker 成功获得
+Flow state 后、``mark_succeeded`` **之前**执行。发布失败（缺少草稿 /
+Markdown/PDF 渲染失败）走 ``mark_failed`` 并向上传播——任务状态反映真实
+发布结果，绝不把"报告渲染失败"误报成"完整发布成功"。
+
+P06-09：mark_failed 携带脱敏 error_code / error_message / failure_stage，
+经 ``failure_classifier`` 统一分类稳定错误码（SCHEMA_INVALID / TIMEOUT /
+NETWORK_TRANSIENT / RATE_LIMITED / UPSTREAM_5XX / AUTH_ERROR / INTERNAL_BUG）。
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Protocol
+
+from invest_research.application.failure_classifier import FailureInfo, classify_failure
+from invest_research.domain.models import ResearchRequest
+from invest_research.flows.state import ResearchFlowState
+
+__all__ = [
+    "ExecutionStatusWriter",
+    "ExecuteResearchJobService",
+    "FlowRunner",
+    "JobRequestLoader",
+    "ReportPublisher",
+]
+
+
+class JobRequestLoader(Protocol):
+    """从存储加载任务的原始请求；不存在返回 None。"""
+
+    def load(self, job_id: uuid.UUID) -> ResearchRequest | None: ...
+
+
+class ExecutionStatusWriter(Protocol):
+    """把任务状态推进到终态的条件更新端口。
+
+    P06-09：``mark_failed`` 携带脱敏错误信息（error_code / error_message /
+    failure_stage），供 failed Job 展示与审计；调用方必须传脱敏后的文本。
+    """
+
+    def mark_running(self, job_id: uuid.UUID) -> bool: ...
+    def mark_succeeded(self, job_id: uuid.UUID) -> None: ...
+    def mark_failed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error_code: str = "INTERNAL_BUG",
+        error_message: str = "",
+        failure_stage: str | None = None,
+    ) -> None: ...
+
+
+class FlowRunner(Protocol):
+    """执行研究 Flow 的端口（生产实现包装 ResearchFlow；测试用 fake）。
+
+    P06-07 前置修复：``run`` 返回最终 ``ResearchFlowState``，供 Worker
+    在成功路径发布最终报告工件（fake/live 共用）。
+    """
+
+    def run(self, request: ResearchRequest) -> ResearchFlowState: ...
+
+
+class ReportPublisher(Protocol):
+    """最终报告发布端口（P06-07 前置修复）。
+
+    实现：``reporting.artifact_publisher.ReportArtifactPublisher``（fake/live 共用）。
+    失败抛 ``ReportArtifactPublishError``——调用方把任务标记为 failed。
+    """
+
+    def publish(self, job_id: uuid.UUID, state: ResearchFlowState) -> list[dict[str, object]]: ...
+
+
+def _classify_for_job(exc: Exception, *, fallback_stage: str | None = None) -> FailureInfo:
+    """把异常分类为 Job 失败三元组；优先取异常自带的 stage，否则用回退 stage。"""
+    stage = getattr(exc, "failure_stage", None) or fallback_stage
+    return classify_failure(exc, stage=stage)
+
+
+def _log_job_event(
+    event: str,
+    job_id: uuid.UUID,
+    error_code: str | None,
+    stage: str | None,
+) -> None:
+    """P06-09C：Job 生命周期结构化日志事件。
+
+    - 函数内 lazy import（保持依赖方向 infrastructure -> application 不被破坏）；
+    - extra 只含低基数/非敏感字段（job_id/stage/error_code/trace_id/span_id）；
+    - trace_id/span_id 取自当前 OTel span context（无则被 structured_extra 剔除）。
+    """
+    import logging
+
+    from invest_research.infrastructure.observability.logging import (
+        span_id_from_context,
+        structured_extra,
+    )
+    from invest_research.infrastructure.observability.tracing import trace_id_from_context
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        event,
+        extra=structured_extra(
+            job_id=str(job_id),
+            stage=stage,
+            error_code=error_code,
+            trace_id=trace_id_from_context(),
+            span_id=span_id_from_context(),
+        ),
+    )
+
+
+class ExecuteResearchJobService:
+    """执行一个投研任务的用例（P04-07）。
+
+    process(job_id) 语义：
+    1. mark_running 失败（任务不是 pending，可能已被其他 worker 处理/已终态）
+       → 直接返回，绝不重复执行；
+    2. 加载请求失败（任务已删除）→ 直接返回；
+    3. 调用 Flow 运行；运行抛异常 → mark_failed(error_code/error_message/
+       failure_stage) 后向上传播（P06-09 稳定错误分类）；
+    4. Flow 成功后发布最终报告（可选注入 publisher）；发布失败 → mark_failed
+       并向上传播（真实发布结果，不误报完整发布成功）；
+    5. 全部成功 → mark_succeeded（进入终态）。
+    """
+
+    def __init__(
+        self,
+        *,
+        loader: JobRequestLoader,
+        writer: ExecutionStatusWriter,
+        flow_runner: FlowRunner,
+        report_publisher: ReportPublisher | None = None,
+    ) -> None:
+        self._loader = loader
+        self._writer = writer
+        self._flow_runner = flow_runner
+        self._report_publisher = report_publisher
+
+    def process(self, job_id: uuid.UUID) -> None:
+        # 只有 pending 的任务才从 mark_running 拿到 True（防止重复执行/已完成任务）。
+        if not self._writer.mark_running(job_id):
+            return
+        request = self._loader.load(job_id)
+        if request is None:
+            return
+        try:
+            state = self._flow_runner.run(request)
+        except Exception as exc:
+            # P06-09：统一异常分类（SCHEMA_INVALID/TIMEOUT/NETWORK_TRANSIENT/...）
+            # + failure_stage（异常可能带 stage 属性，见 LiveFlowExecutionError）。
+            failure = _classify_for_job(exc)
+            self._writer.mark_failed(
+                job_id,
+                error_code=failure.error_code,
+                error_message=failure.error_message,
+                failure_stage=failure.failure_stage,
+            )
+            # P06-09C：结构化失败日志事件（trace_id 关联 Jaeger 链路；无则 None）
+            _log_job_event("job_flow_failed", job_id, failure.error_code, failure.failure_stage)
+            raise
+        # P06-07 前置修复：最终报告发布必须先于 mark_succeeded。
+        # 发布失败（缺少草稿/渲染失败）→ mark_failed，不误报完整发布成功。
+        if self._report_publisher is not None:
+            try:
+                self._report_publisher.publish(job_id, state)
+            except Exception as exc:
+                failure = _classify_for_job(exc, fallback_stage="report_publish")
+                self._writer.mark_failed(
+                    job_id,
+                    error_code=failure.error_code,
+                    error_message=failure.error_message,
+                    failure_stage=failure.failure_stage,
+                )
+                _log_job_event("job_flow_failed", job_id, failure.error_code, failure.failure_stage)
+                raise
+        self._writer.mark_succeeded(job_id)
+        # P06-09C：结构化成功日志事件（trace_id 关联 Jaeger 链路）
+        _log_job_event("job_flow_succeeded", job_id, None, None)

@@ -1,0 +1,97 @@
+{
+  "schema_version": "live_dataset_v1",
+  "generated_on": "fixed",
+  "note": "P06-11 简历证据集：排除已反复测试的 AAPL/MSFT；固定 10 家公司、固定 as_of_date。paired repeats=2 时形成 20 个 fast/deep 配对（40 jobs）。XOM 因当前主体 CIK 变更及历史 as-of 可比性风险不纳入本数据集。",
+  "cases": [
+    {
+      "case_id": "resume-amzn",
+      "ticker": "AMZN",
+      "company": "Amazon.com Inc.",
+      "sector": "ecommerce",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-jpm",
+      "ticker": "JPM",
+      "company": "JPMorgan Chase & Co.",
+      "sector": "banking",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-jnj",
+      "ticker": "JNJ",
+      "company": "Johnson & Johnson",
+      "sector": "healthcare",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-wmt",
+      "ticker": "WMT",
+      "company": "Walmart Inc.",
+      "sector": "retail",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-ba",
+      "ticker": "BA",
+      "company": "The Boeing Company",
+      "sector": "aerospace",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-ko",
+      "ticker": "KO",
+      "company": "The Coca-Cola Company",
+      "sector": "consumer_goods",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-tsla",
+      "ticker": "TSLA",
+      "company": "Tesla Inc.",
+      "sector": "automotive",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-nvda",
+      "ticker": "NVDA",
+      "company": "NVIDIA Corporation",
+      "sector": "semiconductors",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-hd",
+      "ticker": "HD",
+      "company": "The Home Depot, Inc.",
+      "sector": "home_improvement_retail",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    },
+    {
+      "case_id": "resume-cat",
+      "ticker": "CAT",
+      "company": "Caterpillar Inc.",
+      "sector": "industrials",
+      "as_of_date": "2025-10-31",
+      "language": "zh-CN",
+      "requested_forms": ["10-K", "10-Q"]
+    }
+  ]
+}

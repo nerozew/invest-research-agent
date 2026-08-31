@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from conftest import db_integration_enabled
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,21 +24,9 @@ from invest_research.infrastructure.db.repositories import (
 
 RepoEnv = tuple[JobRepository, StepRepository, ArtifactRepository, sessionmaker[Session]]
 
-
-def _docker_available() -> bool:
-    try:
-        from docker import from_env  # type: ignore[import-untyped]
-
-        client = from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = pytest.mark.skipif(
-    not _docker_available() or os.environ.get("SKIP_DB_TESTS") == "1",
-    reason="需要运行时 Docker（testcontainers）",
+    not db_integration_enabled(),
+    reason="需要运行时 Docker（testcontainers）或 TEST_DATABASE_URL",
 )
 
 
@@ -57,14 +45,6 @@ def env(pg_container_url: str) -> RepoEnv:
         ArtifactRepository(session_factory),
         session_factory,
     )
-
-
-@pytest.fixture(scope="module")
-def pg_container() -> Iterator[str]:
-    from testcontainers.community.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as postgres:
-        yield postgres.get_connection_url()
 
 
 @pytest.fixture(scope="module")

@@ -235,6 +235,42 @@ G. 等待我确认的问题
 如果建议变更，请先草拟一份 ADR，列出受影响的任务和迁移顺序。等我确认后再改文档或代码。
 ```
 
+## 11.5 Streamlit 单任务开发提示词（P04-UI）
+
+只用于实现 `docs/05-DEVELOPMENT-ROADMAP.md` 中 **Phase 4 UI（P04-UI-xx）** 的单个任务。
+Streamlit 只是 FastAPI 的 HTTP 客户端，禁止直接访问数据库/Redis，禁止直接调用 CrewAI Flow。
+
+```text
+请只执行 docs/05-DEVELOPMENT-ROADMAP.md 中的 Phase 4 UI 任务 {P04-UI-xx}。
+
+开始前：
+1. 先阅读 docs/01-PRD.md §14（前端 MVP）、docs/02-ARCHITECTURE.md §11（前端边界）、
+   docs/05-DEVELOPMENT-ROADMAP.md Phase 4 UI 表格及其依赖的后端接口。
+2. 检查当前文件与 git diff，保留已有修改；用 3–6 条列出实施计划。
+3. 确认本任务依赖的后端接口已就绪；未就绪则停止并提出拆分。
+
+前端规则（强制）：
+- 只调用 FastAPI；API 地址通过环境变量配置，不写死。
+- 创建任务必须携带客户端 Idempotency-Key。
+- 页面不负责业务判断与财务计算；展示与调用 API 之外的逻辑放 typed client。
+- 不在 st.session_state 保存密钥；不显示数据库连接字符串、Redis URL、内部文件路径。
+- 不绕过 FastAPI 下载文件；工件只能经后端安全下载接口。
+- 不引入 React、Vue、Node.js；不实现登录、权限系统和复杂响应式设计。
+
+测试要求：
+- 使用 fake HTTP API（httpx MockTransport / 自定义 fake client），
+  不依赖真实数据库、Redis、Docker 或模型，全程离线可复现。
+- 先写或同步写测试；不得用删除测试、降低断言、跳过检查来制造通过。
+
+验收：
+- 运行本任务相关的最小测试、lint 和类型检查；命令失败要说明根因并在范围内修复。
+- 只有实际通过才把路线中该行任务 ID 改为 `P04-UI-xx ✅`。
+
+汇报并停止：
+- 修改文件清单、客户端/页面结构与 fake HTTP 测试结果。
+- 给出 3 个知识点和一个检查问题，然后停止，等待我确认。
+```
+
 ## 12. 运行时三个 Agent 的 prompt 骨架
 
 这些不是给 Cline 的开发提示词，而是将来写进 `src/.../prompts/` 的运行时模板。实现时应由 schema 和程序注入输入，不能靠自由文本拼接不可信内容。
@@ -288,6 +324,51 @@ G. 等待我确认的问题
 - 遇到冲突或缺失，写进限制章节，不能静默隐藏。
 - 输出必须符合 ReportDraft schema，最终 Markdown 由模板渲染器生成。
 ```
+
+## 12.4 Phase 3.5 运行时提示词骨架（受控反思与修订闭环）
+
+这些不是在开发时给 Cline 的提示词，而是将来写进 `src/.../prompts/` 的运行时模板
+（P03-18 / P03-19 实现）。程序由 schema 注入输入，不能靠自由文本拼接不可信内容。
+
+### 12.4.1 writer_revision_prompt_v1（P03-18）
+
+```text
+角色：你是负责定向修订的研究报告编辑。
+目标：只修复 RevisionRequest.issues 指出的问题，生成修订版 ReportDraft。
+唯一可用的输入：
+- 原始 research_pack（ResearchPack）
+- 原始 analysis_pack（FinancialAnalysisPack）
+- 本次 RevisionRequest（issues / revision_number / original_draft_version）
+
+规则：
+- 只能修改被 QualityIssue 指出的章节/表述/免责声明问题；
+- 不得新增上游不存在的事实或数字；
+- 不得修改 FinancialFact 与 MetricResult 的任何值；
+- 必须保留已有且仍有效的引用（citation_keys）；
+- 证据不足时不猜测：删除无法支撑的结论，或在报告中列为"证据不足"；
+- 若无法完成定向修订，明确返回"无法修订"（交由 Flow 路由到 REJECT）。
+
+禁止：添加新来源、修改原始数字、引入买卖建议/目标价、删除"非投资建议"声明。
+```
+
+### 12.4.2 research_supplement_prompt_v1（P03-19）
+
+```text
+角色：你是按需补证的公开信息研究员。
+目标：只搜集 SupplementResearchRequest.missing_evidence 指定的证据，产出结构化补充来源。
+不允许：
+- 重做全部研究；
+- 写出财务分析结论（那是 Analysis 的职责）；
+- 绕过 as_of_date。
+
+要求：
+- 只检索 required_source_type 指定的来源类型（如 sec_filing / web / company_ir）；
+- 遵守 as_of_date，只用当日或之前的信息；
+- 返回结构化补充来源（标题/URL/发布时间/访问时间）；
+- 找不到时如实返回"未找到"，不得编造。
+```
+
+---
 
 ## 13. 简历提示词（项目完成后才能用）
 

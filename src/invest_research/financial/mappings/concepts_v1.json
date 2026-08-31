@@ -1,0 +1,104 @@
+{
+  "version": "concept_mapping_v1",
+  "entries": [
+    {
+      "metric_name": "revenue",
+      "candidates": [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "Revenue"
+      ]
+    },
+    {
+      "metric_name": "gross_profit",
+      "candidates": [
+        "GrossProfit",
+        "GrossProfitFromContractWithCustomerExcludingAssessedTax"
+      ]
+    },
+    {
+      "metric_name": "operating_income",
+      "candidates": [
+        "OperatingIncomeLoss",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+      ]
+    },
+    {
+      "metric_name": "net_income",
+      "candidates": [
+        "NetIncomeLoss",
+        "ProfitLoss"
+      ]
+    },
+    {
+      "metric_name": "current_assets",
+      "candidates": [
+        "AssetsCurrent",
+        "CurrentAssets"
+      ]
+    },
+    {
+      "metric_name": "current_liabilities",
+      "candidates": [
+        "LiabilitiesCurrent",
+        "CurrentLiabilities"
+      ]
+    },
+    {
+      "metric_name": "total_assets",
+      "candidates": [
+        "Assets",
+        "TotalAssets"
+      ]
+    },
+    {
+      "metric_name": "total_liabilities",
+      "candidates": [
+        "Liabilities",
+        "TotalLiabilities"
+      ]
+    },
+    {
+      "metric_name": "stockholders_equity",
+      "candidates": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+      ]
+    },
+    {
+      "metric_name": "operating_cash_flow",
+      "candidates": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+      ]
+    },
+    {
+      "metric_name": "capital_expenditure",
+      "candidates": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets"
+      ]
+    },
+    {
+      "metric_name": "earnings_per_share_basic",
+      "candidates": [
+        "EarningsPerShareBasic",
+        "IncomeLossFromContinuingOperationsPerBasicShare"
+      ]
+    },
+    {
+      "metric_name": "cost_of_goods_sold",
+      "candidates": [
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold"
+      ]
+    },
+    {
+      "metric_name": "liabilities_and_equity",
+      "candidates": [
+        "LiabilitiesAndStockholdersEquity"
+      ]
+    }
+  ]
+}

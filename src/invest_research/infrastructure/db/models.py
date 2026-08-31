@@ -72,12 +72,18 @@ class ResearchJob(Base):
     as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="zh-CN")
     requested_forms: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # P06-06A：每任务研究档位（fast/deep），默认 deep（旧数据兼容）
+    research_profile: Mapped[str] = mapped_column(String(10), nullable=False, default="deep")
+    # P07-10A：Worker 只收到 job_id，必须从持久化模式选择正确运行时。
+    research_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="legacy")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     current_step: Mapped[str | None] = mapped_column(String(50), nullable=True)
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P06-09：失败发生阶段（如 04_analysis / 05_writer / report_publish）
+    failure_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -405,4 +411,137 @@ class Artifact(Base):
     storage_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
     content_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutboxEvent(Base):
+    """outbox_events：Transactional Outbox（P05-03B）。
+
+    与 Job 创建同事务写入（SqlJobStore.create 一个 commit 内写 ResearchJob +
+    OutboxEvent），保证「数据库创建成功」与「事件可投递」原子一致。
+
+    - event_type：事件类型（当前仅 ``job_created``）；
+    - status：``pending``（待投递）/ ``claimed``（已被某 relay 领取，投递中）/
+      ``sent``（已投递成功）/ ``failed``（重试达上限）；
+    - attempts：累计投递尝试次数，超过 max_attempts 转 failed；
+    - UNIQUE(job_id, event_type)：同一 job 的同一事件只写一次，天然防重复入队。
+    """
+
+    __tablename__ = "outbox_events"
+    __table_args__ = (UniqueConstraint("job_id", "event_type", name="uq_outbox_events_job_event"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# P07-10 年度 DAG 节点（独立于 workflow_steps / outbox_events）
+# ---------------------------------------------------------------------------
+
+
+class AnnualResearchNode(Base):
+    """年度研究 DAG 的节点事实来源；每个 job 内 node_key 唯一。"""
+
+    __tablename__ = "annual_research_nodes"
+    __table_args__ = (
+        UniqueConstraint("job_id", "node_key", name="uq_annual_research_nodes_job_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    node_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    output_artifact_keys: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnnualNodeDependency(Base):
+    """同一 job 内的年度 DAG 有向边；环由应用层完整校验。"""
+
+    __tablename__ = "annual_node_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "upstream_node_id",
+            "downstream_node_id",
+            name="uq_annual_node_dependencies_edge",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    upstream_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("annual_research_nodes.id", ondelete="CASCADE"), nullable=False
+    )
+    downstream_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("annual_research_nodes.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AnnualNodeEvent(Base):
+    """年度节点追加式审计事件；payload 由存储层白名单过滤。"""
+
+    __tablename__ = "annual_node_events"
+    __table_args__ = (
+        UniqueConstraint("node_id", "event_no", name="uq_annual_node_events_node_sequence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("annual_research_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    previous_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IdempotencyKeyRow(Base):
+    """idempotency_keys：Idempotency-Key → 已创建任务（P04-10A 生产幂等池）。
+
+    - key 唯一：数据库 UNIQUE 约束兜底，防止并发下同一 key 创建两个任务；
+    - request_fingerprint：请求体规范化指纹，判断同 key 是否同一请求（同请求复用，
+      异请求 409）；
+    - status 冗余保存创建时刻任务状态，供幂等复用返回。
+    """
+
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (UniqueConstraint("key", name="uq_idempotency_keys_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(200), nullable=False)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("research_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

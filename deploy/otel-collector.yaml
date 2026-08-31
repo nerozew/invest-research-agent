@@ -1,0 +1,39 @@
+# OpenTelemetry Collector 本地配置（P06-05 + P06-06）
+#
+# 用途：在本地聚合 API / Worker / Flow / Tool 的 OTLP trace：
+#   - 接收：OTLP HTTP（4318，应用通过 OTEL_EXPORTER_OTLP_ENDPOINT 上报）；
+#   - 导出：debug（collector 控制台打印）+ Jaeger（最小 trace 后端，P06-06）；
+#   - health_check extension（13133）供 Docker Compose 健康检查使用。
+#
+# Docker Compose（P06-06）：
+#   docker compose --profile observability up -d
+#   应用 trace 自动经 otel-collector:4318 进入本 collector，再转发 Jaeger。
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: normal
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlp/jaeger]

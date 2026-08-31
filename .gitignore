@@ -23,7 +23,16 @@
 !/uv.lock
 !/.python-version
 !/docker-compose.yml
+!/Dockerfile
+!/compose.yml
+!/.dockerignore
+!/.github/
+!/.github/**
 !/.env.example
+!/alembic.ini
+!/frontend/
+!/scripts/
+!/deploy/
 
 # ---------- 密钥与敏感信息（任何层级防御）----------
 .env
@@ -85,3 +94,6 @@ artifacts/
 *.db
 *.sqlite
 *.sqlite3
+# 基准运行输出（可复现产物，不入库；数据集定义 evals/*.json 保留）
+evals/live_runs/
+evals/runs/

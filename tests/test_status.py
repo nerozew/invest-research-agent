@@ -115,16 +115,17 @@ def test_step_is_terminal() -> None:
 
 
 def test_error_code_count() -> None:
-    """必须包含全部 11 个错误码。"""
-    assert len(ErrorCode) == 11
+    """必须包含 P06-11G 后用于稳定归因的全部 23 个错误码。"""
+    assert len(ErrorCode) == 23
 
 
 def test_retryable_error_codes() -> None:
-    """可重试错误码：RATE_LIMITED/NETWORK_TRANSIENT/UPSTREAM_5XX/SCHEMA_INVALID。"""
+    """可重试错误码：RATE_LIMITED/NETWORK_TRANSIENT/UPSTREAM_5XX/TIMEOUT/SCHEMA_INVALID。"""
     retryable = {
         ErrorCode.RATE_LIMITED,
         ErrorCode.NETWORK_TRANSIENT,
         ErrorCode.UPSTREAM_5XX,
+        ErrorCode.TIMEOUT,
         ErrorCode.SCHEMA_INVALID,
     }
     for code in retryable:
