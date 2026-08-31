@@ -139,7 +139,9 @@ _LABELS: dict[str, str] = {
     # 银行业——资产负债表
     "Cash and due from banks": "现金及存放同业款项",
     "Deposits with banks": "存放同业款项",
-    "Federal funds sold and securities purchased under resale agreements": "联邦基金出售及回购协议下买入证券",
+    "Federal funds sold and securities purchased under resale agreements": (
+        "联邦基金出售及回购协议下买入证券"
+    ),
     "Securities borrowed": "借入证券",
     "Trading assets": "交易性资产",
     "Available-for-sale securities": "可供出售证券",
@@ -151,9 +153,10 @@ _LABELS: dict[str, str] = {
     "Accrued interest and accounts receivable": "应计利息及应收账款",
     "Premises and equipment": "房产及设备",
     "Goodwill, MSRs and other intangible assets": "商誉、抵押服务权及其他无形资产",
-    "Other assets": "其他资产",
     "Deposits": "存款",
-    "Federal funds purchased and securities loaned or sold under repurchase agreements": "联邦基金购入及证券贷出或回购协议下卖出",
+    "Federal funds purchased and securities loaned or sold under repurchase agreements": (
+        "联邦基金购入及证券贷出或回购协议下卖出"
+    ),
     "Short-term borrowings": "短期借款",
     "Trading liabilities": "交易性负债",
     "Accounts payable and other liabilities": "应付账款及其他负债",
@@ -164,12 +167,15 @@ _LABELS: dict[str, str] = {
     "Operating activities": "经营活动",
     "Investing activities": "投资活动",
     "Financing activities": "筹资活动",
-    "Adjustments to reconcile net income to net cash provided by operating activities": "将净利润调节为经营活动现金流量净额的调整项",
     "Deferred tax (benefit)/expense": "递延所得税（收益）/费用",
-    "Estimated bargain purchase gain associated with the First Republic acquisition": "First Republic 收购相关估计廉价收购利得",
+    "Estimated bargain purchase gain associated with the First Republic acquisition": (
+        "First Republic 收购相关估计廉价收购利得"
+    ),
     "Initial gain on the Visa share exchange": "Visa 股份交换初始利得",
     "Originations and purchases of loans held-for-sale": "持有待售贷款发放及购买",
-    "Proceeds from sales, securitizations and paydowns of loans held-for-sale": "持有待售贷款出售、证券化及还款所得",
+    "Proceeds from sales, securitizations and paydowns of loans held-for-sale": (
+        "持有待售贷款出售、证券化及还款所得"
+    ),
     "Net change in:": "净变动：",
     "Other operating adjustments": "其他经营调整",
     "Net cash (used in)/provided by operating activities": "经营活动现金流量净额",
@@ -178,7 +184,9 @@ _LABELS: dict[str, str] = {
     "Purchases": "购买",
     "Available-for-sale securities:": "可供出售证券：",
     "Proceeds from sales": "出售所得",
-    "Proceeds from sales and securitizations of loans held-for-investment": "持有至投资贷款出售及证券化所得",
+    "Proceeds from sales and securitizations of loans held-for-investment": (
+        "持有至投资贷款出售及证券化所得"
+    ),
     "Other changes in loans, net": "其他贷款变动净额",
     "Net cash used in First Republic Acquisition": "First Republic 收购使用现金净额",
     "All other investing activities, net": "其他投资活动净额",
@@ -190,10 +198,18 @@ _LABELS: dict[str, str] = {
     "Treasury stock repurchased": "库存股回购",
     "All other financing activities, net": "其他筹资活动净额",
     "Net cash provided by/(used in) financing activities": "筹资活动现金流量净额",
-    "Effect of exchange rate changes on cash and due from banks and deposits with banks": "汇率变动对现金及存放同业款项的影响",
-    "Net increase/(decrease) in cash and due from banks and deposits with banks": "现金及存放同业款项净增加（减少）",
-    "Cash and due from banks and deposits with banks at the beginning of the period": "期初现金及存放同业款项",
-    "Cash and due from banks and deposits with banks at the end of the period": "期末现金及存放同业款项",
+    "Effect of exchange rate changes on cash and due from banks and deposits with banks": (
+        "汇率变动对现金及存放同业款项的影响"
+    ),
+    "Net increase/(decrease) in cash and due from banks and deposits with banks": (
+        "现金及存放同业款项净增加（减少）"
+    ),
+    "Cash and due from banks and deposits with banks at the beginning of the period": (
+        "期初现金及存放同业款项"
+    ),
+    "Cash and due from banks and deposits with banks at the end of the period": (
+        "期末现金及存放同业款项"
+    ),
     "Cash interest paid": "支付利息现金",
     "Cash income taxes paid, net": "支付所得税现金净额",
 }
