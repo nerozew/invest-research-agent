@@ -6,6 +6,8 @@ Ruling 1：表头 = 原表首行（真实表头，如 "Year Ended" + 各财年�
 
 from __future__ import annotations
 
+import pytest
+
 from invest_research.financial.annual_statements import FinancialStatementKind
 from invest_research.financial.html_statement_extractor import HtmlStatement
 from invest_research.financial.statement_cn_labels import translate_statement_row
@@ -174,6 +176,49 @@ def test_render_merges_consecutive_number_cells_in_one_year_column() -> None:
     md = render_html_statements((stmt,))
     assert "1,234,567" in md  # 两格数值合并为一个值，而非当作两个财年
     assert "| 现金及现金等价物 | 1,234,567 | 30,708 |" in md
+
+
+def test_render_does_not_merge_adjacent_fiscal_year_values() -> None:
+    """Finding 1：相邻两个财年的数值格（无空列分隔）不得被拼接为一个值。
+
+    审阅者实测：表头纯 4 位年份、数据行 ``('现金及现金等价物', '1,23', '4,567', '30,708')``
+    时，旧的合并逻辑把三格拼成 ``1,234,56730,708`` 导致第一年拼错、第二年丢失。
+    正确行为：仅当拼接结果仍是合法数字才合并（``1,23``+``4,567`` = ``1,234,567``），
+    跨财年的 ``30,708`` 必须保留为独立值。
+    """
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.BALANCE_SHEET,
+        rows=(
+            ("2024", "2025"),
+            ("现金及现金等价物", "1,23", "4,567", "30,708"),
+        ),
+        year_columns=("2024", "2025"),
+        source_table_index=0,
+    )
+    md = render_html_statements((stmt,))
+    assert "1,234,56730,708" not in md  # 不得把相邻两财年拼成一个错值
+    assert "| 现金及现金等价物 | 1,234,567 | 30,708 |" in md  # 两个财年各自保留
+
+
+def test_render_warns_when_value_cells_exceed_years() -> None:
+    """Finding 3：数据行数值格数超过年份数时发出告警，不静默丢数。
+
+    行结构不一致（如小计列/额外数值列）导致 3 个数值格仅对应 2 个年份列时，
+    超出部分被截断前必须以告警形式提示，不能无声丢弃有效数字。
+    """
+    stmt = HtmlStatement(
+        kind=FinancialStatementKind.BALANCE_SHEET,
+        rows=(
+            ("2024", "2025"),
+            ("现金及现金等价物", "1,234", "5,678", "9,876"),
+        ),
+        year_columns=("2024", "2025"),
+        source_table_index=0,
+    )
+    with pytest.warns(UserWarning, match="超过年份数"):
+        md = render_html_statements((stmt,))
+    assert "1,234" in md
+    assert "5,678" in md
 
 
 def test_render_applies_extra_labels_for_missing_rows() -> None:

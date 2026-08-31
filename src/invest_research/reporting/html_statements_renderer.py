@@ -8,6 +8,8 @@ Ruling 1：真实表头即原表首行 rows[0]（首格为行名列→译中文�
 
 from __future__ import annotations
 
+import warnings
+
 from invest_research.financial.html_statement_extractor import HtmlStatement, _looks_like_year
 from invest_research.financial.statement_cn_labels import translate_statement_row
 
@@ -46,6 +48,33 @@ def _looks_like_number(text: str) -> bool:
     return any(ch.isdigit() for ch in text)
 
 
+def _is_well_formed_number(text: str) -> bool:
+    """数值文本是否为合规千分位数字（限制数值格合并）。
+
+    仅当相邻数值格拼接后仍是规范数字时才允许合并——否则会把相邻两个财年的值
+    无依据地拼成一个错值。例：``"1,23"``+``"4,567"`` = ``"1,234,567"`` 合法（GOOGL
+    ``数字[x2]`` 拆格），再拼 ``"30,708"`` 成 ``"1,234,56730,708"`` 出现 5 位千分位组
+    即非法，说明跨到了下一个财年，不得继续合并。
+    """
+    s = text.strip()
+    if not s or not _looks_like_number(s):
+        return False
+    body = s.lstrip("$").replace(",", "").replace("%", "")
+    if body.startswith("(") and body.endswith(")"):
+        body = body[1:-1]
+    if not body.replace(".", "").replace("-", "").replace("+", "").isdigit():
+        return False
+    # 千分位逗号组校验：整数部分每个逗号组 ≤3 位数字。
+    int_part = s.lstrip("$").replace("%", "").split(".", 1)[0]
+    int_part = (
+        int_part.replace("(", "").replace(")", "").replace("-", "").replace("+", "").strip()
+    )
+    return all(
+        len("".join(ch for ch in group if ch.isdigit())) <= 3
+        for group in int_part.split(",")
+    )
+
+
 def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str]:
     """从数据行数值格按顺序提取每个财年的值。
 
@@ -53,10 +82,28 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
     空列跳过；同一财年列（锚点区间）内连续数值格合并为一个值（GOOGL 原表
     ``数字[x2]`` colspan 会把 $+数字拆两格），避免被当作两个财年造成静默错位；
     数值不足 n_years 时用 ``·`` 补齐（不产生 N/A 噪音）。
+
+    合并限制：连续数值格只在拼接结果仍是规范数字（``_is_well_formed_number``）
+    且合并后剩余格数仍足以填满其余年份时才会继续——否则会把相邻两个财年的值
+    无依据地拼成一个错值（Finding 1）。数值格数超出 n_years 时发出告警而不是
+    无声丢弃有效数字（Finding 3）。
     """
     tokens: list[str] = []
     i = 0
     n = len(value_cells)
+    # 可作为独立值的格（非空、非 $）：用于约束合并不得"饿死"后续年份。
+    value_flags = [bool(cell.strip()) and cell.strip() != "$" for cell in value_cells]
+    suffix_value_count = [0] * (n + 1)
+    for k in range(n - 1, -1, -1):
+        suffix_value_count[k] = suffix_value_count[k + 1] + (1 if value_flags[k] else 0)
+
+    def _can_merge(j: int, candidate: str) -> bool:
+        """合并到下标 j 是否可接受：结果须为合法数字，且剩余格数够填剩余年份。"""
+        if not _is_well_formed_number(candidate):
+            return False
+        remaining_needed = n_years - len(tokens) - 1
+        return suffix_value_count[j + 1] >= remaining_needed
+
     while i < n:
         cell = value_cells[i].strip()
         if not cell:
@@ -71,7 +118,10 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
                 value = "$" + value_cells[j].strip()
                 j += 1
                 while j < n and _looks_like_number(value_cells[j]):
-                    value += value_cells[j].strip()
+                    candidate = value + value_cells[j].strip()
+                    if not _can_merge(j, candidate):
+                        break
+                    value = candidate
                     j += 1
                 tokens.append(value)
                 i = j
@@ -81,15 +131,27 @@ def _extract_year_values(value_cells: tuple[str, ...], n_years: int) -> list[str
         if _looks_like_number(cell):
             value = cell
             j = i + 1
-            # 连续数值格合并为一个值（数字[x2] 结构），如 ["1,23", "4,567"] → "1,234,567"。
+            # 连续数值格合并为一个值（数字[x2] 结构），如 ["1,23", "4,567"] → "1,234,567"；
+            # 但仅当拼接结果仍是规范数字且不挤占后续年份的格数时继续。
             while j < n and _looks_like_number(value_cells[j]):
-                value += value_cells[j].strip()
+                candidate = value + value_cells[j].strip()
+                if not _can_merge(j, candidate):
+                    break
+                value = candidate
                 j += 1
             tokens.append(value)
             i = j
             continue
         i += 1
-    # 对齐到 n_years：不足补 ·，超出截断。
+    if len(tokens) > n_years:
+        warnings.warn(
+            "数据行数值格超过年份数："
+            f"提取到 {len(tokens)} 个值但只有 {n_years} 个年份列，"
+            f"尾部 {tokens[n_years:]} 被截断",
+            UserWarning,
+            stacklevel=2,
+        )
+    # 对齐到 n_years：不足补 ·，超出截断（截断前已告警）。
     return (tokens + ["·"] * n_years)[:n_years]
 
 
