@@ -90,6 +90,9 @@ Desktop.ini
 # ---------- 个人面试/简历材料（给自己看，不上传）----------
 docs/RESUME-BULLETS.md
 docs/32-AGENT-RESUME-INTERVIEW-20260831.md
+docs/06-CLINE-PROMPTS.md
+docs/13-ERRORS-REVIEW.md
+docs/18-AGENT-WORKFLOW-RELIABILITY-NOTES.md
 
 # ---------- 本地工件与数据 ----------
 artifacts/
